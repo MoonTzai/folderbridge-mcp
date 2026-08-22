@@ -38,7 +38,9 @@ EXACT_PERMISSIONS = {
     "workspace.write",
     "workspace.adapter",
     "extension.state",
+    "git.commit-selected-files",
     "git.push-current-branch",
+    "github.web-auth",
 }
 
 

@@ -2,6 +2,26 @@
 
 All notable changes to FolderBridge MCP are documented here.
 
+## 0.5.1 — 2026-08-23
+
+- Added the bundled **Git Publisher** extension behind the stable `extension` gateway, with explicit `github.web-auth`, `git.commit-selected-files`, and `git.push-current-branch` permissions.
+- Added browser-based GitHub authorization through Git Credential Manager (`github login --web`); OAuth credentials remain in Windows Credential Manager and the MCP action schema intentionally exposes no token/PAT/password field.
+- Added bounded `status`, `commit`, and `push` actions: repository root/current branch/origin are revalidated on every mutation and only credential-free `https://github.com/<owner>/<repo>[.git]` origins are accepted.
+- `commit` only stages explicitly named regular files, rejects pre-existing staged changes, credential/key-like files, dependency/generated/VCS paths and content-transforming Git attributes, verifies the staged set exactly, and disables hooks plus commit signing. It never runs `git add .`.
+- `push` is current-branch-only, never force-pushes, disables pre-push hooks and terminal prompts, and forces Git Credential Manager rather than repository-local credential helpers.
+- Extended Extension ABI v1 permission vocabulary and Windows packaging smoke tests so the single-file EXE must contain ComfyUI, Microsoft Office Native, and Git Publisher.
+
+## 0.5.0 — 2026-08-23
+
+- Added the bundled **Microsoft Office Native** extension behind the stable `extension` gateway; no new MCP tool names are introduced.
+- Added portable `inspect_docx` OOXML reading for Word paragraphs, paragraph styles/numbering, tables, section/page settings, headers/footers, media relationships, hyperlinks, footnotes, endnotes and comments without launching Word.
+- Added portable `inspect_xlsx` OOXML reading for Excel workbook/sheet structure, bounded cell ranges, formulas plus cached values, shared/inline strings, merged ranges, hidden rows/columns, defined names, calculation properties and external-link parts without launching Excel.
+- Added globally authorized native `render` for `.pptx`, `.docx` and `.xlsx`: PowerPoint uses `Slide.Export`; Word and Excel use their native fixed-format engines followed by the Windows `Windows.Data.Pdf` page renderer to produce PNGs that `image_open` can inspect.
+- Native rendering can emit a deterministic sibling ZIP and returns source/output byte counts and SHA-256 hashes, enabling audit workflows to use Office originals for structure and generated PNGs for full-page visual evidence.
+- Hardened Office automation: only workspace-relative non-link paths are accepted; macro-enabled formats are excluded; documents open read-only with Office automation macros force-disabled; Excel link updates are disabled; intermediate PDFs stay in FolderBridge profile state; the PowerShell entrypoint is fixed and invoked with `shell=False`.
+- Added Office extension regression coverage for manifest permissions, DOCX/XLSX structure extraction, path traversal rejection and PowerShell syntax validation.
+- Windows packaging now verifies that both bundled ComfyUI and Microsoft Office extensions are present in the single-file EXE.
+
 ## 0.4.2 — 2026-08-23
 
 - Made the main Windows launcher page vertically scrollable so high-DPI / low-height displays no longer make lower controls unreachable when the scaled content is taller than the available viewport.

@@ -1,0 +1,78 @@
+{
+  "schema_version": 1,
+  "id": "git-publisher",
+  "name": "Git Publisher",
+  "version": "1.0.0",
+  "description": "Safely connect GitHub in a browser through Git Credential Manager, commit only explicitly selected files, and push only the current branch to a credential-free GitHub HTTPS origin.",
+  "entrypoint": "plugin.py",
+  "permissions": [
+    "workspace.read",
+    "workspace.write",
+    "git.commit-selected-files",
+    "git.push-current-branch",
+    "github.web-auth",
+    "process.execute:git.exe"
+  ],
+  "execution": {
+    "mode": "isolated-process",
+    "timeout_seconds": 600
+  },
+  "workspace_adapter": {
+    "mode": "none",
+    "state": "none"
+  },
+  "actions": {
+    "status": {
+      "read_only": true,
+      "requires_workspace": true,
+      "authorization": "none",
+      "input_schema": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false
+      }
+    },
+    "connect": {
+      "read_only": false,
+      "requires_workspace": true,
+      "authorization": "global",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "username": {"type": "string", "minLength": 1, "maxLength": 128},
+          "force": {"type": "boolean", "default": false}
+        },
+        "additionalProperties": false
+      }
+    },
+    "commit": {
+      "read_only": false,
+      "requires_workspace": true,
+      "authorization": "global",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "paths": {
+            "type": "array",
+            "items": {"type": "string", "minLength": 1, "maxLength": 1024},
+            "minItems": 1,
+            "maxItems": 100
+          },
+          "message": {"type": "string", "minLength": 1, "maxLength": 1000}
+        },
+        "required": ["paths", "message"],
+        "additionalProperties": false
+      }
+    },
+    "push": {
+      "read_only": false,
+      "requires_workspace": true,
+      "authorization": "global",
+      "input_schema": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false
+      }
+    }
+  }
+}

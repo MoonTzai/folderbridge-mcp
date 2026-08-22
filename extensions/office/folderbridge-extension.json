@@ -1,0 +1,90 @@
+{
+  "schema_version": 1,
+  "id": "office",
+  "name": "Microsoft Office Native",
+  "version": "1.0.0",
+  "description": "Safely inspect DOCX/XLSX OOXML and use installed Microsoft Office plus the Windows PDF renderer for native PPTX/DOCX/XLSX visual exports.",
+  "entrypoint": "plugin.py",
+  "permissions": [
+    "workspace.read",
+    "workspace.write",
+    "extension.state",
+    "process.execute:powershell.exe"
+  ],
+  "execution": {
+    "mode": "isolated-process",
+    "timeout_seconds": 600
+  },
+  "workspace_adapter": {
+    "mode": "none",
+    "state": "profile"
+  },
+  "actions": {
+    "status": {
+      "read_only": true,
+      "requires_workspace": false,
+      "authorization": "none",
+      "input_schema": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false
+      }
+    },
+    "inspect_docx": {
+      "read_only": true,
+      "requires_workspace": true,
+      "authorization": "none",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "path": {"type": "string", "minLength": 1, "maxLength": 1024},
+          "max_items": {"type": "integer", "minimum": 1, "maximum": 10000, "default": 2000}
+        },
+        "required": ["path"],
+        "additionalProperties": false
+      }
+    },
+    "inspect_xlsx": {
+      "read_only": true,
+      "requires_workspace": true,
+      "authorization": "none",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "path": {"type": "string", "minLength": 1, "maxLength": 1024},
+          "sheet": {"type": "string", "minLength": 1, "maxLength": 255},
+          "cell_range": {"type": "string", "minLength": 1, "maxLength": 64},
+          "max_items": {"type": "integer", "minimum": 1, "maximum": 20000, "default": 5000},
+          "include_empty": {"type": "boolean", "default": false}
+        },
+        "required": ["path"],
+        "additionalProperties": false
+      }
+    },
+    "render": {
+      "read_only": false,
+      "requires_workspace": true,
+      "authorization": "global",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "path": {"type": "string", "minLength": 1, "maxLength": 1024},
+          "output_dir": {"type": "string", "minLength": 1, "maxLength": 1024},
+          "page_start": {"type": "integer", "minimum": 1, "maximum": 10000},
+          "page_end": {"type": "integer", "minimum": 1, "maximum": 10000},
+          "sheets": {
+            "type": "array",
+            "items": {"type": "string", "minLength": 1, "maxLength": 255},
+            "minItems": 1,
+            "maxItems": 100
+          },
+          "width": {"type": "integer", "minimum": 320, "maximum": 7680, "default": 1920},
+          "make_zip": {"type": "boolean", "default": true},
+          "overwrite": {"type": "boolean", "default": false}
+        },
+        "required": ["path", "output_dir"],
+        "additionalProperties": false
+      }
+    }
+  }
+}

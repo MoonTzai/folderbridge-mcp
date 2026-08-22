@@ -17,13 +17,16 @@ FolderBridge MCP is a zero-dependency Python MCP server plus a desktop launcher.
 > [!IMPORTANT]
 > This project is in an early public beta. It reduces the attack surface; it is not an operating-system sandbox. Only expose folders and repositories you trust.
 
-## 0.4.2 highlights
+## 0.5.1 highlights
 
-- **Reachable high-DPI UI:** the main launcher page now has a vertical viewport scrollbar, so lower controls remain reachable when Windows scaling makes the content taller than the available screen.
-- **Clear ComfyUI first run and startup diagnostics:** if no ComfyUI install root has been saved yet, the launcher explicitly says auto-start is waiting for configuration, opens the Extensions sidebar, and prompts for a supported Portable / `.venv` / `venv` root instead of appearing to fail silently. Launcher startup performs a bounded second reconciliation pass instead of relying on one early extension snapshot; managed startup then waits up to 120 seconds, shows an in-progress state, uses `--disable-auto-launch`, and keeps combined startup output in `launcher-comfyui.log` so early exits/timeouts are diagnosable.
-- **Optional toolchains are labeled correctly:** `FolderBridge.exe` itself needs neither Python nor Node.js. Python 3.11 x64 is recommended for source/development/repackaging; Node.js LTS is only needed when a Node/npm workspace's own test/build flow needs it.
-- **Capabilities are not installers:** enabling test/build/package authorizes bounded execution; it does not install Python, Node, Gradle, compilers, package managers, or project dependencies.
-- **Single-file delivery clarified:** the Windows FolderBridge application is one EXE with its Python runtime bundled. ChatGPT web users still obtain OpenAI's official `tunnel-client.exe` separately.
+- **Browser-authorized GitHub publishing:** the new bundled `git-publisher` extension can open GitHub authorization through Git Credential Manager, keep OAuth credentials in Windows Credential Manager, commit only an explicit file allowlist, and push only the current branch to the existing GitHub HTTPS origin. No token/PAT/password field is exposed to the model.
+- **Git publication remains constrained:** Publisher rejects pre-existing staged changes, credential/key-like files, content-transforming Git attributes and unsafe repository-local Git settings; it never runs `git add .`, never accepts an arbitrary remote/ref, disables hooks/signing for its bounded commit, and never force-pushes.
+- **Native Microsoft Office visual pipeline:** the bundled `office` extension can render `.pptx`, `.docx`, and `.xlsx` with locally installed Microsoft Office. PowerPoint exports slides directly to PNG; Word/Excel use their native fixed-format layout engines and the Windows PDF renderer to produce page PNGs.
+- **Word structure reading without launching Word:** `inspect_docx` exposes paragraphs, styles/numbering, tables, sections/page setup, headers/footers, media, hyperlinks, footnotes/endnotes and comments from OOXML.
+- **Excel structure/formula reading without launching Excel:** `inspect_xlsx` exposes sheets, bounded cell ranges, formulas plus cached values, merged ranges, hidden rows/columns, defined names, calculation settings and external-link parts.
+- **Audit-ready output:** native rendering can write a deterministic PNG directory plus sibling ZIP and returns SHA-256/size metadata for both the Office source and generated outputs; the existing `image_open` tool can then inspect each page or ZIP member visually.
+- **Office automation is constrained:** only workspace-relative non-link paths are accepted; macro-enabled formats are excluded; Office automation macros are force-disabled; files open read-only; Excel link updates are disabled; the bundled PowerShell script is fixed and never accepts arbitrary commands.
+- **Existing 0.4.x safety/UI improvements remain:** high-DPI scrolling, ComfyUI managed-service diagnostics, stable extension gateway, bounded global capabilities, and single-file Windows delivery are unchanged.
 
 See [CHANGELOG.md](CHANGELOG.md) for the full release history and [Extension ABI v1](docs/extensions.md) for managed-service and plugin boundaries.
 
@@ -46,7 +49,7 @@ Requirements depend on how you use FolderBridge:
 - **Standalone Windows EXE:** no separate Python or Node.js installation is required; Windows is the tested double-click launcher environment.
 - **Run/develop from source:** Python 3.11 or newer is required; Python 3.11 x64 is the recommended Windows build baseline.
 - **Project capabilities:** install only the toolchain required by the workspace itself (for example Node.js LTS for a Node/npm project's test/build scripts). Enabling a capability does not install that toolchain.
-- Git is optional and only used for bounded `status` and `diff` views.
+- Git is optional. Bounded `status`/`diff` views use Git when available; the Git Publisher extension additionally requires Git for Windows with Git Credential Manager for browser-authorized GitHub commits/pushes.
 
 ### Windows executable — recommended
 
@@ -244,7 +247,7 @@ The server cannot delete or move files. Absolute paths, `..`, symlinks, junction
 
 The launcher can authorize common capabilities once for all current and future workspaces: `test`, `build`, `package-windows`, `package-android`, and `git-push`. These permissions live in the launcher settings rather than `.folderbridge.json`, so a workspace can gain a supported build script months after it was added and FolderBridge will detect it at call time. The launcher also provides **Select all** and **Clear** controls for this group.
 
-`git-push` is intentionally constrained to a GitHub HTTPS `origin`, the current branch, no force push, and no repository-local credential helper / push-target rewrite configuration. Build/package capabilities may execute local project code, so enable only the global capabilities you want.
+`git-push` remains a low-level push-only capability constrained to a GitHub HTTPS `origin`, the current branch, no force push, and no repository-local credential helper / push-target rewrite configuration. For browser authorization plus explicit-file commit + push, use the bundled **Git Publisher** extension instead. Build/package capabilities may execute local project code, so enable only the global capabilities you want.
 
 For direct stdio clients, repeat `--capability <name>` on the `serve` or `client-config` command. The Windows launcher exposes the same choices as persistent checkboxes.
 

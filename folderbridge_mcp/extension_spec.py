@@ -15,7 +15,7 @@ EXTENSION_FORMAT_SUMMARY = """FolderBridge Extension ABI v1
 3. 插件不会作为新的 MCP tool 暴露；统一通过 FolderBridge 的 extension(list/info/run) 调用，所以安装新插件不需要改变 Connector 工具目录。
 4. 外部插件必须按“完整插件目录 hash + permissions”本机批准；任一文件或权限变化都会使批准失效。
 5. v1 插件在独立子进程运行，使用清理环境、固定超时、有界 stdin/stdout/stderr。它隔离崩溃和协议污染，但不是完整 OS 沙箱；不可信插件请放 VM/容器。
-6. 不允许声明任意 shell / 任意公网网络。权限必须是 FolderBridge 认识的精确权限，例如 workspace.read、workspace.write、workspace.adapter、extension.state、network.loopback:127.0.0.1:8188、process.execute:ffmpeg、git.push-current-branch。
+6. 不允许声明任意 shell / 任意公网网络。权限必须是 FolderBridge 认识的精确权限，例如 workspace.read、workspace.write、workspace.adapter、extension.state、network.loopback:127.0.0.1:8188、process.execute:ffmpeg、git.commit-selected-files、git.push-current-branch、github.web-auth。
 7. 不要靠安装时修改每个工作区的 .folderbridge.json。项目适配必须优先使用 workspace_adapter.mode=dynamic 和 detect.any_of/all_of；FolderBridge 会在每次调用时重新检测，因此项目后来新增脚本也能自动适配。
 8. 插件持久状态优先使用 context.state_dir（FolderBridge 用户配置目录），不要污染仓库。确实需要写工作区时必须声明 workspace.write，并由 action 参数明确触发。
 9. action 的 input_schema 使用受限 JSON Schema 子集：type/properties/required/additionalProperties/items/enum/minimum/maximum/minLength/maxLength/minItems/maxItems/description/default。

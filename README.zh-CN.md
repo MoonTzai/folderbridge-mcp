@@ -17,13 +17,16 @@ FolderBridge MCP 是一个零第三方依赖的 Python MCP 服务器和桌面启
 > [!IMPORTANT]
 > 项目目前处于早期公开测试阶段。它可以缩小攻击面，但不是操作系统级沙箱。只应开放你信任的文件夹和代码仓库。
 
-## 0.4.2 重点更新
+## 0.5.1 重点更新
 
-- **高 DPI 下仍可完整访问界面：** 主 Launcher 页面加入纵向 viewport/滚动条；Windows 缩放导致内容高度超过屏幕时，底部控制项不再因为窗口被限制在可见范围内而不可达。
-- **ComfyUI 首次启动状态与诊断更明确：** 如果尚未保存安装根目录，Launcher 会明确显示“自动启动等待配置”、展开 Extensions 侧栏并提示选择支持的 Portable / `.venv` / `venv` 根目录，不再表现成静默失败。Launcher 启动阶段会做一次有界的二次协调，不再只依赖启动后 300ms 的单次 Extension 状态快照；托管启动随后最多等待 120 秒，显示“正在启动 / 检测”状态，使用 `--disable-auto-launch`，并把合并后的启动输出保存在 `launcher-comfyui.log`，提前退出或超时时会直接给出日志路径。
-- **可选工具链不再混淆：** 普通 `FolderBridge.exe` 用户无需安装 Python 或 Node.js。源码开发/重新封装推荐 Python 3.11 x64；只有目标 Node/npm 工作区自己的 test/build 需要时才安装 Node.js LTS。
-- **Capability 不是安装器：** 勾选 test/build/package 只是授权有边界的执行入口，不会替你安装 Python、Node、Gradle、编译器、包管理器或项目依赖。
-- **单文件交付说明更清楚：** FolderBridge Windows 本体就是一个包含 Python runtime 的 EXE；ChatGPT 网页端仍需另外使用 OpenAI 官方独立发布的 `tunnel-client.exe`。
+- **新增浏览器授权的 GitHub 发布链：** bundled `git-publisher` Extension 可通过 Git Credential Manager 打开 GitHub 官方网页授权，OAuth 凭据保留在 Windows Credential Manager；插件只提交显式文件白名单，并且只把当前分支推到既有 GitHub HTTPS origin。模型侧不暴露 token/PAT/password 输入字段。
+- **Git 发布仍保持强边界：** 拒绝已有 staged 内容、密钥/凭据类文件、会变换内容的 Git attributes 和危险的仓库本地 Git 设置；绝不执行 `git add .`，不接受任意 remote/ref，受控 commit 禁用 hooks/签名，push 永不 force。
+- **补齐 Microsoft Office 原生视觉链：** bundled `office` Extension 可对 `.pptx`、`.docx`、`.xlsx` 调用本机已安装的 Microsoft Office 做原生渲染。PowerPoint 直接逐页导出 PNG；Word/Excel 先走各自原生固定版式引擎，再由 Windows 原生 PDF renderer 转成逐页 PNG。
+- **Word 不启动 Office 也能做结构读取：** `inspect_docx` 可读取段落、样式/编号、表格、分节与页设置、页眉页脚、媒体、超链接、脚注、尾注、批注等 OOXML 结构。
+- **Excel 不启动 Office 也能读公式与结构：** `inspect_xlsx` 可读取工作表、限定单元格区域、公式及缓存值、共享/内联字符串、合并单元格、隐藏行列、定义名称、计算设置和外部链接部件。
+- **面向审计的可核验产物：** 原生渲染可同时生成 PNG 目录和同级 ZIP，并返回 Office 原件及每个输出的 bytes/SHA-256；现有 `image_open` 可随后逐页或直接从 ZIP 成员进行视觉检查。
+- **Office 自动化仍保持强边界：** 只接受工作区内相对路径和非链接文件；暂不接受带宏 Office 格式；打开前强制禁用 Automation 宏；原件只读打开；Excel 禁止链接更新；调用的是固定 bundled PowerShell 脚本，不接受任意命令/脚本/URL。
+- **0.4.x 的安全与界面改进全部保留：** 高 DPI 可滚动界面、ComfyUI 托管诊断、稳定 Extension 网关、有界全局 capability、单文件 Windows EXE 交付方式均不变。
 
 完整版本记录见 [CHANGELOG.md](CHANGELOG.md)；Managed Service 与插件边界见 [Extension ABI v1](docs/extensions.md)。
 
@@ -46,7 +49,7 @@ FolderBridge MCP 是一个零第三方依赖的 Python MCP 服务器和桌面启
 - **Windows 单文件 EXE：** 无需另外安装 Python 或 Node.js；Windows 是已经测试过的双击 Launcher 环境。
 - **从源码运行/开发：** 需要 Python 3.11 或更高版本；Windows 构建推荐以 Python 3.11 x64 作为可复现基线。
 - **项目能力依赖：** 只安装目标工作区自己需要的工具链，例如 Node/npm 项目的 test/build 脚本需要 Node.js LTS。勾选 capability 不会自动安装这些工具。
-- Git 为可选依赖，只用于有界的 `status` 和 `diff` 查看。
+- Git 为可选依赖。有界 `status`/`diff` 查看在 Git 可用时工作；若要使用 Git Publisher 的浏览器授权 commit/push，则需要安装带 Git Credential Manager 的 Git for Windows。
 
 ### Windows EXE（推荐）
 
@@ -244,7 +247,7 @@ MCP 不能删除或移动文件。绝对路径、`..`、符号链接、junction/
 
 启动器可以把常见能力一次授权给当前和未来所有工作区：`test`、`build`、`package-windows`、`package-android` 和 `git-push`。这些权限保存在启动器设置中，不写进每个工作区的 `.folderbridge.json`。因此某个工作区加入 FolderBridge 时即使还没有 EXE/APK 构建脚本，几个月后新增受支持的入口，也会在调用时自动发现，无需重新添加工作区或手改 JSON。主界面同时提供“全选”和“清空”按钮。
 
-`git-push` 被限制为 GitHub HTTPS `origin`、当前分支、禁止 force push，并拒绝仓库本地的 credential helper、pushurl/receivepack 和 URL 重写配置。构建/封装能力可能执行本地项目代码，所以只勾选你愿意全局预授权的能力。
+`git-push` 继续作为底层“只推送”能力：限制为 GitHub HTTPS `origin`、当前分支、禁止 force push，并拒绝仓库本地的 credential helper、pushurl/receivepack 和 URL 重写配置。若需要浏览器授权＋显式文件 commit＋push，请改用 bundled **Git Publisher** Extension。构建/封装能力可能执行本地项目代码，所以只勾选你愿意全局预授权的能力。
 
 直接 stdio 客户端可在 `serve` 或 `client-config` 命令中重复加入 `--capability <名称>`；Windows 启动器提供同样的持久化复选框。
 

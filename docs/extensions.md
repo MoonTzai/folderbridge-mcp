@@ -1,6 +1,6 @@
 # FolderBridge Extension ABI v1
 
-FolderBridge 0.4.1 uses one stable MCP gateway, `extension`, for local integrations. Installing an extension changes the extension registry, not the MCP tool catalog. Clients can call `extension(action="list")`, inspect the returned action schemas, then call `extension(action="run", extension_id=..., extension_action=..., params=...)`.
+FolderBridge 0.5.1 uses one stable MCP gateway, `extension`, for local integrations. Installing an extension changes the extension registry, not the MCP tool catalog. Clients can call `extension(action="list")`, inspect the returned action schemas, then call `extension(action="run", extension_id=..., extension_action=..., params=...)`.
 
 ## Directory layout
 
@@ -66,7 +66,9 @@ ABI v1 accepts precise permission contracts only:
 - `workspace.write`
 - `workspace.adapter`
 - `extension.state`
+- `git.commit-selected-files`
 - `git.push-current-branch`
+- `github.web-auth`
 - `network.loopback:127.0.0.1:<port>` or `network.loopback:localhost:<port>`
 - `process.execute:<basename>`
 
@@ -139,6 +141,28 @@ Plugins run in a separate FolderBridge worker process with:
 - PyInstaller environment reset when running from the one-file Windows EXE.
 
 This boundary prevents plugin prints/crashes from corrupting MCP stdio and limits accidental runaway output. It does not provide kernel-level filesystem/network isolation.
+
+## Bundled Microsoft Office Native extension
+
+`extensions/office` adds a Windows-native document pipeline without changing the MCP tool catalog. Its bundled read-only actions can inspect Word/Excel OOXML directly, while the write-capable `render` action requires one-time global approval because it launches locally installed Microsoft Office and writes PNG/ZIP output into the selected workspace.
+
+- `inspect_docx` parses paragraphs, styles/numbering, tables, sections/page settings, headers/footers, media, hyperlinks, footnotes/endnotes and comments without launching Word.
+- `inspect_xlsx` parses workbook/sheet structure, bounded cell ranges, formulas plus cached values, shared/inline strings, merged ranges, hidden rows/columns, defined names, calculation properties and external-link parts without launching Excel.
+- `render` accepts only `.pptx`, `.docx`, and `.xlsx`. PowerPoint uses native `Slide.Export`; Word/Excel use their native fixed-format engines and the Windows `Windows.Data.Pdf` renderer to produce PNG pages. It may also create a sibling ZIP and returns hashes/sizes for the source and every output.
+
+The Office extension declares `process.execute:powershell.exe`, but the command surface is fixed: the plugin always invokes the bundled `office.ps1` with `shell=False`. There is no user-supplied command, script path, URL, or executable parameter. Workspace paths are relative-only, links/reparse points and dependency/VCS/build directories are rejected, macro-enabled Office formats are not accepted, Office automation security is forced to disable macros before opening, documents are opened read-only, and Excel link updates are disabled. Intermediate PDFs live under `context.state_dir` and are deleted after rendering.
+
+Use the returned PNG paths with FolderBridge `image_open`; for audit workflows this keeps OOXML/Office originals as structural evidence and native page images as visual evidence instead of treating flattened text as a substitute for layout.
+
+## Bundled Git Publisher extension
+
+`extensions/git-publisher` adds a narrow GitHub publication workflow without exposing generic Git command execution. Its read-only `status` action can inspect the selected repository before approval; browser authorization and mutations require one-time global approval.
+
+- `connect` invokes Git Credential Manager's GitHub `login --web` flow. GitHub opens in the user's browser and the resulting credential is stored by GCM in Windows Credential Manager. The action schema intentionally has no token/PAT/password parameter.
+- `commit` accepts an explicit file allowlist plus a commit message. It rejects pre-existing staged content, paths outside the workspace, directories/deletions, credential/key-like files, generated/dependency/VCS directories, and files with content-transforming Git attributes; it verifies the staged set exactly before committing and disables Git hooks/signing.
+- `push` accepts no ref/remote/URL argument. It reuses the current named branch and existing `origin`, requires a credential-free GitHub HTTPS origin, forces GCM as the credential helper, disables interactive prompts and pre-push hooks, and never force-pushes.
+
+The Git Publisher permission declaration is deliberately explicit: `github.web-auth`, `git.commit-selected-files`, `git.push-current-branch`, and `process.execute:git.exe`. PAT authentication remains an out-of-band fallback through user-controlled Git/GCM configuration; FolderBridge does not ask the model to receive a secret token.
 
 ## Bundled ComfyUI example
 

@@ -56,8 +56,8 @@ try {
         throw "Built executable smoke test failed."
     }
     $extensionSmoke = (& $executable extensions --json 2>&1 | Out-String).Trim()
-    if ($LASTEXITCODE -ne 0 -or $extensionSmoke -notmatch '"id"\s*:\s*"comfyui"') {
-        throw "Built executable extension smoke test failed: bundled ComfyUI extension was not discovered."
+    if ($LASTEXITCODE -ne 0 -or $extensionSmoke -notmatch '"id"\s*:\s*"comfyui"' -or $extensionSmoke -notmatch '"id"\s*:\s*"office"' -or $extensionSmoke -notmatch '"id"\s*:\s*"git-publisher"') {
+        throw "Built executable extension smoke test failed: bundled ComfyUI, Microsoft Office, and Git Publisher extensions must all be discovered."
     }
     $workerSmoke = (& $executable extensions --self-test 2>&1 | Out-String).Trim()
     if ($LASTEXITCODE -ne 0 -or $workerSmoke -notmatch '"extension_id"\s*:\s*"comfyui"') {
