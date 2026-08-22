@@ -25,6 +25,7 @@ try {
         --noupx `
         --name FolderBridge `
         --version-file (Join-Path $projectRoot "packaging\windows_version_info.txt") `
+        --manifest (Join-Path $projectRoot "packaging\windows_dpi_manifest.xml") `
         --distpath $releaseDir `
         --workpath $workDir `
         --specpath $specDir `

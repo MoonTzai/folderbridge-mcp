@@ -2,6 +2,12 @@
 
 All notable changes to FolderBridge MCP are documented here.
 
+## 0.1.1 — 2026-08-22
+
+- Made the launcher follow Windows display scaling instead of forcing a fixed Tk scale.
+- Added Per-Monitor V2 DPI awareness so fonts refresh when the window moves between monitors with different Scale settings.
+- Scaled the initial window and high-DPI UI measurements while keeping the window within the visible screen.
+
 ## 0.1.0 — 2026-08-22
 
 Initial public release.

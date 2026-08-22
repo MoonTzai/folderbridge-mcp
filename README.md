@@ -23,6 +23,7 @@ FolderBridge MCP is a zero-dependency Python MCP server plus a desktop launcher.
 - **No telemetry:** FolderBridge itself makes no network requests.
 - **Secret-aware launcher:** the OpenAI Runtime API key stays in memory and is removed before the local MCP process can use it.
 - **Beginner-friendly desktop UI:** folder selection, access mode, Tunnel setup, diagnostics, start/stop, process monitoring, and redacted logs live in one window.
+- **Windows scaling support:** fonts and window sizing follow the current display DPI and refresh when moving between monitors with different scale factors.
 
 ## Quick start
 

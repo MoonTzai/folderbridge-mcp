@@ -9,6 +9,14 @@ from pathlib import Path
 import tkinter as tk
 from tkinter import filedialog, messagebox, scrolledtext, ttk
 
+from .dpi import (
+    enable_windows_dpi_awareness,
+    fitted_window_size,
+    scale_for_dpi,
+    scaled_pixels,
+    tk_scaling_for_dpi,
+    window_dpi,
+)
 from .launcher_backend import (
     LauncherError,
     LauncherSettings,
@@ -45,6 +53,9 @@ class FolderBridgeLauncher:
         self._active_secret = ""
         self._last_exit_reported: int | None = None
         self._log_drop_reported = False
+        self._dpi = 96
+        self._ui_scale = 1.0
+        self._dpi_refresh_id: str | None = None
 
         self._create_variables()
         self._configure_window()
@@ -55,6 +66,7 @@ class FolderBridgeLauncher:
         self._log("启动器已就绪。默认只读，不会保存 Runtime API Key。")
 
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
+        self.root.bind("<Configure>", self._schedule_dpi_refresh, add="+")
         self.root.after(120, self._drain_events)
         self.root.after(500, self._poll_process)
 
@@ -89,13 +101,57 @@ class FolderBridgeLauncher:
 
     def _configure_window(self) -> None:
         self.root.title("FolderBridge MCP · 本地工作区连接器")
-        self.root.geometry("940x820")
-        self.root.minsize(820, 700)
         self.root.configure(bg="#f4f6fa")
+        self._dpi = window_dpi(self.root)
+        self._ui_scale = scale_for_dpi(self._dpi)
         try:
-            self.root.tk.call("tk", "scaling", 1.15)
+            self.root.tk.call("tk", "scaling", tk_scaling_for_dpi(self._dpi))
         except tk.TclError:
             pass
+        width, height = fitted_window_size(
+            self._dpi,
+            self.root.winfo_screenwidth(),
+            self.root.winfo_screenheight(),
+        )
+        self.root.geometry(f"{width}x{height}")
+        self.root.minsize(
+            min(self._px(820), width),
+            min(self._px(700), height),
+        )
+
+    def _px(self, value: int | float) -> int:
+        return scaled_pixels(value, self._ui_scale)
+
+    def _schedule_dpi_refresh(self, event: tk.Event[tk.Misc]) -> None:
+        if event.widget is not self.root or self._closing:
+            return
+        if self._dpi_refresh_id is not None:
+            self.root.after_cancel(self._dpi_refresh_id)
+        self._dpi_refresh_id = self.root.after(150, self._refresh_dpi)
+
+    def _refresh_dpi(self) -> None:
+        self._dpi_refresh_id = None
+        if self._closing:
+            return
+        current_dpi = window_dpi(self.root)
+        if current_dpi == self._dpi:
+            return
+        self._dpi = current_dpi
+        self._ui_scale = scale_for_dpi(current_dpi)
+        try:
+            self.root.tk.call("tk", "scaling", tk_scaling_for_dpi(current_dpi))
+        except tk.TclError:
+            pass
+        self._configure_styles()
+        width, height = fitted_window_size(
+            current_dpi,
+            self.root.winfo_screenwidth(),
+            self.root.winfo_screenheight(),
+        )
+        self.root.minsize(
+            min(self._px(820), width),
+            min(self._px(700), height),
+        )
 
     def _configure_styles(self) -> None:
         style = ttk.Style(self.root)
@@ -112,8 +168,8 @@ class FolderBridgeLauncher:
         style.configure("Field.TLabel", background="#ffffff", foreground="#364157", font=("Segoe UI", 9, "bold"))
         style.configure("Status.TLabel", background="#ffffff", foreground="#172033", font=("Segoe UI", 10, "bold"))
         style.configure("Muted.TLabel", background="#ffffff", foreground="#7a869c", font=("Segoe UI", 8))
-        style.configure("TEntry", padding=6)
-        style.configure("TButton", padding=(10, 7), font=("Segoe UI", 9))
+        style.configure("TEntry", padding=self._px(6))
+        style.configure("TButton", padding=(self._px(10), self._px(7)), font=("Segoe UI", 9))
         style.configure("TRadiobutton", background="#ffffff", font=("Segoe UI", 9))
         style.configure("TCheckbutton", background="#ffffff", font=("Segoe UI", 9))
 
@@ -146,9 +202,18 @@ class FolderBridgeLauncher:
         card.columnconfigure(1, weight=1)
         card.columnconfigure(3, weight=1)
 
-        self.status_dot = tk.Canvas(card, width=18, height=18, bg="#ffffff", highlightthickness=0)
+        dot_size = self._px(18)
+        self.status_dot = tk.Canvas(card, width=dot_size, height=dot_size, bg="#ffffff", highlightthickness=0)
         self.status_dot.grid(row=0, column=0, rowspan=2, sticky="nw", padx=(0, 9), pady=(2, 0))
-        self.status_dot_id = self.status_dot.create_oval(2, 2, 16, 16, fill="#98a2b3", outline="")
+        inset = self._px(2)
+        self.status_dot_id = self.status_dot.create_oval(
+            inset,
+            inset,
+            dot_size - inset,
+            dot_size - inset,
+            fill="#98a2b3",
+            outline="",
+        )
         ttk.Label(card, textvariable=self.connection_text, style="CardTitle.TLabel").grid(row=0, column=1, sticky="w")
         ttk.Label(card, textvariable=self.connection_detail, style="Muted.TLabel").grid(row=1, column=1, sticky="w")
 
@@ -752,19 +817,8 @@ class FolderBridgeLauncher:
         self.root.destroy()
 
 
-def _enable_windows_dpi_awareness() -> None:
-    if os.name != "nt":
-        return
-    try:
-        import ctypes
-
-        ctypes.windll.shcore.SetProcessDpiAwareness(1)
-    except (AttributeError, OSError):
-        pass
-
-
 def main() -> int:
-    _enable_windows_dpi_awareness()
+    enable_windows_dpi_awareness()
     root = tk.Tk()
     FolderBridgeLauncher(root)
     root.mainloop()

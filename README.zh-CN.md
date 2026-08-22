@@ -23,6 +23,7 @@ FolderBridge MCP 是一个零第三方依赖的 Python MCP 服务器和桌面启
 - **没有遥测：** FolderBridge 自身不发起网络请求。
 - **密钥隔离：** OpenAI Runtime API Key 仅驻留启动器内存，并在启动本地 MCP 进程前清除。
 - **傻瓜式桌面界面：** 文件夹、权限、Tunnel 配置、诊断、启停、进程状态和脱敏日志集中在一个窗口。
+- **适配 Windows 缩放：** 字体和窗口自动跟随当前显示器 DPI，跨不同 Scale 的显示器移动时自动刷新。
 
 ## 快速开始
 
