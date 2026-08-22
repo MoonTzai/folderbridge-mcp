@@ -3,12 +3,12 @@
 简体中文 | [English](README.md)
 
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache--2.0-blue.svg)](LICENSE)
-![Python 3.11+](https://img.shields.io/badge/Python-3.11%2B-3776AB)
+![源码 Python 3.11+](https://img.shields.io/badge/Source%20Python-3.11%2B-3776AB)
 ![Transport: stdio](https://img.shields.io/badge/MCP-stdio-6B5CE7)
 
 > [!TIP]
-> **Windows 用户：[直接下载 FolderBridge.exe](https://github.com/MoonTzai/folderbridge-mcp/releases/latest/download/FolderBridge.exe)**
-> 安装包位于 GitHub **Releases → 最新版本 → Assets**，不会出现在仓库的源码文件列表中。也可打开[完整发布页面](https://github.com/MoonTzai/folderbridge-mcp/releases/latest)下载 EXE 和 SHA-256 校验文件。
+> **FolderBridge Windows 版就是单文件应用：[直接下载 `FolderBridge.exe`](https://github.com/MoonTzai/folderbridge-mcp/releases/latest/download/FolderBridge.exe) 后双击即可；无需另外安装 Python 或 Node.js。**
+> 文件位于 GitHub **Releases → 最新版本 → Assets**，不会出现在仓库的源码文件列表中。若连接 ChatGPT 网页版，仍需按向导另外选择 OpenAI 官方独立发布的 `tunnel-client.exe`。也可打开[完整发布页面](https://github.com/MoonTzai/folderbridge-mcp/releases/latest)下载 EXE 和可选的 SHA-256 校验文件。
 
 **在 AI 客户端与一组由你明确选择的本地文件夹之间，建立更安全的本地优先桥梁。**
 
@@ -17,13 +17,13 @@ FolderBridge MCP 是一个零第三方依赖的 Python MCP 服务器和桌面启
 > [!IMPORTANT]
 > 项目目前处于早期公开测试阶段。它可以缩小攻击面，但不是操作系统级沙箱。只应开放你信任的文件夹和代码仓库。
 
-## 0.4.1 重点更新
+## 0.4.2 重点更新
 
-- **`--allow-tasks` 支持混合工作区：** 没有 `.folderbridge.json` 的工作区、已有批准 named task 的工作区、只使用 Extension 的工作区，以及 task config 尚未批准的工作区，可以同时存在于一个连接中。只有真正调用该工作区的 named task 时才检查批准状态。
-- **Launcher 托管 ComfyUI：** Windows 启动器可以记住已经验证过的 ComfyUI Portable / `.venv` / `venv` 安装路径，并在 bundled Local ComfyUI Extension 加载时自动启动；如果 `127.0.0.1:8188` 已有服务在线，则识别为外部服务并直接复用，不会重复启动。
-- **严格的进程 ownership：** FolderBridge 不持久化 ComfyUI PID，也不保存任意启动命令，更不会因为某个未知进程占用了 8188 就按端口终止它。只有当前 Launcher 本次运行亲自创建并保留在内存中的 `Popen` handle 才允许停止。
-- **更安全的退出顺序：** 先停止 FolderBridge-owned managed services，再停止 Tunnel/MCP；外部服务保持运行。可能阻塞的进程等待放到后台线程，不冻结 Tk 主线程。
-- **跨显示器 DPI 加固：** 保留 Per-Monitor V2，并加入轻量 DPI fallback poll；固定 UI metric 每次都从原始逻辑尺寸按 `dpi / 96` 重新计算，避免跨不同 Scale 显示器来回拖动时产生累计缩放漂移。
+- **高 DPI 下仍可完整访问界面：** 主 Launcher 页面加入纵向 viewport/滚动条；Windows 缩放导致内容高度超过屏幕时，底部控制项不再因为窗口被限制在可见范围内而不可达。
+- **ComfyUI 首次启动状态与诊断更明确：** 如果尚未保存安装根目录，Launcher 会明确显示“自动启动等待配置”、展开 Extensions 侧栏并提示选择支持的 Portable / `.venv` / `venv` 根目录，不再表现成静默失败。Launcher 启动阶段会做一次有界的二次协调，不再只依赖启动后 300ms 的单次 Extension 状态快照；托管启动随后最多等待 120 秒，显示“正在启动 / 检测”状态，使用 `--disable-auto-launch`，并把合并后的启动输出保存在 `launcher-comfyui.log`，提前退出或超时时会直接给出日志路径。
+- **可选工具链不再混淆：** 普通 `FolderBridge.exe` 用户无需安装 Python 或 Node.js。源码开发/重新封装推荐 Python 3.11 x64；只有目标 Node/npm 工作区自己的 test/build 需要时才安装 Node.js LTS。
+- **Capability 不是安装器：** 勾选 test/build/package 只是授权有边界的执行入口，不会替你安装 Python、Node、Gradle、编译器、包管理器或项目依赖。
+- **单文件交付说明更清楚：** FolderBridge Windows 本体就是一个包含 Python runtime 的 EXE；ChatGPT 网页端仍需另外使用 OpenAI 官方独立发布的 `tunnel-client.exe`。
 
 完整版本记录见 [CHANGELOG.md](CHANGELOG.md)；Managed Service 与插件边界见 [Extension ABI v1](docs/extensions.md)。
 
@@ -41,17 +41,18 @@ FolderBridge MCP 是一个零第三方依赖的 Python MCP 服务器和桌面启
 
 ## 快速开始
 
-运行要求：
+运行要求取决于使用方式：
 
-- Python 3.11 或更高版本；
-- Windows 可获得已经测试过的双击启动体验，stdio 服务器本身可跨平台运行；
+- **Windows 单文件 EXE：** 无需另外安装 Python 或 Node.js；Windows 是已经测试过的双击 Launcher 环境。
+- **从源码运行/开发：** 需要 Python 3.11 或更高版本；Windows 构建推荐以 Python 3.11 x64 作为可复现基线。
+- **项目能力依赖：** 只安装目标工作区自己需要的工具链，例如 Node/npm 项目的 test/build 脚本需要 Node.js LTS。勾选 capability 不会自动安装这些工具。
 - Git 为可选依赖，只用于有界的 `status` 和 `diff` 查看。
 
 ### Windows EXE（推荐）
 
-从 [GitHub 最新版本的 Assets](https://github.com/MoonTzai/folderbridge-mcp/releases/latest)下载 `FolderBridge.exe` 和 `FolderBridge.exe.sha256`，或[直接下载 EXE](https://github.com/MoonTzai/folderbridge-mcp/releases/latest/download/FolderBridge.exe)。安装包不会出现在仓库的源码文件列表中。无需安装 Python；校验哈希后直接双击 `FolderBridge.exe`。
+从 [GitHub 最新版本的 Assets](https://github.com/MoonTzai/folderbridge-mcp/releases/latest)下载单个 `FolderBridge.exe`，或[直接下载 EXE](https://github.com/MoonTzai/folderbridge-mcp/releases/latest/download/FolderBridge.exe)。它不会出现在仓库的源码文件列表中。`FolderBridge.exe` 本身就是完整的 FolderBridge 应用，并已经包含 Python runtime，因此普通 EXE 用户不需要安装 Python 或 Node.js。旁边的 `FolderBridge.exe.sha256` 只是用于完整性校验的可选文件，不影响运行。
 
-EXE 包含 FolderBridge 及其 Python 运行时，但**不会**捆绑 OpenAI 的 `tunnel-client`。使用 ChatGPT 网页端时，仍需从 OpenAI 官方 Release 单独下载并在启动器中选择。
+单文件 EXE 有意**不会**重新捆绑 OpenAI 独立发布的 `tunnel-client`。只有连接 ChatGPT 网页版时，才需要从 OpenAI 官方 Release 单独下载并在 Launcher 中选择准确的 `tunnel-client.exe`。
 
 > [!NOTE]
 > 当前社区构建尚未进行代码签名，因此 Windows 会显示发布者未知。如果你不信任未签名二进制文件，请按照下方步骤从已审核源码自行构建。
@@ -70,6 +71,14 @@ python .\folderbridge_launcher.py gui
 
 `folderbridge_gui.pyw` 仅作为源码环境的便利入口保留，要求 Windows 的 `.pyw` 文件关联指向带 Tkinter 的 Python。普通用户应双击独立的 `FolderBridge.exe`。
 
+### 可选开发环境与项目工具链
+
+以下内容**不是**普通 `FolderBridge.exe` 用户的运行前置条件：
+
+- 从源码开发 FolderBridge 或重新封装 Windows EXE 时，推荐从 [Python 官方 Windows 下载页](https://www.python.org/downloads/windows/)安装 **Python 3.11 x64**，并确认 `python --version` 可用。打包流程使用独立的 `.build-venv` 与 `requirements-build.txt`。
+- 只有当目标工作区本身是 Node/npm 项目，并且它自己的 test/build 命令需要 `node`/`npm` 时，才从 [Node.js 官方下载页](https://nodejs.org/en/download)安装 **Node.js LTS**，再用 `node --version` 与 `npm --version` 验证。
+- 其他项目可能需要自己的 runtime 或编译器。FolderBridge capability 提供的是授权、发现与有边界的执行入口，不负责安装依赖。
+
 ## 连接 ChatGPT 网页端
 
 ChatGPT 不能直接连接本地 stdio 进程。FolderBridge 通过 OpenAI 官方 [Secure MCP Tunnel](https://developers.openai.com/api/docs/guides/secure-mcp-tunnels) 完成这条链路。你需要：
@@ -82,7 +91,7 @@ ChatGPT 不能直接连接本地 stdio 进程。FolderBridge 通过 OpenAI 官�
 - 官方 [`tunnel-client`](https://github.com/openai/tunnel-client/releases/latest)；
 - 与账号或工作区相匹配的 ChatGPT 开发者模式权限。
 
-点击启动器右上角“网页端一键引导”，可以直接查看以下四步和快捷按钮。
+点击启动器右上角“连接设置向导”，可以直接查看以下步骤和快捷按钮，并在附录中查看可选 Python/Node 工具链说明。
 
 ### 1. 下载官方 Windows x64 客户端
 

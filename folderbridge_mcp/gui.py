@@ -51,6 +51,8 @@ TUNNEL_RELEASE_URL = "https://github.com/openai/tunnel-client/releases/latest"
 RUNTIME_KEYS_URL = "https://platform.openai.com/settings/organization/api-keys"
 CHATGPT_PLUGINS_URL = "https://chatgpt.com/plugins"
 HELP_URL = "https://help.openai.com/en/articles/12584461-developer-mode-and-full-mcp-connectors-in-chatgpt"
+PYTHON_WINDOWS_URL = "https://www.python.org/downloads/windows/"
+NODE_DOWNLOAD_URL = "https://nodejs.org/en/download"
 MAX_LOG_CHARS = 180_000
 
 
@@ -66,6 +68,7 @@ class FolderBridgeLauncher:
         self._managed_service_states: dict[str, dict[str, object]] = {}
         self._managed_service_busy: set[str] = set()
         self._managed_service_prompted: set[str] = set()
+        self._managed_service_startup_logged: set[str] = set()
         self._sidebar_visible = False
         self.extension_vars: dict[str, tk.BooleanVar] = {}
         self.managed_service_auto_vars: dict[str, tk.BooleanVar] = {}
@@ -91,7 +94,8 @@ class FolderBridgeLauncher:
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
         self.root.bind("<Configure>", self._schedule_dpi_refresh, add="+")
         self.root.after(120, self._drain_events)
-        self.root.after(300, self._initialize_managed_services)
+        self.root.after(300, lambda: self._initialize_managed_services(final_pass=False))
+        self.root.after(1800, lambda: self._initialize_managed_services(final_pass=True))
         self.root.after(400, self._poll_dpi)
         self.root.after(500, self._poll_process)
 
@@ -196,6 +200,8 @@ class FolderBridgeLauncher:
     def _refresh_dpi_metrics(self) -> None:
         if hasattr(self, "page"):
             self.page.configure(padding=(self._px(24), self._px(20), self._px(24), self._px(20)))
+        if hasattr(self, "page_canvas"):
+            self.root.after_idle(lambda: self.page_canvas.configure(scrollregion=self.page_canvas.bbox("all")))
         if hasattr(self, "extension_sidebar"):
             self.extension_sidebar.configure(width=self._px(320), padding=self._px(14))
         if hasattr(self, "extension_sidebar_hint"):
@@ -255,13 +261,34 @@ class FolderBridgeLauncher:
         shell.columnconfigure(0, weight=1)
         shell.rowconfigure(0, weight=1)
 
+        main = ttk.Frame(shell, style="Page.TFrame")
+        main.grid(row=0, column=0, sticky="nsew")
+        main.columnconfigure(0, weight=1)
+        main.rowconfigure(0, weight=1)
+        self.page_canvas = tk.Canvas(
+            main,
+            bg="#f4f6fa",
+            highlightthickness=0,
+            borderwidth=0,
+        )
+        page_scrollbar = ttk.Scrollbar(main, orient="vertical", command=self.page_canvas.yview)
+        self.page_canvas.configure(yscrollcommand=page_scrollbar.set)
+        self.page_canvas.grid(row=0, column=0, sticky="nsew")
+        page_scrollbar.grid(row=0, column=1, sticky="ns")
+
         self.page = ttk.Frame(
-            shell,
+            self.page_canvas,
             style="Page.TFrame",
             padding=(self._px(24), self._px(20), self._px(24), self._px(20)),
         )
         page = self.page
-        page.grid(row=0, column=0, sticky="nsew")
+        self._page_window_id = self.page_canvas.create_window((0, 0), window=page, anchor="nw")
+        page.bind(
+            "<Configure>",
+            lambda _event: self.page_canvas.configure(scrollregion=self.page_canvas.bbox("all")),
+            add="+",
+        )
+        self.page_canvas.bind("<Configure>", self._resize_page_canvas, add="+")
         page.columnconfigure(0, weight=1)
         page.rowconfigure(4, weight=1)
 
@@ -288,6 +315,12 @@ class FolderBridgeLauncher:
         self.extension_sidebar = self._build_extension_sidebar(shell)
         self.extension_sidebar.grid(row=0, column=1, sticky="ns", padx=(0, 12), pady=12)
         self.extension_sidebar.grid_remove()
+
+    def _resize_page_canvas(self, event: tk.Event[tk.Misc]) -> None:
+        if not hasattr(self, "_page_window_id"):
+            return
+        self.page_canvas.itemconfigure(self._page_window_id, width=max(1, event.width))
+        self.page_canvas.configure(scrollregion=self.page_canvas.bbox("all"))
 
     def _build_extension_sidebar(self, parent: ttk.Frame) -> ttk.Frame:
         frame = ttk.Frame(parent, style="Card.TFrame", padding=self._px(14), width=self._px(320))
@@ -427,21 +460,28 @@ class FolderBridgeLauncher:
                 owned = bool(service_state.get("owned"))
                 external = bool(service_state.get("external"))
                 busy = extension_id in self._managed_service_busy
-                if cached is None:
+                install_root = str(service_state.get("install_root") or config.install_root or "")
+                auto_start = bool(service_state.get("auto_start", config.auto_start))
+                if busy and not online:
+                    service_text = "服务：正在启动 / 检测…"
+                elif cached is None:
                     service_text = "服务：检测中…"
                 elif online and owned:
                     service_text = "服务：在线 · FolderBridge 托管"
                 elif online and external:
                     service_text = "服务：在线 · 外部服务（不会被 FolderBridge 终止）"
+                elif not install_root:
+                    service_text = "服务：等待配置安装目录 · 自动启动尚未执行"
+                elif not auto_start:
+                    service_text = "服务：离线 · 自动启动已关闭"
                 else:
                     service_text = "服务：离线"
                 service_label = ttk.Label(card, text=service_text, style="Muted.TLabel", wraplength=self._px(270))
                 service_label.pack(anchor="w", padx=(22, 0), pady=(4, 0))
                 self._extension_wrapped_labels.append(service_label)
-                install_root = str(service_state.get("install_root") or config.install_root or "未选择")
                 path_label = ttk.Label(
                     card,
-                    text=f"ComfyUI：{install_root}",
+                    text=f"ComfyUI：{install_root or '未选择（首次需配置）'}",
                     style="Muted.TLabel",
                     wraplength=self._px(270),
                 )
@@ -604,10 +644,40 @@ class FolderBridgeLauncher:
         description = self.extension_registry.describe()
         return tuple(str(item["id"]) for item in description.get("extensions", []) if item.get("loaded"))
 
-    def _initialize_managed_services(self) -> None:
+    def _initialize_managed_services(self, *, final_pass: bool = True) -> None:
         if self._closing:
             return
-        for extension_id in self._loaded_extension_ids():
+        loaded = set(self._loaded_extension_ids())
+        description = self.extension_registry.describe()
+        managed_items = [
+            item
+            for item in description.get("extensions", [])
+            if self.managed_services.controller(str(item.get("id", ""))) is not None
+        ]
+        for item in managed_items:
+            extension_id = str(item["id"])
+            controller = self.managed_services.controller(extension_id)
+            if controller is None:
+                continue
+            if extension_id not in loaded:
+                if final_pass and extension_id not in self._managed_service_startup_logged:
+                    self._managed_service_startup_logged.add(extension_id)
+                    self._log(
+                        f"托管服务自动启动未执行：{extension_id} Extension 当前未加载；"
+                        "请确认已批准并启用该 Extension。"
+                    )
+                continue
+            config = controller.config()
+            if extension_id not in self._managed_service_startup_logged:
+                self._managed_service_startup_logged.add(extension_id)
+                if not config.install_root:
+                    self._log(f"托管服务自动启动检查：{extension_id} 尚未配置安装目录。")
+                elif not config.auto_start:
+                    self._log(f"托管服务自动启动检查：{extension_id} 自动启动已关闭。")
+                else:
+                    self._log(
+                        f"托管服务自动启动检查：{extension_id} · {config.install_root} · 正在检查/启动…"
+                    )
             self._ensure_managed_service_async(extension_id)
 
     def _refresh_managed_service_statuses_async(self) -> None:
@@ -1289,7 +1359,7 @@ class FolderBridgeLauncher:
         ttk.Button(header, text="关闭", command=dialog.destroy).grid(row=0, column=2, padx=(8, 0))
         ttk.Label(
             body,
-            text="ChatGPT 网页端按 1 → 4 完成；其他支持本地 stdio 的客户端看第 5 页；插件开发见附录。向导文字可拖选并用 Ctrl+C 复制。",
+            text="ChatGPT 网页端按 1 → 4 完成；其他支持本地 stdio 的客户端看第 5 页；Python/Node 与插件开发见附录。向导文字可拖选并用 Ctrl+C 复制。",
             style="Body.TLabel",
         ).grid(row=1, column=0, sticky="w", pady=(3, 14))
 
@@ -1363,7 +1433,7 @@ class FolderBridgeLauncher:
                 "1. 文件夹列表：逐个添加明确的工作区，最多 8 个；重复或父子重叠目录会被拒绝。全局权限首次使用保持“只读（推荐）”。",
                 "2. tunnel-client：只选择完整包中准确名为 tunnel-client.exe 的主程序；不要选 tunnel-client-runtime-*。Profile 保持 folderbridge 即可。",
                 "3. Tunnel ID：粘贴 Platform 中 tunnel_ 开头的 ID；Runtime API Key：粘贴控制面 Key（仅留内存，不保存）。",
-                "4. 按需勾选一次“全局预授权”（测试/构建/EXE/APK/GitHub/本地 ComfyUI），以后所有工作区继承；“高级：自定义任务”通常保持关闭。点击“启动连接”，等待顶部状态变成“运行中”。",
+                "4. 按需勾选一次“全局预授权”（测试/构建/EXE/APK/GitHub），以后所有工作区继承；插件授权与本地 ComfyUI 在右侧 Extensions 单独管理。“高级：自定义任务”通常保持关闭。点击“启动连接”，等待顶部状态变成“运行中”。",
                 "5. 使用期间必须保持 FolderBridge 运行；若失败，点“诊断”并查看脱敏日志。",
             ),
             wrap,
@@ -1443,6 +1513,36 @@ class FolderBridgeLauncher:
             other_buttons,
             text="复制 stdio 命令",
             command=lambda: self._copy_client_config("tunnel"),
+        ).pack(side="left", padx=(8, 0))
+
+        dependencies_tab = self._guide_tab(
+            notebook,
+            "可选开发 / 能力依赖：普通 EXE 用户无需安装",
+            (
+                "1. 只使用 FolderBridge.exe：无需另外安装 Python 或 Node.js。FolderBridge Windows 版是单文件应用并自带 Python runtime；连接 ChatGPT 网页版时只需另外准备 OpenAI 官方 tunnel-client.exe。",
+                "2. 从源码运行、开发 FolderBridge 或重新封装 Windows EXE：推荐安装 Python 3.11 x64，并确保命令行可以执行 python --version。FolderBridge 当前 Windows Release 构建以 Python 3.11 为可复现基线。",
+                "3. 重新封装 EXE 时使用独立虚拟环境：python -m venv .build-venv，然后用 .build-venv\\Scripts\\python.exe -m pip install -r requirements-build.txt 安装构建依赖；普通 EXE 用户不需要这些步骤。",
+                "4. 只有当某个工作区本身是 Node/npm 项目，且你希望调用它的 test/build 能力时，才安装 Node.js LTS；安装后用 node --version 与 npm --version 验证。不要为单纯运行 FolderBridge 安装 Node。",
+                "5. FolderBridge 的 test/build/package capability 是授权和受限入口，不是包管理器：勾选 capability 不会自动安装 Python、Node、Gradle、编译器或项目依赖。缺少工具链时应按目标项目自己的文档安装。",
+            ),
+            wrap,
+            warnings_after_steps={
+                2: "不要把“Python 3.11”写成 FolderBridge.exe 的运行前置条件；它只适用于源码/开发/重打包等场景。",
+                5: "只给可信项目开启会执行项目代码的 test/build/package 能力。",
+            },
+        )
+        notebook.add(dependencies_tab, text="附录  Python / Node")
+        dependency_buttons = ttk.Frame(dependencies_tab, style="Guide.TFrame")
+        dependency_buttons.pack(fill="x", pady=(10, 0))
+        ttk.Button(
+            dependency_buttons,
+            text="Python 官方 Windows 下载",
+            command=lambda: webbrowser.open(PYTHON_WINDOWS_URL),
+        ).pack(side="left")
+        ttk.Button(
+            dependency_buttons,
+            text="Node.js 官方 LTS 下载",
+            command=lambda: webbrowser.open(NODE_DOWNLOAD_URL),
         ).pack(side="left", padx=(8, 0))
 
         extension_tab = self._guide_tab(
@@ -1672,6 +1772,9 @@ class FolderBridgeLauncher:
                 self._refresh_extension_sidebar()
             elif kind == "managed-service-path-required":
                 extension_id = str(payload)
+                self._log("ComfyUI 尚未配置安装目录；自动启动会等待首次选择。请在右侧 Extensions 中选择 Portable 或源码安装根目录。")
+                if not self._sidebar_visible:
+                    self._toggle_extension_sidebar()
                 self.root.after_idle(lambda eid=extension_id: self._prompt_managed_service_path(eid))
             elif kind == "managed-service-error":
                 extension_id, message = payload  # type: ignore[misc]

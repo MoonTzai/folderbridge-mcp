@@ -80,6 +80,7 @@ class ManagedServiceTests(unittest.TestCase):
         self.assertEqual(install.working_directory, root / "ComfyUI")
         self.assertEqual(install.argv()[0], str(root / "python_embeded" / "python.exe"))
         self.assertIn("--windows-standalone-build", install.argv())
+        self.assertIn("--disable-auto-launch", install.argv())
         self.assertEqual(install.argv()[-4:], ["--listen", "127.0.0.1", "--port", "8188"])
 
     def test_detects_source_dot_venv_and_venv(self) -> None:
@@ -167,7 +168,25 @@ class ManagedServiceTests(unittest.TestCase):
         self.assertEqual(argv[0], str(root / "python_embeded" / "python.exe"))
         self.assertEqual(argv[2], str(root / "ComfyUI" / "main.py"))
         self.assertFalse(kwargs["shell"])
+        self.assertEqual(kwargs["stderr"], __import__("subprocess").STDOUT)
+        self.assertEqual(kwargs["env"]["PYTHONIOENCODING"], "utf-8")
+        self.assertEqual(kwargs["env"]["PYTHONUTF8"], "1")
+        self.assertIn("--disable-auto-launch", argv)
         self.assertFalse(any(str(value).lower().endswith((".bat", ".cmd")) for value in argv))
+
+    def test_premature_exit_reports_persistent_startup_log(self) -> None:
+        root = self._portable()
+        save_comfyui_service_config(ComfyUIServiceConfig(str(root), True), self.config_path)
+        process = FakeProcess()
+        process.returncode = 7
+        controller = ComfyUIServiceController(
+            config_path=self.config_path,
+            status_probe=lambda: {"online": False},
+            popen_factory=lambda *args, **kwargs: process,
+        )
+        with self.assertRaisesRegex(ManagedServiceError, r"退出码 7.*launcher-comfyui\.log"):
+            controller.start(ready_timeout_seconds=1)
+        self.assertTrue((self.config_path.parent / "launcher-comfyui.log").is_file())
 
     def test_owned_stop_uses_saved_process_handle(self) -> None:
         process = FakeProcess()

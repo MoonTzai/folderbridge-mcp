@@ -3,12 +3,12 @@
 [简体中文](README.zh-CN.md) | English
 
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache--2.0-blue.svg)](LICENSE)
-![Python 3.11+](https://img.shields.io/badge/Python-3.11%2B-3776AB)
+![Source Python 3.11+](https://img.shields.io/badge/Source%20Python-3.11%2B-3776AB)
 ![Transport: stdio](https://img.shields.io/badge/MCP-stdio-6B5CE7)
 
 > [!TIP]
-> **Windows users: [download FolderBridge.exe directly](https://github.com/MoonTzai/folderbridge-mcp/releases/latest/download/FolderBridge.exe).**
-> The binary is under GitHub **Releases → latest release → Assets**; it does not appear in the repository's source-file list. You can also open the [full release page](https://github.com/MoonTzai/folderbridge-mcp/releases/latest) for the EXE and its SHA-256 checksum file.
+> **FolderBridge itself is a single-file Windows app: [download `FolderBridge.exe` directly](https://github.com/MoonTzai/folderbridge-mcp/releases/latest/download/FolderBridge.exe) and double-click it. No Python or Node.js installation is required.**
+> The binary is under GitHub **Releases → latest release → Assets**; it does not appear in the repository's source-file list. For ChatGPT on the web, FolderBridge still uses OpenAI's separately distributed official `tunnel-client.exe`; the launcher guides you through selecting it. You can also open the [full release page](https://github.com/MoonTzai/folderbridge-mcp/releases/latest) for the EXE and its optional SHA-256 checksum file.
 
 **A safer, local-first bridge between AI clients and a small set of folders you explicitly choose.**
 
@@ -17,13 +17,13 @@ FolderBridge MCP is a zero-dependency Python MCP server plus a desktop launcher.
 > [!IMPORTANT]
 > This project is in an early public beta. It reduces the attack surface; it is not an operating-system sandbox. Only expose folders and repositories you trust.
 
-## 0.4.1 highlights
+## 0.4.2 highlights
 
-- **Mixed workspaces with `--allow-tasks`:** workspaces with no `.folderbridge.json`, approved named tasks, extension-only usage, and not-yet-approved task configs can coexist in one connection. Task approval is enforced only when that workspace's named task is actually called.
-- **Launcher-managed ComfyUI:** the Windows launcher can remember a validated ComfyUI Portable / `.venv` / `venv` installation and auto-start it when the bundled Local ComfyUI extension loads. An already-running `127.0.0.1:8188` instance is detected as external and reused instead of duplicated.
-- **Strict process ownership:** FolderBridge never persists a ComfyUI PID or arbitrary launch command and never kills a process merely because it owns port 8188. Only the in-memory `Popen` handle created by the current launcher run is stoppable.
-- **Safer shutdown:** FolderBridge-owned managed services stop before Tunnel/MCP, external services are left alone, and blocking process waits happen off the Tk main thread.
-- **Per-monitor DPI hardening:** Per-Monitor V2 remains enabled, with a lightweight DPI fallback poll and absolute `dpi / 96` metric recalculation to avoid cumulative scale drift when moving between monitors.
+- **Reachable high-DPI UI:** the main launcher page now has a vertical viewport scrollbar, so lower controls remain reachable when Windows scaling makes the content taller than the available screen.
+- **Clear ComfyUI first run and startup diagnostics:** if no ComfyUI install root has been saved yet, the launcher explicitly says auto-start is waiting for configuration, opens the Extensions sidebar, and prompts for a supported Portable / `.venv` / `venv` root instead of appearing to fail silently. Launcher startup performs a bounded second reconciliation pass instead of relying on one early extension snapshot; managed startup then waits up to 120 seconds, shows an in-progress state, uses `--disable-auto-launch`, and keeps combined startup output in `launcher-comfyui.log` so early exits/timeouts are diagnosable.
+- **Optional toolchains are labeled correctly:** `FolderBridge.exe` itself needs neither Python nor Node.js. Python 3.11 x64 is recommended for source/development/repackaging; Node.js LTS is only needed when a Node/npm workspace's own test/build flow needs it.
+- **Capabilities are not installers:** enabling test/build/package authorizes bounded execution; it does not install Python, Node, Gradle, compilers, package managers, or project dependencies.
+- **Single-file delivery clarified:** the Windows FolderBridge application is one EXE with its Python runtime bundled. ChatGPT web users still obtain OpenAI's official `tunnel-client.exe` separately.
 
 See [CHANGELOG.md](CHANGELOG.md) for the full release history and [Extension ABI v1](docs/extensions.md) for managed-service and plugin boundaries.
 
@@ -41,17 +41,18 @@ See [CHANGELOG.md](CHANGELOG.md) for the full release history and [Extension ABI
 
 ## Quick start
 
-Requirements:
+Requirements depend on how you use FolderBridge:
 
-- Python 3.11 or newer;
-- Windows for the tested double-click launcher experience (the stdio server is cross-platform);
+- **Standalone Windows EXE:** no separate Python or Node.js installation is required; Windows is the tested double-click launcher environment.
+- **Run/develop from source:** Python 3.11 or newer is required; Python 3.11 x64 is the recommended Windows build baseline.
+- **Project capabilities:** install only the toolchain required by the workspace itself (for example Node.js LTS for a Node/npm project's test/build scripts). Enabling a capability does not install that toolchain.
 - Git is optional and only used for bounded `status` and `diff` views.
 
 ### Windows executable — recommended
 
-Download `FolderBridge.exe` and `FolderBridge.exe.sha256` from the [latest GitHub release Assets](https://github.com/MoonTzai/folderbridge-mcp/releases/latest), or [download the EXE directly](https://github.com/MoonTzai/folderbridge-mcp/releases/latest/download/FolderBridge.exe). The binary does not appear in the repository's source-file list. No Python installation is required. Verify the checksum, then double-click `FolderBridge.exe`.
+Download the single `FolderBridge.exe` from the [latest GitHub release Assets](https://github.com/MoonTzai/folderbridge-mcp/releases/latest), or [download the EXE directly](https://github.com/MoonTzai/folderbridge-mcp/releases/latest/download/FolderBridge.exe). The binary does not appear in the repository's source-file list. `FolderBridge.exe` is the complete FolderBridge application and already contains its Python runtime, so normal EXE users do not install Python or Node.js. The adjacent `FolderBridge.exe.sha256` file is optional and exists only for integrity verification.
 
-The executable contains FolderBridge and its Python runtime, but it does **not** bundle OpenAI's `tunnel-client`; download the official client separately from OpenAI's release and select it in the launcher when using ChatGPT on the web.
+The one-file executable deliberately does **not** rebundle OpenAI's independently released `tunnel-client`; download the official client separately from OpenAI's release and select `tunnel-client.exe` in the launcher only when using ChatGPT on the web.
 
 > [!NOTE]
 > The current community build is not code-signed, so Windows identifies its publisher as unknown. If you do not trust an unsigned binary, build it from the audited source instead.
@@ -70,6 +71,14 @@ Add the workspaces you need, keep **Read only** selected for the first run, and 
 
 `folderbridge_gui.pyw` is kept as a source-only convenience for Python installations whose `.pyw` association points to an interpreter with Tkinter. The standalone `FolderBridge.exe` is the supported double-click entry point.
 
+### Optional development and project toolchains
+
+These are **not** prerequisites for normal `FolderBridge.exe` use:
+
+- For source development or rebuilding the Windows EXE, install **Python 3.11 x64** from the official [Python Windows downloads](https://www.python.org/downloads/windows/) and verify `python --version`. The packaging flow uses an isolated `.build-venv` and `requirements-build.txt`.
+- Install **Node.js LTS** from the official [Node.js downloads](https://nodejs.org/en/download) only when a target Node/npm workspace needs `node`/`npm` for its own test or build commands; verify with `node --version` and `npm --version`.
+- Other projects may require their own runtimes or compilers. FolderBridge capabilities provide authorization and bounded discovery/execution, not dependency installation.
+
 ## Connect ChatGPT on the web
 
 ChatGPT cannot connect directly to a local stdio process. FolderBridge uses OpenAI's official [Secure MCP Tunnel](https://developers.openai.com/api/docs/guides/secure-mcp-tunnels) for this path. You need:
@@ -82,7 +91,7 @@ ChatGPT cannot connect directly to a local stdio process. FolderBridge uses Open
 - the official [`tunnel-client`](https://github.com/openai/tunnel-client/releases/latest);
 - ChatGPT developer-mode access appropriate for your account or workspace.
 
-Click **网页端一键引导** (Web setup guide) in the launcher's upper-right corner for the same four steps and shortcuts below.
+Click **连接设置向导** (Connection setup guide) in the launcher's upper-right corner for the same steps and shortcuts below, including the optional Python/Node appendix.
 
 ### 1. Download the official Windows x64 client
 

@@ -2,6 +2,17 @@
 
 All notable changes to FolderBridge MCP are documented here.
 
+## 0.4.2 — 2026-08-23
+
+- Made the main Windows launcher page vertically scrollable so high-DPI / low-height displays no longer make lower controls unreachable when the scaled content is taller than the available viewport.
+- Kept per-monitor DPI recalculation while refreshing the scroll region after metric changes, so moving between displays does not strand content outside the usable page.
+- Made first-run ComfyUI managed-service state explicit: when no install root has been configured, the launcher now reports that auto-start is waiting for configuration, opens the Extensions sidebar, logs the required action, and then prompts for a supported Portable or source root instead of appearing to fail silently.
+- Improved ComfyUI startup diagnostics and tolerance: perform a bounded two-pass Launcher-start reconciliation instead of relying on a single 300 ms extension-state snapshot, show an in-progress service state, wait up to 120 seconds for heavy custom-node/CUDA initialization, launch with `--disable-auto-launch`, persist combined startup output to `launcher-comfyui.log`, and include that log path in early-exit/timeout errors instead of discarding stdout/stderr.
+- Added a connection-guide appendix for optional toolchains: the standalone `FolderBridge.exe` needs neither Python nor Node.js; Python 3.11 x64 is recommended for source/development/repackaging, while Node.js LTS is only needed for Node/npm workspaces whose test/build commands require it.
+- Clarified that global capabilities authorize bounded execution but do not install project runtimes, compilers, package managers, or dependencies, and corrected the guide so Local ComfyUI is documented under Extensions rather than as a global capability.
+- Clarified single-file Windows delivery in both READMEs: FolderBridge itself is one EXE with its Python runtime bundled, while ChatGPT web usage still requires OpenAI's separately distributed `tunnel-client.exe`.
+- Added 0.4.2 GUI/setup-guide regression coverage for scrollable high-DPI reachability, explicit ComfyUI first-run state, and optional Python/Node dependency guidance.
+
 ## 0.4.1 — 2026-08-23
 
 - Fixed `--allow-tasks` startup semantics so workspaces without `.folderbridge.json`, approved-task workspaces, extension-only workspaces, and workspaces with unapproved configs can coexist; approval is enforced only when a named task is actually executed.

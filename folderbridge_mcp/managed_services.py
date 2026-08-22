@@ -15,7 +15,7 @@ from .extensions import extension_state_root
 
 SERVICE_CONFIG_VERSION = 1
 COMFYUI_SERVICE_ID = "comfyui"
-COMFYUI_READY_TIMEOUT_SECONDS = 30
+COMFYUI_READY_TIMEOUT_SECONDS = 120
 COMFYUI_STOP_TIMEOUT_SECONDS = 12
 
 
@@ -35,6 +35,7 @@ class ComfyUIInstall:
         argv = [str(self.python_executable), "-s", str(self.main_py)]
         if self.mode == "portable":
             argv.append("--windows-standalone-build")
+        argv.append("--disable-auto-launch")
         argv.extend(("--listen", COMFYUI_HOST, "--port", str(COMFYUI_PORT)))
         return argv
 
@@ -193,33 +194,44 @@ class ComfyUIServiceController:
         if not config.install_root:
             raise ManagedServiceError("尚未配置 ComfyUI 安装目录。")
         install = detect_comfyui_install(config.install_root)
+        log_path = self.config_path.parent / "launcher-comfyui.log"
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        environment = os.environ.copy()
+        environment["PYTHONIOENCODING"] = "utf-8"
+        environment["PYTHONUTF8"] = "1"
         kwargs: dict[str, Any] = {
             "cwd": str(install.working_directory),
             "stdin": subprocess.DEVNULL,
-            "stdout": subprocess.DEVNULL,
-            "stderr": subprocess.DEVNULL,
+            "stderr": subprocess.STDOUT,
             "shell": False,
             "close_fds": True,
+            "env": environment,
         }
         if os.name == "nt":
             kwargs["creationflags"] = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
         else:
             kwargs["start_new_session"] = True
-        self._process = self._popen_factory(install.argv(), **kwargs)
+        with log_path.open("ab", buffering=0) as log_handle:
+            kwargs["stdout"] = log_handle
+            self._process = self._popen_factory(install.argv(), **kwargs)
 
         deadline = self._monotonic() + max(0.1, float(ready_timeout_seconds))
         while self._monotonic() < deadline:
             if self._process.poll() is not None:
                 code = self._process.returncode
                 self._process = None
-                raise ManagedServiceError(f"ComfyUI 启动进程提前退出（退出码 {code}）。")
+                raise ManagedServiceError(
+                    f"ComfyUI 启动进程提前退出（退出码 {code}）。启动日志：{log_path}"
+                )
             state = self.status()
             if state["online"]:
                 return {**state, "started": True, "reason": "ready"}
             self._sleep(0.25)
 
         self.stop(wait_port_seconds=2.0)
-        raise ManagedServiceError(f"ComfyUI 在 {ready_timeout_seconds:g} 秒内未就绪。")
+        raise ManagedServiceError(
+            f"ComfyUI 在 {ready_timeout_seconds:g} 秒内未就绪。启动日志：{log_path}"
+        )
 
     def ensure_auto_started(self) -> dict[str, Any]:
         state = self.status()
