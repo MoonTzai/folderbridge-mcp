@@ -32,6 +32,17 @@ FolderBridge MCP 是一个零第三方依赖的 Python MCP 服务器和桌面启
 - Windows 可获得已经测试过的双击启动体验，stdio 服务器本身可跨平台运行；
 - Git 为可选依赖，只用于有界的 `status` 和 `diff` 查看。
 
+### Windows EXE（推荐）
+
+从 [GitHub 最新版本](https://github.com/MoonTzai/folderbridge-mcp/releases/latest)下载 `FolderBridge.exe` 和 `FolderBridge.exe.sha256`。无需安装 Python；校验哈希后直接双击 `FolderBridge.exe`。
+
+EXE 包含 FolderBridge 及其 Python 运行时，但**不会**捆绑 OpenAI 的 `tunnel-client`。使用 ChatGPT 网页端时，仍需在启动器中选择单独下载的官方客户端。
+
+> [!NOTE]
+> 当前社区构建尚未进行代码签名，因此 Windows 会显示发布者未知。如果你不信任未签名二进制文件，请按照下方步骤从已审核源码自行构建。
+
+### 从源码运行
+
 克隆并启动图形界面：
 
 ```powershell
@@ -132,6 +143,18 @@ python -m unittest discover -s tests -v
 ```
 
 提交 Pull Request 前请阅读 [CONTRIBUTING.md](CONTRIBUTING.md)。
+
+### 构建 Windows EXE
+
+构建使用固定版本、仅构建时需要的 PyInstaller。发布 EXE 使用 console bootloader 和 `hide-console=hide-early`：双击时只显示图形界面，Tunnel 调用同一 EXE 的 `serve` 子命令时则保留 stdio。
+
+```powershell
+python -m venv .build-venv
+.\.build-venv\Scripts\python.exe -m pip install -r requirements-build.txt
+.\scripts\build_windows.ps1 -Python .\.build-venv\Scripts\python.exe
+```
+
+构建结果和 SHA-256 文件位于 `release\windows-x64`。
 
 ## 许可证
 

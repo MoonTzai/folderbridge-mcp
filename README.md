@@ -32,6 +32,17 @@ Requirements:
 - Windows for the tested double-click launcher experience (the stdio server is cross-platform);
 - Git is optional and only used for bounded `status` and `diff` views.
 
+### Windows executable — recommended
+
+Download `FolderBridge.exe` and `FolderBridge.exe.sha256` from the [latest GitHub release](https://github.com/MoonTzai/folderbridge-mcp/releases/latest). No Python installation is required. Verify the checksum, then double-click `FolderBridge.exe`.
+
+The executable contains FolderBridge and its Python runtime, but it does **not** bundle OpenAI's `tunnel-client`; select the separately downloaded official client in the launcher when using ChatGPT on the web.
+
+> [!NOTE]
+> The current community build is not code-signed, so Windows identifies its publisher as unknown. If you do not trust an unsigned binary, build it from the audited source instead.
+
+### Run from source
+
 Clone the repository and start the GUI:
 
 ```powershell
@@ -132,6 +143,18 @@ python -m unittest discover -s tests -v
 ```
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) before opening a pull request.
+
+### Build the Windows executable
+
+Builds use a pinned, build-time-only PyInstaller dependency. The released EXE uses the console bootloader with `hide-console=hide-early`: double-clicking opens only the GUI, while the same executable retains stdio when Tunnel starts its `serve` subcommand.
+
+```powershell
+python -m venv .build-venv
+.\.build-venv\Scripts\python.exe -m pip install -r requirements-build.txt
+.\scripts\build_windows.ps1 -Python .\.build-venv\Scripts\python.exe
+```
+
+Artifacts and a SHA-256 file are written to `release\windows-x64`.
 
 ## License
 

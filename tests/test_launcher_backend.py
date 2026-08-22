@@ -17,6 +17,7 @@ from folderbridge_mcp.launcher_backend import (
     build_init_argv,
     build_run_argv,
     control_plane_environment,
+    mcp_argv,
     redact_text,
     run_short_command,
 )
@@ -89,6 +90,15 @@ class LauncherBackendTests(unittest.TestCase):
         self.assertIn(str(self.root), init[9])
         self.assertEqual(build_doctor_argv(self.client, settings.profile), [str(self.client), "doctor", "--profile", settings.profile, "--explain"])
         self.assertEqual(build_run_argv(self.client, settings.profile), [str(self.client), "run", "--profile", settings.profile])
+
+    def test_frozen_build_uses_the_executable_as_the_stdio_server(self) -> None:
+        settings = self.settings()
+        workspace = settings.validate(require_tunnel_id=True)
+        with mock.patch.object(sys, "frozen", True, create=True):
+            argv = mcp_argv(workspace, "read_only", False)
+        self.assertEqual(argv[0], str(Path(sys.executable).resolve()))
+        self.assertEqual(argv[1:4], ["serve", "--workspace", str(workspace)])
+        self.assertEqual(argv[-1], "--read-only")
 
     def test_fingerprint_changes_when_workspace_access_changes(self) -> None:
         settings = self.settings()

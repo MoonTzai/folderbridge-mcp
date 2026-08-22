@@ -60,8 +60,6 @@ class FolderBridgeLauncher:
 
     def _create_variables(self) -> None:
         workspace = self.settings.workspace
-        if not workspace:
-            workspace = str(Path.cwd().resolve())
         self.workspace_var = tk.StringVar(value=workspace)
         self.access_var = tk.StringVar(value=self.settings.access_mode)
         self.profile_var = tk.StringVar(value=self.settings.profile)

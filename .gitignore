@@ -4,6 +4,9 @@ __pycache__/
 venv/
 .pytest_cache/
 .mypy_cache/
+.build-venv/
+.build/
+/release/
 .coverage
 htmlcov/
 dist/

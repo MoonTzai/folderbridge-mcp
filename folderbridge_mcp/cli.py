@@ -195,12 +195,17 @@ def _launcher() -> Path:
 
 
 def _server_argv(workspace: Path, *, read_only: bool, allow_tasks: bool) -> tuple[str, list[str]]:
-    args = [str(_launcher()), "serve", "--workspace", str(workspace)]
+    if getattr(sys, "frozen", False):
+        command = str(Path(sys.executable).resolve())
+        args = ["serve", "--workspace", str(workspace)]
+    else:
+        command = sys.executable
+        args = [str(_launcher()), "serve", "--workspace", str(workspace)]
     if read_only:
         args.append("--read-only")
     if allow_tasks:
         args.append("--allow-tasks")
-    return sys.executable, args
+    return command, args
 
 
 def _server_command(workspace: Path, *, read_only: bool, allow_tasks: bool) -> str:
@@ -209,7 +214,11 @@ def _server_command(workspace: Path, *, read_only: bool, allow_tasks: bool) -> s
 
 
 def _local_command(command: str, workspace: Path) -> str:
-    return _join_command([sys.executable, str(_launcher()), command, "--workspace", str(workspace)])
+    if getattr(sys, "frozen", False):
+        argv = [str(Path(sys.executable).resolve()), command, "--workspace", str(workspace)]
+    else:
+        argv = [sys.executable, str(_launcher()), command, "--workspace", str(workspace)]
+    return _join_command(argv)
 
 
 def _join_command(argv: list[str]) -> str:

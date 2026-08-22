@@ -178,7 +178,10 @@ def console_python() -> Path:
 
 
 def mcp_argv(workspace: Path, access_mode: str, allow_tasks: bool) -> list[str]:
-    argv = [str(console_python()), str(checkout_launcher_path()), "serve", "--workspace", str(workspace)]
+    if getattr(sys, "frozen", False):
+        argv = [str(Path(sys.executable).resolve()), "serve", "--workspace", str(workspace)]
+    else:
+        argv = [str(console_python()), str(checkout_launcher_path()), "serve", "--workspace", str(workspace)]
     if access_mode == "read_only":
         argv.append("--read-only")
     if allow_tasks:
@@ -201,6 +204,10 @@ def find_tunnel_client(explicit: str = "") -> Path | None:
         if resolved.is_file() and resolved.name.lower().startswith("tunnel-client"):
             return resolved
         return None
+    if getattr(sys, "frozen", False):
+        sibling = Path(sys.executable).resolve().with_name("tunnel-client.exe" if os.name == "nt" else "tunnel-client")
+        if sibling.is_file():
+            return sibling
     found = shutil.which("tunnel-client")
     return Path(found).resolve(strict=True) if found else None
 
