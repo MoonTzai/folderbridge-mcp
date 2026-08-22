@@ -683,7 +683,9 @@ class FolderBridgeLauncher:
                 "4. 点击“选择已解压的 EXE”，只选准确名为 tunnel-client.exe 的主程序。",
             ),
             wrap,
-            warning="不要下载或选择 tunnel-client-runtime-*：它只是内部组件，不支持 init，必然配置失败。只下载完整的 tunnel-client-v<版本>-windows-amd64.zip。",
+            warnings_after_steps={
+                1: "不要下载或选择 tunnel-client-runtime-*：它只是内部组件，不支持 init，必然配置失败。只下载完整的 tunnel-client-v<版本>-windows-amd64.zip。",
+            },
         )
         notebook.add(client_tab, text="1  Windows x64 客户端")
         ttk.Label(client_tab, textvariable=client_status, style="Body.TLabel", wraplength=wrap).pack(anchor="w", pady=(8, 6))
@@ -713,7 +715,9 @@ class FolderBridgeLauncher:
                 "5. 打开 Runtime API Keys，在同一 Platform organization 创建 Key；创建者需 Tunnels Read + Use。它只填在 FolderBridge。",
             ),
             wrap,
-            warning="只关联需要访问此本地工作区的 Organization / ChatGPT workspace，不要无范围地多选。",
+            warnings_after_steps={
+                3: "只关联需要访问此本地工作区的 Organization / ChatGPT workspace，不要无范围地多选。",
+            },
         )
         notebook.add(platform_tab, text="2  Platform Tunnel")
         platform_buttons = ttk.Frame(platform_tab, style="Guide.TFrame")
@@ -761,7 +765,9 @@ class FolderBridgeLauncher:
                 f"6. 发送任务请求，例如：“{CHATGPT_INVOCATION_EXAMPLE}”。如 ChatGPT 显示工具确认，核对后再确认。FolderBridge 顶部必须保持“运行中”。",
             ),
             wrap,
-            warning="不要保留默认 OAuth，也不要把 https://tunnel-service... 地址当“服务器 URL”填写，否则会报 does not implement OAuth。",
+            warnings_after_steps={
+                4: "不要保留默认 OAuth，也不要把 https://tunnel-service... 地址当“服务器 URL”填写，否则会报 does not implement OAuth。",
+            },
         )
         notebook.add(chatgpt_tab, text="4  ChatGPT 创建与调用")
         chatgpt_buttons = ttk.Frame(chatgpt_tab, style="Guide.TFrame")
@@ -785,7 +791,10 @@ class FolderBridgeLauncher:
                 "5. 客户端是否弹出工具确认属于客户端行为。FolderBridge 仍强制文件夹边界、只读开关、哈希防冲突和任务白名单。",
             ),
             wrap,
-            warning="首次接入保持只读。不要因为客户端显示了确认弹窗，就把它当成 FolderBridge 的唯一安全边界。",
+            warnings_after_steps={
+                2: "首次接入保持只读。",
+                5: "不要因为客户端显示了确认弹窗，就把它当成 FolderBridge 的唯一安全边界。",
+            },
         )
         notebook.add(other_tab, text="5  其他 MCP 客户端")
         other_buttons = ttk.Frame(other_tab, style="Guide.TFrame")
@@ -818,8 +827,13 @@ class FolderBridgeLauncher:
         steps: tuple[str, ...],
         wrap: int,
         *,
-        warning: str = "",
+        warnings_after_steps: dict[int, str] | None = None,
     ) -> ttk.Frame:
+        warnings = warnings_after_steps or {}
+        invalid_steps = sorted(step_number for step_number in warnings if not 1 <= step_number <= len(steps))
+        if invalid_steps:
+            raise ValueError(f"警告对应的步骤号不存在：{invalid_steps}")
+
         tab = ttk.Frame(notebook, style="Guide.TFrame", padding=(20, 18, 20, 18))
         guide_text = scrolledtext.ScrolledText(
             tab,
@@ -859,14 +873,15 @@ class FolderBridgeLauncher:
             lmargin1=self._px(10),
             lmargin2=self._px(10),
             rmargin=self._px(10),
-            spacing1=self._px(8),
+            spacing1=self._px(4),
             spacing3=self._px(8),
         )
         guide_text.insert("end", f"{title}\n", "title")
-        for step in steps:
+        for step_number, step in enumerate(steps, start=1):
             guide_text.insert("end", f"{step}\n", "step")
-        if warning:
-            guide_text.insert("end", f"\n注意：{warning}\n", "warning")
+            warning = warnings.get(step_number, "").strip()
+            if warning:
+                guide_text.insert("end", f"注意：{warning}\n", "warning")
         guide_text.configure(state="disabled")
         guide_text.bind("<Control-a>", self._select_all_guide_text)
         guide_text.bind("<Control-A>", self._select_all_guide_text)
