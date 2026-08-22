@@ -105,7 +105,7 @@ Create the key for `tunnel-client` under the same Platform organization's [Runti
 1. Select exactly one workspace folder and keep **Read only (recommended)** for the first run.
 2. Select `tunnel-client.exe` from the complete archive, never a `tunnel-client-runtime-*` component; the default `folderbridge` profile is suitable.
 3. Enter the same Tunnel ID and Runtime API key, and leave advanced named tasks disabled.
-4. Click **Start connection**. The launcher runs the official `init`, `doctor`, and `run` flow. Continue only after the top status reads **运行中** (Running).
+4. Click **Start connection**. The launcher runs the official `init`, `doctor`, and `run` flow. Continue only after the top status reads **运行中** (Running). When changing the folder or access mode later, click **应用配置** (Apply configuration) again; the launcher updates the same profile that it manages.
 
 ### 4. Create the ChatGPT developer-mode app
 

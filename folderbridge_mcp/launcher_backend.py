@@ -258,6 +258,10 @@ def build_init_argv(executable: Path, settings: LauncherSettings, workspace: Pat
         settings.tunnel_id,
         "--mcp-command",
         mcp_command(workspace, settings.access_mode, settings.allow_tasks),
+        # The launcher owns this profile after the user explicitly applies the
+        # form. Re-applying settings must update it instead of failing merely
+        # because the same profile name already exists.
+        "--force",
     ]
 
 

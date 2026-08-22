@@ -95,6 +95,14 @@ class LauncherBackendTests(unittest.TestCase):
         self.assertEqual(build_doctor_argv(self.client, settings.profile), [str(self.client), "doctor", "--profile", settings.profile, "--explain"])
         self.assertEqual(build_run_argv(self.client, settings.profile), [str(self.client), "run", "--profile", settings.profile])
 
+    def test_init_replaces_the_launcher_managed_profile(self) -> None:
+        settings = self.settings()
+        workspace = settings.validate(require_tunnel_id=True)
+
+        init = build_init_argv(self.client, settings, workspace)
+
+        self.assertIn("--force", init)
+
     def test_frozen_build_uses_the_executable_as_the_stdio_server(self) -> None:
         settings = self.settings()
         workspace = settings.validate(require_tunnel_id=True)

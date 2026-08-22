@@ -2,6 +2,11 @@
 
 All notable changes to FolderBridge MCP are documented here.
 
+## 0.1.6 — 2026-08-22
+
+- Fixed “configuration failed” when applying settings after the `folderbridge` Tunnel profile already exists.
+- Re-applying the launcher form now intentionally updates its validated, launcher-managed profile instead of treating it as a first-time-only creation.
+
 ## 0.1.5 — 2026-08-22
 
 - Fixed the packaged one-file server failing to start through `tunnel-client` under PyInstaller 6.22.1+ parent-process validation.
