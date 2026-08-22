@@ -51,9 +51,9 @@ cd folderbridge-mcp
 python .\folderbridge_launcher.py gui
 ```
 
-On Windows you can also double-click `folderbridge_gui.pyw`.
-
 Choose a workspace, keep **Read only** selected for the first run, and use the status panel to finish setup. Launcher preferences are stored outside the repository; the Runtime API key is never saved.
+
+`folderbridge_gui.pyw` is kept as a source-only convenience for Python installations whose `.pyw` association points to an interpreter with Tkinter. The standalone `FolderBridge.exe` is the supported double-click entry point.
 
 ## Connect ChatGPT on the web
 

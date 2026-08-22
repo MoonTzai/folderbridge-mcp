@@ -51,9 +51,9 @@ cd folderbridge-mcp
 python .\folderbridge_launcher.py gui
 ```
 
-Windows 也可以直接双击 `folderbridge_gui.pyw`。
-
 选择工作区，首次使用建议保持“只读”，然后按照状态面板完成设置。启动器偏好保存在仓库之外，Runtime API Key 永远不会落盘。
+
+`folderbridge_gui.pyw` 仅作为源码环境的便利入口保留，要求 Windows 的 `.pyw` 文件关联指向带 Tkinter 的 Python。普通用户应双击独立的 `FolderBridge.exe`。
 
 ## 连接 ChatGPT 网页端
 
