@@ -2,6 +2,12 @@
 
 All notable changes to FolderBridge MCP are documented here.
 
+## 0.1.5 — 2026-08-22
+
+- Fixed the packaged one-file server failing to start through `tunnel-client` under PyInstaller 6.22.1+ parent-process validation.
+- Launch the stdio server as an independent PyInstaller instance using the documented public environment reset switch.
+- Clarified that Secure MCP Tunnel needs outbound HTTPS only and never requires RDP, router port forwarding, DMZ, or inbound port 3389.
+
 ## 0.1.4 — 2026-08-22
 
 - Fixed Windows Tunnel profile creation when the FolderBridge executable or workspace path contains spaces: generated `--mcp-command` paths now survive the official client's POSIX-style parsing.

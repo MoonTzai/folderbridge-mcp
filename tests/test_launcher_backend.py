@@ -157,6 +157,20 @@ class LauncherBackendTests(unittest.TestCase):
             with self.assertRaises(LauncherError):
                 control_plane_environment("")
 
+    def test_frozen_launcher_resets_pyinstaller_environment_for_nested_server(self) -> None:
+        inherited = {
+            "_PYI_ARCHIVE_FILE": r"C:\FolderBridge.exe",
+            "_PYI_PARENT_PROCESS_LEVEL": "1",
+        }
+        with mock.patch.dict(os.environ, inherited, clear=True), mock.patch.object(
+            sys, "frozen", True, create=True
+        ):
+            env = control_plane_environment("runtime-key")
+
+        self.assertEqual(env["PYINSTALLER_RESET_ENVIRONMENT"], "1")
+        self.assertEqual(env["_PYI_ARCHIVE_FILE"], inherited["_PYI_ARCHIVE_FILE"])
+        self.assertNotIn("PYINSTALLER_RESET_ENVIRONMENT", os.environ)
+
     def test_redaction_covers_explicit_and_bearer_secrets(self) -> None:
         secret = "runtime-secret-value"
         prefixed_key = "sk-" + "example12345"

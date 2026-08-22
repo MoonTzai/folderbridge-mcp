@@ -64,6 +64,9 @@ Choose a workspace, keep **Read only** selected for the first run, and use the s
 
 ChatGPT cannot connect directly to a local stdio process. FolderBridge uses OpenAI's official [Secure MCP Tunnel](https://developers.openai.com/api/docs/guides/secure-mcp-tunnels) for this path. You need:
 
+> [!IMPORTANT]
+> Secure MCP Tunnel requires only **outbound HTTPS (port 443 by default)** from this computer and no internet-facing inbound port. Never enable Windows Remote Desktop, router port forwarding, DMZ, UPnP mappings, or port `3389` for FolderBridge; none of them are part of Tunnel setup. If a firewall asks about inbound access, do not create a broad public inbound rule just to make the Tunnel work.
+
 - a `tunnel_id` from [OpenAI Platform Tunnel settings](https://platform.openai.com/settings/organization/tunnels);
 - a key for `tunnel-client` from the same organization's [Runtime API Keys](https://platform.openai.com/settings/organization/api-keys);
 - the official [`tunnel-client`](https://github.com/openai/tunnel-client/releases/latest);

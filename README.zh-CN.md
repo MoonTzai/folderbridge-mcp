@@ -64,6 +64,9 @@ python .\folderbridge_launcher.py gui
 
 ChatGPT 不能直接连接本地 stdio 进程。FolderBridge 通过 OpenAI 官方 [Secure MCP Tunnel](https://developers.openai.com/api/docs/guides/secure-mcp-tunnels) 完成这条链路。你需要：
 
+> [!IMPORTANT]
+> Secure MCP Tunnel 只需要本机向 OpenAI 发起**出站 HTTPS（默认 443）**，不需要开放任何互联网入站端口。不要为 FolderBridge 开启 Windows 远程桌面、路由器端口转发、DMZ、UPnP 映射或 `3389`；这些都不属于 Tunnel 配置。如果防火墙询问是否允许入站访问，不要为了 Tunnel 创建面向公网的宽泛入站规则。
+
 - 从 [OpenAI Platform Tunnel 设置](https://platform.openai.com/settings/organization/tunnels)取得 `tunnel_id`；
 - 从同一组织的 [Runtime API Keys](https://platform.openai.com/settings/organization/api-keys)创建供 `tunnel-client` 使用的 Key；
 - 官方 [`tunnel-client`](https://github.com/openai/tunnel-client/releases/latest)；

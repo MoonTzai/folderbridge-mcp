@@ -271,6 +271,11 @@ def build_run_argv(executable: Path, profile: str) -> list[str]:
 
 def control_plane_environment(api_key: str) -> dict[str, str]:
     env = dict(os.environ)
+    if getattr(sys, "frozen", False):
+        # tunnel-client starts this same one-file executable as an independent
+        # stdio MCP server. PyInstaller 6.9+ otherwise treats it as a worker of
+        # the GUI instance, and 6.22.1+ rejects tunnel-client as the parent.
+        env["PYINSTALLER_RESET_ENVIRONMENT"] = "1"
     memory_key = api_key.strip()
     if len(memory_key) > 4096 or "\x00" in memory_key:
         raise LauncherError("Runtime API Key 格式无效")
