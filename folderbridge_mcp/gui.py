@@ -9,6 +9,7 @@ from pathlib import Path
 import tkinter as tk
 from tkinter import filedialog, messagebox, scrolledtext, ttk
 
+from .config import canonical_workspaces, workspace_id
 from .dpi import (
     enable_windows_dpi_awareness,
     fitted_window_size,
@@ -79,8 +80,7 @@ class FolderBridgeLauncher:
         self.root.after(500, self._poll_process)
 
     def _create_variables(self) -> None:
-        workspace = self.settings.workspace
-        self.workspace_var = tk.StringVar(value=workspace)
+        self.workspace_paths = list(self.settings.workspaces)
         self.access_var = tk.StringVar(value=self.settings.access_mode)
         self.profile_var = tk.StringVar(value=self.settings.profile)
         self.tunnel_id_var = tk.StringVar(value=self.settings.tunnel_id)
@@ -98,7 +98,6 @@ class FolderBridgeLauncher:
         self.key_hint = tk.StringVar()
 
         for variable in (
-            self.workspace_var,
             self.access_var,
             self.profile_var,
             self.tunnel_id_var,
@@ -186,6 +185,8 @@ class FolderBridgeLauncher:
         style.configure("TButton", padding=(self._px(10), self._px(7)), font=("Segoe UI", 9))
         style.configure("TRadiobutton", background="#ffffff", font=("Segoe UI", 9))
         style.configure("TCheckbutton", background="#ffffff", font=("Segoe UI", 9))
+        style.configure("Workspace.Treeview", font=("Segoe UI", 9), rowheight=self._px(25))
+        style.configure("Workspace.Treeview.Heading", font=("Segoe UI", 9, "bold"))
 
     def _build_ui(self) -> None:
         page = ttk.Frame(self.root, style="Page.TFrame", padding=(24, 20, 24, 20))
@@ -199,7 +200,7 @@ class FolderBridgeLauncher:
         ttk.Label(header, text="FolderBridge MCP", style="Title.TLabel").grid(row=0, column=0, sticky="w")
         ttk.Label(
             header,
-            text="把一个明确的本地文件夹安全地接到支持 MCP 的 AI 客户端",
+            text="把一个或多个明确的本地文件夹安全地接到支持 MCP 的 AI 客户端",
             style="Subtitle.TLabel",
         ).grid(row=1, column=0, sticky="w", pady=(2, 0))
         self.guide_button = ttk.Button(header, text="连接设置向导", command=self._open_web_setup)
@@ -246,15 +247,37 @@ class FolderBridgeLauncher:
         ttk.Label(card, text="1  选择本地工作区", style="CardTitle.TLabel").grid(row=0, column=0, columnspan=3, sticky="w")
         ttk.Label(
             card,
-            text="MCP 进程只能访问这个文件夹；子目录中的链接、凭据和常见依赖目录会被拦截。",
+            text="每个目录保持独立安全边界；链接、凭据和常见依赖目录会被拦截，重复或父子重叠目录不能同时添加。",
             style="Body.TLabel",
         ).grid(row=1, column=0, columnspan=3, sticky="w", pady=(3, 12))
 
-        ttk.Label(card, text="文件夹", style="Field.TLabel").grid(row=2, column=0, sticky="w", padx=(0, 10))
-        self.workspace_entry = ttk.Entry(card, textvariable=self.workspace_var)
-        self.workspace_entry.grid(row=2, column=1, sticky="ew")
-        self.browse_workspace_button = ttk.Button(card, text="浏览…", command=self._browse_workspace)
-        self.browse_workspace_button.grid(row=2, column=2, padx=(8, 0))
+        ttk.Label(card, text="文件夹列表", style="Field.TLabel").grid(row=2, column=0, sticky="nw", padx=(0, 10))
+        workspace_list = ttk.Frame(card, style="Card.TFrame")
+        workspace_list.grid(row=2, column=1, sticky="ew")
+        workspace_list.columnconfigure(0, weight=1)
+        self.workspace_tree = ttk.Treeview(
+            workspace_list,
+            columns=("path", "workspace_id"),
+            show="headings",
+            height=3,
+            selectmode="extended",
+            style="Workspace.Treeview",
+        )
+        self.workspace_tree.heading("path", text="已允许的本地目录（最多 8 个）", anchor="w")
+        self.workspace_tree.heading("workspace_id", text="Workspace ID", anchor="w")
+        self.workspace_tree.column("path", anchor="w", stretch=True)
+        self.workspace_tree.column("workspace_id", anchor="w", stretch=False, width=self._px(115))
+        self.workspace_tree.grid(row=0, column=0, sticky="ew")
+        workspace_scroll = ttk.Scrollbar(workspace_list, orient="vertical", command=self.workspace_tree.yview)
+        workspace_scroll.grid(row=0, column=1, sticky="ns")
+        self.workspace_tree.configure(yscrollcommand=workspace_scroll.set)
+        workspace_buttons = ttk.Frame(card, style="Card.TFrame")
+        workspace_buttons.grid(row=2, column=2, sticky="ns", padx=(8, 0))
+        self.add_workspace_button = ttk.Button(workspace_buttons, text="添加文件夹…", command=self._add_workspace)
+        self.add_workspace_button.pack(fill="x")
+        self.remove_workspace_button = ttk.Button(workspace_buttons, text="移除选中", command=self._remove_workspaces)
+        self.remove_workspace_button.pack(fill="x", pady=(8, 0))
+        self._render_workspace_tree()
 
         ttk.Label(card, text="权限", style="Field.TLabel").grid(row=3, column=0, sticky="nw", pady=(13, 0))
         mode_frame = ttk.Frame(card, style="Card.TFrame")
@@ -268,7 +291,7 @@ class FolderBridgeLauncher:
         self.read_only_radio.pack(side="left")
         self.read_write_radio = ttk.Radiobutton(
             mode_frame,
-            text="读写（修改前仍需 ChatGPT 确认）",
+            text="读写（作用于列表全部目录；修改前仍需 ChatGPT 确认）",
             value="read_write",
             variable=self.access_var,
         )
@@ -383,9 +406,12 @@ class FolderBridgeLauncher:
             self._refresh_status_cards()
 
     def _refresh_status_cards(self) -> None:
-        raw_workspace = self.workspace_var.get().strip()
-        workspace = Path(raw_workspace).expanduser() if raw_workspace else None
-        self.workspace_status.set(workspace.name if workspace and workspace.name else "未选择")
+        if not self.workspace_paths:
+            self.workspace_status.set("未选择")
+        elif len(self.workspace_paths) == 1:
+            self.workspace_status.set(Path(self.workspace_paths[0]).name or "1 个目录")
+        else:
+            self.workspace_status.set(f"{len(self.workspace_paths)} 个独立目录")
         mode = self.access_var.get()
         if mode == "read_only":
             self.access_status.set("只读 · 安全")
@@ -421,7 +447,7 @@ class FolderBridgeLauncher:
 
     def _settings_from_form(self) -> LauncherSettings:
         return LauncherSettings(
-            workspace=self.workspace_var.get().strip(),
+            workspaces=list(self.workspace_paths),
             access_mode=self.access_var.get(),
             profile=self.profile_var.get().strip(),
             tunnel_id=self.tunnel_id_var.get().strip(),
@@ -434,10 +460,35 @@ class FolderBridgeLauncher:
         self.settings = settings
         self.store.save(settings)
 
-    def _browse_workspace(self) -> None:
-        selected = filedialog.askdirectory(title="选择允许 ChatGPT 访问的工作区", initialdir=self.workspace_var.get() or str(Path.cwd()))
-        if selected:
-            self.workspace_var.set(selected)
+    def _render_workspace_tree(self) -> None:
+        if not hasattr(self, "workspace_tree"):
+            return
+        self.workspace_tree.delete(*self.workspace_tree.get_children())
+        for index, path in enumerate(self.workspace_paths):
+            identifier = workspace_id(Path(path).expanduser().resolve(strict=False))
+            self.workspace_tree.insert("", "end", iid=str(index), values=(path, identifier))
+
+    def _add_workspace(self) -> None:
+        initial = self.workspace_paths[-1] if self.workspace_paths else str(Path.cwd())
+        selected = filedialog.askdirectory(title="添加允许 AI 访问的工作区", initialdir=initial)
+        if not selected:
+            return
+        try:
+            roots = canonical_workspaces([*self.workspace_paths, selected])
+        except (OSError, ValueError) as exc:
+            self._show_error(str(exc))
+            return
+        self.workspace_paths = [str(root) for root in roots]
+        self._render_workspace_tree()
+        self._refresh_status_cards()
+
+    def _remove_workspaces(self) -> None:
+        selected = {int(item) for item in self.workspace_tree.selection()}
+        if not selected:
+            return
+        self.workspace_paths = [path for index, path in enumerate(self.workspace_paths) if index not in selected]
+        self._render_workspace_tree()
+        self._refresh_status_cards()
 
     def _browse_tunnel_client(self) -> None:
         selected = filedialog.askopenfilename(
@@ -483,7 +534,7 @@ class FolderBridgeLauncher:
     def _start_connection(self) -> None:
         try:
             settings = self._settings_from_form()
-            workspace = settings.validate(require_tunnel_id=True)
+            workspaces = settings.validate(require_tunnel_id=True)
             executable = self._require_tunnel_client(settings.tunnel_client_path)
             env = control_plane_environment(self.api_key_var.get())
             fingerprint = settings.fingerprint()
@@ -502,7 +553,7 @@ class FolderBridgeLauncher:
             try:
                 if needs_init:
                     self._queue_event("log", "检测到首次使用或配置变化，正在生成 Tunnel profile…")
-                    result = run_short_command(build_init_argv(executable, settings, workspace), env=env, timeout_seconds=45)
+                    result = run_short_command(build_init_argv(executable, settings, workspaces), env=env, timeout_seconds=45)
                     self._queue_command_result("init", result)
                     if result.timed_out or result.exit_code != 0:
                         raise LauncherError("Tunnel profile 配置失败，请查看日志")
@@ -536,7 +587,7 @@ class FolderBridgeLauncher:
     def _apply_config(self) -> None:
         try:
             settings = self._settings_from_form()
-            workspace = settings.validate(require_tunnel_id=True)
+            workspaces = settings.validate(require_tunnel_id=True)
             executable = self._require_tunnel_client(settings.tunnel_client_path)
             env = control_plane_environment(self.api_key_var.get())
             fingerprint = settings.fingerprint()
@@ -550,7 +601,7 @@ class FolderBridgeLauncher:
 
         def work() -> None:
             try:
-                result = run_short_command(build_init_argv(executable, settings, workspace), env=env, timeout_seconds=45)
+                result = run_short_command(build_init_argv(executable, settings, workspaces), env=env, timeout_seconds=45)
                 self._queue_command_result("init", result)
                 if result.timed_out or result.exit_code != 0:
                     raise LauncherError("配置失败，请查看日志")
@@ -612,8 +663,8 @@ class FolderBridgeLauncher:
     def _copy_mcp_command(self) -> None:
         try:
             settings = self._settings_from_form()
-            workspace = settings.validate(require_tunnel_id=False)
-            command = mcp_command(workspace, settings.access_mode, settings.allow_tasks)
+            workspaces = settings.validate(require_tunnel_id=False)
+            command = mcp_command(workspaces, settings.access_mode, settings.allow_tasks)
         except LauncherError as exc:
             self._show_error(str(exc))
             return
@@ -730,7 +781,7 @@ class FolderBridgeLauncher:
             notebook,
             "FolderBridge 主界面这样填",
             (
-                "1. 文件夹：只选一个明确工作区；权限首次使用保持“只读（推荐）”。",
+                "1. 文件夹列表：逐个添加明确的工作区，最多 8 个；重复或父子重叠目录会被拒绝。全局权限首次使用保持“只读（推荐）”。",
                 "2. tunnel-client：只选择完整包中准确名为 tunnel-client.exe 的主程序；不要选 tunnel-client-runtime-*。Profile 保持 folderbridge 即可。",
                 "3. Tunnel ID：粘贴 Platform 中 tunnel_ 开头的 ID；Runtime API Key：粘贴控制面 Key（仅留内存，不保存）。",
                 "4. “高级：允许任务”保持关闭。点击“启动连接”，等待顶部状态变成“运行中”。",
@@ -785,7 +836,7 @@ class FolderBridgeLauncher:
             "其他 MCP 客户端：优先直接连接 stdio",
             (
                 "1. 兼容条件：客户端能启动本地程序，分别配置 command 与 args，并通过 stdin/stdout 使用 MCP 工具。",
-                "2. 接入命令：FolderBridge.exe serve --workspace <工作区绝对路径> --read-only。通常由客户端自动启停，无需打开 GUI。",
+                "2. 接入命令：FolderBridge.exe serve --workspace <路径1> --workspace <路径2> --read-only；每增加一个目录就重复一次 --workspace。通常由客户端自动启停，无需打开 GUI。",
                 "3. 客户端使用 mcpServers 风格时复制 JSON；使用 mcp_servers 风格时复制 TOML；字段名仍以该客户端文档为准。",
                 "4. 只支持远程 HTTP/SSE、网页或移动端且不能启动本地进程时，不能直接连接；需要该厂商的官方网关、Tunnel 或显式代理。",
                 "5. 客户端是否弹出工具确认属于客户端行为。FolderBridge 仍强制文件夹边界、只读开关、哈希防冲突和任务白名单。",
@@ -927,9 +978,9 @@ class FolderBridgeLauncher:
     def _copy_client_config(self, output_format: str) -> None:
         try:
             settings = self._settings_from_form()
-            workspace = settings.validate(require_tunnel_id=False)
+            workspaces = settings.validate(require_tunnel_id=False)
             rendered = render_client_config(
-                workspace,
+                workspaces,
                 settings.access_mode,
                 settings.allow_tasks,
                 output_format,
@@ -1048,8 +1099,8 @@ class FolderBridgeLauncher:
     def _set_form_state(self, enabled: bool) -> None:
         state = "normal" if enabled else "disabled"
         for widget in (
-            self.workspace_entry,
-            self.browse_workspace_button,
+            self.add_workspace_button,
+            self.remove_workspace_button,
             self.client_entry,
             self.browse_client_button,
             self.profile_entry,
@@ -1061,6 +1112,7 @@ class FolderBridgeLauncher:
             self.tasks_check,
         ):
             widget.configure(state=state)
+        self.workspace_tree.state(("!disabled",) if enabled else ("disabled",))
 
     def _log(self, text: str) -> None:
         clean = redact_text(text.rstrip(), (self._active_secret,))

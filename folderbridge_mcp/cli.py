@@ -14,6 +14,7 @@ from .config import (
     ConfigError,
     approve_config,
     canonical_workspace,
+    canonical_workspaces,
     config_is_trusted,
     load_config,
     trust_path,
@@ -44,13 +45,13 @@ def build_parser() -> argparse.ArgumentParser:
     _workspace_argument(doctor)
 
     config = subparsers.add_parser("client-config", help="Print a ready-to-use local client or tunnel command.")
-    _workspace_argument(config)
+    _workspace_arguments(config)
     config.add_argument("--format", choices=("tunnel", "json", "toml"), default="tunnel")
     config.add_argument("--read-only", action="store_true")
     config.add_argument("--allow-tasks", action="store_true")
 
     serve = subparsers.add_parser("serve", help="Run the MCP server over stdio.")
-    _workspace_argument(serve)
+    _workspace_arguments(serve)
     serve.add_argument("--read-only", action="store_true", help="Do not advertise the edit tool.")
     serve.add_argument(
         "--allow-tasks",
@@ -66,6 +67,15 @@ def _workspace_argument(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--workspace", default=".", help="The one directory this process can access.")
 
 
+def _workspace_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--workspace",
+        dest="workspaces",
+        action="append",
+        help="An allowed directory. Repeat for up to eight separate workspaces.",
+    )
+
+
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     if args.command == "gui":
@@ -73,6 +83,32 @@ def main(argv: list[str] | None = None) -> int:
 
         return gui_main()
     try:
+        if args.command in {"client-config", "serve"}:
+            workspaces = canonical_workspaces(args.workspaces or ["."])
+            if args.command == "client-config":
+                return _client_config(
+                    workspaces,
+                    output_format=args.format,
+                    read_only=args.read_only,
+                    allow_tasks=args.allow_tasks,
+                )
+            # tunnel-client needs this secret, but the local MCP subprocess does not.
+            # Drop it before any tool or approved repository task can run.
+            os.environ.pop("CONTROL_PLANE_API_KEY", None)
+            runtime = ToolRuntime.from_roots(
+                workspaces,
+                read_only=args.read_only,
+                allow_tasks=args.allow_tasks,
+            )
+            names = ",".join(workspace.name for workspace in workspaces)
+            print(
+                f"folderbridge-mcp {__version__}: stdio workspaces={len(workspaces)} ({names}) "
+                f"mode={'read-only' if args.read_only else 'read/write'} tasks={args.allow_tasks}",
+                file=sys.stderr,
+                flush=True,
+            )
+            McpServer(runtime).serve()
+            return 0
         workspace = canonical_workspace(args.workspace)
         if args.command == "init":
             return _init(workspace, force=args.force, trust=args.trust)
@@ -80,32 +116,6 @@ def main(argv: list[str] | None = None) -> int:
             return _approve(workspace)
         if args.command == "doctor":
             return _doctor(workspace)
-        if args.command == "client-config":
-            return _client_config(
-                workspace,
-                output_format=args.format,
-                read_only=args.read_only,
-                allow_tasks=args.allow_tasks,
-            )
-        if args.command == "serve":
-            # tunnel-client needs this secret, but the local MCP subprocess does not.
-            # Drop it before any tool or approved repository task can run.
-            os.environ.pop("CONTROL_PLANE_API_KEY", None)
-            config = load_config(workspace, required=args.allow_tasks)
-            runtime = ToolRuntime(
-                workspace,
-                config,
-                read_only=args.read_only,
-                allow_tasks=args.allow_tasks,
-            )
-            print(
-                f"folderbridge-mcp {__version__}: stdio workspace={workspace.name} "
-                f"mode={'read-only' if args.read_only else 'read/write'} tasks={args.allow_tasks}",
-                file=sys.stderr,
-                flush=True,
-            )
-            McpServer(runtime).serve()
-            return 0
     except ConfigError as exc:
         print(f"folderbridge-mcp: {exc}", file=sys.stderr)
         return 2
@@ -156,13 +166,14 @@ def _doctor(workspace: Path) -> int:
     return 0
 
 
-def _client_config(workspace: Path, *, output_format: str, read_only: bool, allow_tasks: bool) -> int:
+def _client_config(workspaces: tuple[Path, ...], *, output_format: str, read_only: bool, allow_tasks: bool) -> int:
     if allow_tasks:
-        config = load_config(workspace, required=True)
-        if not config_is_trusted(workspace, config):
-            raise ConfigError(f"{CONFIG_NAME} is not approved on this machine")
+        for workspace in workspaces:
+            config = load_config(workspace, required=True)
+            if not config_is_trusted(workspace, config):
+                raise ConfigError(f"{CONFIG_NAME} is not approved for {workspace} on this machine")
     access_mode = "read_only" if read_only else "read_write"
-    print(render_client_config(workspace, access_mode, allow_tasks, output_format))
+    print(render_client_config(workspaces, access_mode, allow_tasks, output_format))
     return 0
 
 

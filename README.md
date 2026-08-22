@@ -10,7 +10,7 @@
 > **Windows users: [download FolderBridge.exe directly](https://github.com/MoonTzai/folderbridge-mcp/releases/latest/download/FolderBridge.exe).**
 > The binary is under GitHub **Releases → latest release → Assets**; it does not appear in the repository's source-file list. You can also open the [full release page](https://github.com/MoonTzai/folderbridge-mcp/releases/latest) for the EXE and its SHA-256 checksum file.
 
-**A safer, local-first bridge between AI clients and one folder you explicitly choose.**
+**A safer, local-first bridge between AI clients and a small set of folders you explicitly choose.**
 
 FolderBridge MCP is a zero-dependency Python MCP server plus a desktop launcher. It lets ChatGPT on the web—or any client that supports local stdio MCP—inspect and carefully edit a bounded local workspace. It deliberately avoids a public HTTP server, arbitrary shell access, telemetry, and silent background services.
 
@@ -19,14 +19,14 @@ FolderBridge MCP is a zero-dependency Python MCP server plus a desktop launcher.
 
 ## Why FolderBridge?
 
-- **One-folder boundary:** each server process is confined to one canonical workspace.
+- **Independent folder boundaries:** one connection can contain up to eight canonical workspaces; every multi-workspace tool call selects a `workspace_id` instead of merging roots.
 - **Read-only by default:** switch to read/write explicitly in the launcher.
 - **Conflict-safe edits:** existing files require the SHA-256 returned by the last read; stale edits fail instead of overwriting newer work.
 - **No arbitrary shell:** optional tasks are named, locally reviewed, and approved by exact config hash.
 - **No public listener:** the MCP server uses stdio only.
 - **No telemetry:** FolderBridge itself makes no network requests.
 - **Secret-aware launcher:** the OpenAI Runtime API key stays in memory and is removed before the local MCP process can use it.
-- **Beginner-friendly desktop UI:** folder selection, access mode, Tunnel setup, diagnostics, start/stop, process monitoring, and redacted logs live in one window.
+- **Beginner-friendly desktop UI:** an add/remove folder list, global access mode, Tunnel setup, diagnostics, start/stop, process monitoring, and redacted logs live in one window.
 - **Windows scaling support:** fonts and window sizing follow the current display DPI and refresh when moving between monitors with different scale factors.
 
 ## Quick start
@@ -56,7 +56,7 @@ cd folderbridge-mcp
 python .\folderbridge_launcher.py gui
 ```
 
-Choose a workspace, keep **Read only** selected for the first run, and use the status panel to finish setup. Launcher preferences are stored outside the repository; the Runtime API key is never saved.
+Add the workspaces you need, keep **Read only** selected for the first run, and use the status panel to finish setup. Launcher preferences are stored outside the repository; the Runtime API key is never saved. A legacy single-workspace setting is migrated into the first list entry automatically.
 
 `folderbridge_gui.pyw` is kept as a source-only convenience for Python installations whose `.pyw` association points to an interpreter with Tkinter. The standalone `FolderBridge.exe` is the supported double-click entry point.
 
@@ -102,7 +102,7 @@ Create the key for `tunnel-client` under the same Platform organization's [Runti
 
 ### 3. Start FolderBridge
 
-1. Select exactly one workspace folder and keep **Read only (recommended)** for the first run.
+1. Add one or more explicit workspace folders (up to eight) and keep **Read only (recommended)** for the first run. The global access mode applies to every listed folder.
 2. Select `tunnel-client.exe` from the complete archive, never a `tunnel-client-runtime-*` component; the default `folderbridge` profile is suitable.
 3. Enter the same Tunnel ID and Runtime API key, and leave advanced named tasks disabled.
 4. Click **Start connection**. The launcher runs the official `init`, `doctor`, and `run` flow. Continue only after the top status reads **运行中** (Running). When changing the folder or access mode later, click **应用配置** (Apply configuration) again; the launcher updates the same profile that it manages.
@@ -124,7 +124,7 @@ Open [ChatGPT Plugins](https://chatgpt.com/plugins), click **+**, and use these 
 
 1. Keep the FolderBridge status at **运行中** (Running), then start a new ChatGPT conversation.
 2. Select the **+** beside the composer, open **More**, and choose the FolderBridge app that you just created.
-3. Send a task such as: “Use FolderBridge to list the workspace root and explain the current workspace and access level.” Review any tool confirmation that ChatGPT presents before approving it.
+3. Send a task such as: “First use FolderBridge `server_info` to list the available workspaces, then read the root of the workspace I name.” Review the `workspace_id` and target file in any tool confirmation before approving it.
 
 This entry point follows OpenAI's official [connect and test guidance](https://developers.openai.com/apps-sdk/deploy/connect-chatgpt). The launcher's connection guide includes the same steps and a one-click copyable example prompt.
 
@@ -155,7 +155,7 @@ FolderBridge currently handles the `2024-11-05`, `2025-03-26`, `2025-06-18`, `20
 
 ### Shortest local setup
 
-1. Select the workspace in FolderBridge and keep **Read only (recommended)**.
+1. Add one or more workspaces in FolderBridge and keep **Read only (recommended)**.
 2. Open page 5 of **连接设置向导** and copy JSON, TOML, or the complete stdio command.
 3. Paste it into the client's MCP Servers settings; follow that client's documentation for its exact field names.
 4. Restart or refresh the client and verify that `server_info` and `workspace` appear.
@@ -164,6 +164,12 @@ A direct stdio connection needs no `tunnel-client`, Tunnel ID, Runtime API key, 
 
 ```powershell
 FolderBridge.exe serve --workspace C:\path\to\repo --read-only
+```
+
+Repeat `--workspace` to add folders while keeping each root independent:
+
+```powershell
+FolderBridge.exe serve --workspace C:\work\frontend --workspace C:\work\backend --read-only
 ```
 
 Generate ready-to-paste configurations from source:
@@ -181,7 +187,7 @@ The JSON output follows the common `mcpServers` convention used by many desktop 
   "mcpServers": {
     "folderbridge": {
       "command": "C:\\Tools\\FolderBridge.exe",
-      "args": ["serve", "--workspace", "C:\\work\\project", "--read-only"]
+      "args": ["serve", "--workspace", "C:\\work\\frontend", "--workspace", "C:\\work\\backend", "--read-only"]
     }
   }
 }
@@ -196,9 +202,11 @@ See the [client compatibility research](docs/client-compatibility-research.md) f
 
 The default server exposes:
 
-- `server_info`: reports the active workspace and safety boundary;
-- `workspace`: lists, reads, searches, and shows bounded Git status/diff output;
-- `edit_file`: creates a UTF-8 file or performs atomic, unique exact replacements.
+- `server_info`: reports each available workspace name, stable `workspace_id`, and safety boundary;
+- `workspace`: lists, reads, searches, and shows bounded Git status/diff output inside the selected `workspace_id`;
+- `edit_file`: creates or exactly edits a UTF-8 file inside the selected workspace.
+
+With one workspace, existing clients may continue omitting `workspace_id`. With multiple workspaces, `workspace`, `edit_file`, and `run_task` require a `workspace_id` returned by `server_info`; missing or unknown IDs are rejected. Duplicate roots, parent/child overlaps, and lists beyond eight entries are rejected before startup.
 
 A safe edit loop is:
 
@@ -228,7 +236,7 @@ Then enable approved tasks in the launcher or add `--allow-tasks` to the generat
 
 FolderBridge treats MCP requests, repository text, and tool output as untrusted data. Enforcement lives in the tool implementation rather than MCP annotations alone. The main controls are:
 
-- canonical path confinement and link rejection;
+- canonical path confinement and link rejection per workspace, with overlapping roots denied;
 - bounded UTF-8 reads, searches, Git output, subprocess output, and protocol messages;
 - atomic writes with a current-content hash precondition;
 - protected local policy files;

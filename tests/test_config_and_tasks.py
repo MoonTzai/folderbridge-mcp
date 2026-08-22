@@ -13,6 +13,7 @@ from folderbridge_mcp.config import (
     ConfigError,
     approve_config,
     canonical_workspace,
+    canonical_workspaces,
     config_is_trusted,
     load_config,
 )
@@ -56,6 +57,25 @@ class ConfigAndTaskTests(unittest.TestCase):
     def test_rejects_overbroad_workspace(self) -> None:
         with self.assertRaisesRegex(ConfigError, "too broad"):
             canonical_workspace(Path(self.root.anchor))
+
+    def test_workspace_set_rejects_duplicates_and_overlaps(self) -> None:
+        child = self.root / "child"
+        child.mkdir()
+        sibling = self.base / "sibling"
+        sibling.mkdir()
+
+        self.assertEqual(canonical_workspaces([self.root, sibling]), (self.root.resolve(), sibling.resolve()))
+        with self.assertRaises(ConfigError):
+            canonical_workspaces([self.root, self.root])
+        with self.assertRaises(ConfigError):
+            canonical_workspaces([self.root, child])
+        extras = []
+        for index in range(8):
+            extra = self.base / f"extra-{index}"
+            extra.mkdir()
+            extras.append(extra)
+        with self.assertRaises(ConfigError):
+            canonical_workspaces([self.root, *extras])
 
     def test_only_approved_named_task_runs(self) -> None:
         (self.root / "task.py").write_text("print('task-ok')\n", encoding="utf-8")

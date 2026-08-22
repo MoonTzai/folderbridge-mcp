@@ -15,6 +15,7 @@ from typing import Any
 CONFIG_NAME = ".folderbridge.json"
 CONFIG_VERSION = 1
 MAX_CONFIG_BYTES = 256 * 1024
+MAX_WORKSPACES = 8
 TASK_NAME_RE = re.compile(r"^[a-zA-Z][a-zA-Z0-9_-]{0,39}$")
 INLINE_RUNNERS = {
     "bash": {"-c"},
@@ -65,6 +66,25 @@ def canonical_workspace(raw: str | os.PathLike[str]) -> Path:
     if root == anchor or (home is not None and root == home):
         raise ConfigError("Workspace is too broad; choose a project directory, not a drive root or home directory")
     return root
+
+
+def canonical_workspaces(raw_values: list[str | os.PathLike[str]] | tuple[str | os.PathLike[str], ...]) -> tuple[Path, ...]:
+    if not raw_values:
+        raise ConfigError("Choose at least one workspace directory")
+    if len(raw_values) > MAX_WORKSPACES:
+        raise ConfigError(f"At most {MAX_WORKSPACES} workspace directories are allowed")
+    roots = tuple(canonical_workspace(raw) for raw in raw_values)
+    for index, root in enumerate(roots):
+        for other in roots[:index]:
+            if root == other:
+                raise ConfigError(f"Duplicate workspace directory: {root}")
+            if root.is_relative_to(other) or other.is_relative_to(root):
+                raise ConfigError(f"Workspace directories cannot contain one another: {other} and {root}")
+    return roots
+
+
+def workspace_id(workspace: Path) -> str:
+    return hashlib.sha256(str(workspace).encode("utf-8")).hexdigest()[:12]
 
 
 def config_path(workspace: Path) -> Path:

@@ -11,15 +11,15 @@ import subprocess
 import sys
 import tempfile
 import threading
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import BinaryIO, Callable
 
 from . import __version__
-from .config import ConfigError, canonical_workspace, config_is_trusted, load_config
+from .config import ConfigError, MAX_WORKSPACES, canonical_workspaces, config_is_trusted, load_config
 
 
-LAUNCHER_SETTINGS_VERSION = 1
+LAUNCHER_SETTINGS_VERSION = 2
 MAX_SETTINGS_BYTES = 64 * 1024
 MAX_COMMAND_OUTPUT = 256 * 1024
 PROFILE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,39}$")
@@ -37,7 +37,7 @@ class LauncherError(RuntimeError):
 @dataclass
 class LauncherSettings:
     version: int = LAUNCHER_SETTINGS_VERSION
-    workspace: str = ""
+    workspaces: list[str] = field(default_factory=list)
     access_mode: str = "read_only"
     profile: str = "folderbridge"
     tunnel_id: str = ""
@@ -45,14 +45,14 @@ class LauncherSettings:
     allow_tasks: bool = False
     configured_fingerprint: str = ""
 
-    def validate(self, *, require_tunnel_id: bool = False) -> Path:
+    def validate(self, *, require_tunnel_id: bool = False) -> tuple[Path, ...]:
         if self.version != LAUNCHER_SETTINGS_VERSION or isinstance(self.version, bool):
             raise LauncherError("启动器配置版本无效")
         try:
-            workspace = canonical_workspace(self.workspace)
+            workspaces = canonical_workspaces(self.workspaces)
         except (ConfigError, OSError) as exc:
             raise LauncherError(str(exc)) from exc
-        if any(ord(character) < 32 for character in str(workspace)):
+        if any(ord(character) < 32 for workspace in workspaces for character in str(workspace)):
             raise LauncherError("工作区路径不能包含控制字符")
         if self.access_mode not in {"read_only", "read_write"}:
             raise LauncherError("请选择只读或读写模式")
@@ -65,21 +65,28 @@ class LauncherSettings:
         if not isinstance(self.allow_tasks, bool):
             raise LauncherError("任务开关配置无效")
         if self.allow_tasks:
-            config = load_config(workspace, required=True)
-            if not config_is_trusted(workspace, config):
-                raise LauncherError("测试任务尚未在本机审核批准；请先用命令行 init/approve")
-        return workspace
+            try:
+                for workspace in workspaces:
+                    config = load_config(workspace, required=True)
+                    if not config_is_trusted(workspace, config):
+                        raise LauncherError(f"工作区 {workspace.name} 的测试任务尚未在本机审核批准；请先用命令行 init/approve")
+            except ConfigError as exc:
+                raise LauncherError(str(exc)) from exc
+        return workspaces
 
     def fingerprint(self) -> str:
-        workspace = canonical_workspace(self.workspace)
+        try:
+            workspaces = canonical_workspaces(self.workspaces)
+        except (ConfigError, OSError) as exc:
+            raise LauncherError(str(exc)) from exc
         payload = {
             "version": __version__,
-            "workspace": str(workspace),
+            "workspaces": [str(workspace) for workspace in workspaces],
             "access_mode": self.access_mode,
             "profile": self.profile,
             "tunnel_id": self.tunnel_id,
             "allow_tasks": self.allow_tasks,
-            "mcp_command": mcp_command(workspace, self.access_mode, self.allow_tasks),
+            "mcp_command": mcp_command(workspaces, self.access_mode, self.allow_tasks),
         }
         encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
         return hashlib.sha256(encoded).hexdigest()
@@ -102,6 +109,30 @@ class LauncherSettingsStore:
             return LauncherSettings()
         if not isinstance(raw, dict):
             return LauncherSettings()
+        if raw.get("version") == 1:
+            legacy_allowed = {
+                "version",
+                "workspace",
+                "access_mode",
+                "profile",
+                "tunnel_id",
+                "tunnel_client_path",
+                "allow_tasks",
+                "configured_fingerprint",
+            }
+            if set(raw).difference(legacy_allowed) or not isinstance(raw.get("workspace", ""), str):
+                return LauncherSettings()
+            legacy_workspace = raw.get("workspace", "").strip()
+            raw = {
+                "version": LAUNCHER_SETTINGS_VERSION,
+                "workspaces": [legacy_workspace] if legacy_workspace else [],
+                "access_mode": raw.get("access_mode", "read_only"),
+                "profile": raw.get("profile", "folderbridge"),
+                "tunnel_id": raw.get("tunnel_id", ""),
+                "tunnel_client_path": raw.get("tunnel_client_path", ""),
+                "allow_tasks": raw.get("allow_tasks", False),
+                "configured_fingerprint": raw.get("configured_fingerprint", ""),
+            }
         allowed = set(LauncherSettings.__dataclass_fields__)
         if set(raw).difference(allowed):
             return LauncherSettings()
@@ -112,17 +143,22 @@ class LauncherSettingsStore:
         if settings.version != LAUNCHER_SETTINGS_VERSION or isinstance(settings.version, bool):
             return LauncherSettings()
         # Deliberately reject any unexpected type instead of coercing values.
-        if not all(
-            isinstance(value, str)
-            for value in (
-                settings.workspace,
-                settings.access_mode,
-                settings.profile,
-                settings.tunnel_id,
-                settings.tunnel_client_path,
-                settings.configured_fingerprint,
+        if (
+            not isinstance(settings.workspaces, list)
+            or len(settings.workspaces) > MAX_WORKSPACES
+            or not all(isinstance(value, str) for value in settings.workspaces)
+            or not all(
+                isinstance(value, str)
+                for value in (
+                    settings.access_mode,
+                    settings.profile,
+                    settings.tunnel_id,
+                    settings.tunnel_client_path,
+                    settings.configured_fingerprint,
+                )
             )
-        ) or not isinstance(settings.allow_tasks, bool):
+            or not isinstance(settings.allow_tasks, bool)
+        ):
             return LauncherSettings()
         return settings
 
@@ -177,11 +213,21 @@ def console_python() -> Path:
     return executable
 
 
-def mcp_argv(workspace: Path, access_mode: str, allow_tasks: bool) -> list[str]:
+def _workspace_tuple(workspaces: tuple[Path, ...] | list[Path] | Path) -> tuple[Path, ...]:
+    roots = (workspaces,) if isinstance(workspaces, Path) else tuple(workspaces)
+    if not roots:
+        raise LauncherError("请至少添加一个本地工作区")
+    return roots
+
+
+def mcp_argv(workspaces: tuple[Path, ...] | list[Path] | Path, access_mode: str, allow_tasks: bool) -> list[str]:
+    roots = _workspace_tuple(workspaces)
     if getattr(sys, "frozen", False):
-        argv = [str(Path(sys.executable).resolve()), "serve", "--workspace", str(workspace)]
+        argv = [str(Path(sys.executable).resolve()), "serve"]
     else:
-        argv = [str(console_python()), str(checkout_launcher_path()), "serve", "--workspace", str(workspace)]
+        argv = [str(console_python()), str(checkout_launcher_path()), "serve"]
+    for workspace in roots:
+        argv.extend(("--workspace", str(workspace)))
     if access_mode == "read_only":
         argv.append("--read-only")
     if allow_tasks:
@@ -189,8 +235,8 @@ def mcp_argv(workspace: Path, access_mode: str, allow_tasks: bool) -> list[str]:
     return argv
 
 
-def mcp_command(workspace: Path, access_mode: str, allow_tasks: bool) -> str:
-    argv = mcp_argv(workspace, access_mode, allow_tasks)
+def mcp_command(workspaces: tuple[Path, ...] | list[Path] | Path, access_mode: str, allow_tasks: bool) -> str:
+    argv = mcp_argv(workspaces, access_mode, allow_tasks)
     # tunnel-client parses --mcp-command with POSIX-style escaping even on
     # Windows. Backslashes would therefore be consumed (C:\Users -> C:Users).
     # Windows accepts forward slashes for these absolute executable and
@@ -201,17 +247,17 @@ def mcp_command(workspace: Path, access_mode: str, allow_tasks: bool) -> str:
 
 
 def render_client_config(
-    workspace: Path,
+    workspaces: tuple[Path, ...] | list[Path] | Path,
     access_mode: str,
     allow_tasks: bool,
     output_format: str,
 ) -> str:
     """Render a portable stdio client configuration without starting the server."""
 
-    argv = mcp_argv(workspace, access_mode, allow_tasks)
+    argv = mcp_argv(workspaces, access_mode, allow_tasks)
     command, args = argv[0], argv[1:]
     if output_format == "tunnel":
-        return mcp_command(workspace, access_mode, allow_tasks)
+        return mcp_command(workspaces, access_mode, allow_tasks)
     if output_format == "json":
         return json.dumps(
             {"mcpServers": {"folderbridge": {"command": command, "args": args}}},
@@ -246,7 +292,7 @@ def find_tunnel_client(explicit: str = "") -> Path | None:
     return Path(found).resolve(strict=True) if found else None
 
 
-def build_init_argv(executable: Path, settings: LauncherSettings, workspace: Path) -> list[str]:
+def build_init_argv(executable: Path, settings: LauncherSettings, workspaces: tuple[Path, ...]) -> list[str]:
     return [
         str(executable),
         "init",
@@ -257,7 +303,7 @@ def build_init_argv(executable: Path, settings: LauncherSettings, workspace: Pat
         "--tunnel-id",
         settings.tunnel_id,
         "--mcp-command",
-        mcp_command(workspace, settings.access_mode, settings.allow_tasks),
+        mcp_command(workspaces, settings.access_mode, settings.allow_tasks),
         # The launcher owns this profile after the user explicitly applies the
         # form. Re-applying settings must update it instead of failing merely
         # because the same profile name already exists.

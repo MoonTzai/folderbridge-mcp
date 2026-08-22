@@ -62,13 +62,13 @@ MCP 只统一线协议，并未规定所有产品必须使用同一种配置文�
 
 ```text
 command = Python/FolderBridge EXE 的绝对路径
-args    = [launcher, serve, --workspace, 工作区绝对路径, 可选 --read-only/--allow-tasks]
+args    = [launcher, serve, --workspace, 工作区绝对路径, 可重复 --workspace, 可选 --read-only/--allow-tasks]
 ```
 
 建议：
 
 - 保持 `command` 与每个参数分离，不把整条命令交给 shell 重新解析；路径含空格时仍作为一个数组元素传递。
-- FolderBridge 通过 `--workspace` 固定边界，故 `cwd` 不是必需项，也不能代替工作区边界；若客户端要求，可把 `cwd` 设为仓库根目录。
+- FolderBridge 通过每个 `--workspace` 固定独立边界，故 `cwd` 不是必需项，也不能代替工作区边界；多工作区时工具调用还必须携带 `server_info` 返回的 `workspace_id`。若客户端要求 `cwd`，可设为其中一个仓库根目录，但它不会改变允许范围。
 - FolderBridge 本地 stdio 本身不需要 secret 环境变量。客户端若支持 `env`，也应只显式传必要变量，避免把宿主密钥无差别继承给子进程；不要在 stdin/stdout 上插入交互式登录提示，因为两条流只能承载 MCP 消息。
 - 进程必须以前台方式运行。VS Code 官方文档也明确提醒，Docker stdio 服务不能使用 detached 模式，因为客户端需要持续使用标准流。[VS Code MCP 配置参考](https://code.visualstudio.com/docs/agents/reference/mcp-configuration#_standard-inputoutput-stdio-servers)
 

@@ -39,7 +39,7 @@ class LauncherBackendTests(unittest.TestCase):
 
     def settings(self) -> LauncherSettings:
         return LauncherSettings(
-            workspace=str(self.root),
+            workspaces=[str(self.root)],
             access_mode="read_only",
             profile="folderbridge_1",
             tunnel_id="tunnel_0123456789abcdef0123456789abcdef",
@@ -67,8 +67,32 @@ class LauncherBackendTests(unittest.TestCase):
         path.write_text('{"workspace": ".", "unexpected": "value"}', encoding="utf-8")
         self.assertEqual(LauncherSettingsStore(path).load(), LauncherSettings())
 
-        path.write_text('{"version": 1, "workspace": 7}', encoding="utf-8")
+        path.write_text('{"version": 2, "workspaces": [7]}', encoding="utf-8")
         self.assertEqual(LauncherSettingsStore(path).load(), LauncherSettings())
+
+    def test_settings_store_migrates_the_single_workspace_format(self) -> None:
+        path = Path(self.temp.name) / "launcher.json"
+        path.write_text(
+            json.dumps(
+                {
+                    "version": 1,
+                    "workspace": str(self.root),
+                    "access_mode": "read_only",
+                    "profile": "folderbridge",
+                    "tunnel_id": "",
+                    "tunnel_client_path": "",
+                    "allow_tasks": False,
+                    "configured_fingerprint": "legacy",
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        migrated = LauncherSettingsStore(path).load()
+
+        self.assertEqual(migrated.version, 2)
+        self.assertEqual(migrated.workspaces, [str(self.root)])
+        self.assertEqual(migrated.configured_fingerprint, "legacy")
 
     def test_settings_validate_profile_and_tunnel_id_before_command_building(self) -> None:
         settings = self.settings()
@@ -83,8 +107,8 @@ class LauncherBackendTests(unittest.TestCase):
 
     def test_tunnel_commands_are_argument_arrays(self) -> None:
         settings = self.settings()
-        workspace = settings.validate(require_tunnel_id=True)
-        init = build_init_argv(self.client, settings, workspace)
+        workspaces = settings.validate(require_tunnel_id=True)
+        init = build_init_argv(self.client, settings, workspaces)
 
         self.assertEqual(init[:5], [str(self.client), "init", "--sample", "sample_mcp_stdio_local", "--profile"])
         self.assertEqual(init[5], settings.profile)
@@ -97,26 +121,39 @@ class LauncherBackendTests(unittest.TestCase):
 
     def test_init_replaces_the_launcher_managed_profile(self) -> None:
         settings = self.settings()
-        workspace = settings.validate(require_tunnel_id=True)
+        workspaces = settings.validate(require_tunnel_id=True)
 
-        init = build_init_argv(self.client, settings, workspace)
+        init = build_init_argv(self.client, settings, workspaces)
 
         self.assertIn("--force", init)
 
     def test_frozen_build_uses_the_executable_as_the_stdio_server(self) -> None:
         settings = self.settings()
-        workspace = settings.validate(require_tunnel_id=True)
+        workspaces = settings.validate(require_tunnel_id=True)
         with mock.patch.object(sys, "frozen", True, create=True):
-            argv = mcp_argv(workspace, "read_only", False)
+            argv = mcp_argv(workspaces, "read_only", False)
         self.assertEqual(argv[0], str(Path(sys.executable).resolve()))
-        self.assertEqual(argv[1:4], ["serve", "--workspace", str(workspace)])
+        self.assertEqual(argv[1:4], ["serve", "--workspace", str(workspaces[0])])
         self.assertEqual(argv[-1], "--read-only")
+
+    def test_multi_workspace_command_keeps_each_path_as_its_own_argument(self) -> None:
+        second = Path(self.temp.name) / "second workspace"
+        second.mkdir()
+        settings = self.settings()
+        settings.workspaces.append(str(second))
+        workspaces = settings.validate(require_tunnel_id=True)
+
+        argv = mcp_argv(workspaces, "read_only", False)
+
+        self.assertEqual(argv.count("--workspace"), 2)
+        self.assertEqual(argv[argv.index("--workspace") + 1], str(self.root.resolve()))
+        self.assertIn(str(second.resolve()), argv)
 
     def test_client_configs_preserve_command_and_argument_boundaries(self) -> None:
         with mock.patch.object(sys, "frozen", True, create=True):
-            rendered_json = render_client_config(self.root, "read_only", False, "json")
-            rendered_toml = render_client_config(self.root, "read_only", False, "toml")
-            rendered_command = render_client_config(self.root, "read_only", False, "tunnel")
+            rendered_json = render_client_config((self.root,), "read_only", False, "json")
+            rendered_toml = render_client_config((self.root,), "read_only", False, "toml")
+            rendered_command = render_client_config((self.root,), "read_only", False, "tunnel")
 
         parsed = json.loads(rendered_json)
         server = parsed["mcpServers"]["folderbridge"]
@@ -129,12 +166,12 @@ class LauncherBackendTests(unittest.TestCase):
 
     def test_client_config_rejects_unknown_output_format(self) -> None:
         with self.assertRaises(LauncherError):
-            render_client_config(self.root, "read_only", False, "yaml")
+            render_client_config((self.root,), "read_only", False, "yaml")
 
     @unittest.skipUnless(os.name == "nt", "Windows tunnel command quoting regression")
     def test_tunnel_command_preserves_windows_paths_for_posix_style_parser(self) -> None:
         with mock.patch.object(sys, "frozen", True, create=True):
-            command = mcp_command(self.root, "read_only", False)
+            command = mcp_command((self.root,), "read_only", False)
 
         executable = str(Path(sys.executable).resolve()).replace("\\", "/")
         workspace = str(self.root).replace("\\", "/")

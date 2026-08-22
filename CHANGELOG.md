@@ -2,6 +2,14 @@
 
 All notable changes to FolderBridge MCP are documented here.
 
+## 0.2.0 — 2026-08-23
+
+- Added an add/remove workspace list in the Windows launcher, with up to eight independent roots per connection.
+- Added stable `workspace_id` selection to MCP tools; multi-workspace calls cannot silently fall back to a different folder.
+- Kept single-workspace tool calls and commands compatible while automatically migrating version 1 launcher settings.
+- Reject duplicate and parent/child-overlapping roots before startup, and keep the global access mode read-only by default.
+- Added repeated `--workspace` support to `serve` and `client-config` commands.
+
 ## 0.1.7 — 2026-08-22
 
 - Made every setup-guide instruction selectable and copyable, including filenames and configuration values.

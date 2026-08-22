@@ -10,7 +10,7 @@
 > **Windows 用户：[直接下载 FolderBridge.exe](https://github.com/MoonTzai/folderbridge-mcp/releases/latest/download/FolderBridge.exe)**
 > 安装包位于 GitHub **Releases → 最新版本 → Assets**，不会出现在仓库的源码文件列表中。也可打开[完整发布页面](https://github.com/MoonTzai/folderbridge-mcp/releases/latest)下载 EXE 和 SHA-256 校验文件。
 
-**在 AI 客户端与一个由你明确选择的本地文件夹之间，建立更安全的本地优先桥梁。**
+**在 AI 客户端与一组由你明确选择的本地文件夹之间，建立更安全的本地优先桥梁。**
 
 FolderBridge MCP 是一个零第三方依赖的 Python MCP 服务器和桌面启动器。它让 ChatGPT 网页端或其他支持本地 stdio MCP 的客户端，在明确边界内查看并谨慎修改本地工作区。项目主动舍弃了公网 HTTP 服务器、任意 Shell、遥测以及静默常驻服务。
 
@@ -19,14 +19,14 @@ FolderBridge MCP 是一个零第三方依赖的 Python MCP 服务器和桌面启
 
 ## 为什么选择 FolderBridge？
 
-- **单文件夹边界：** 每个服务器进程只允许访问一个规范化工作区。
+- **独立文件夹边界：** 一个连接最多添加 8 个规范化工作区；每次工具调用明确选择 `workspace_id`，目录之间不会合并。
 - **默认只读：** 必须在启动器中明确切换后才开启写入。
 - **防冲突编辑：** 修改已有文件时必须携带最近一次读取返回的 SHA-256；文件已变化就拒绝覆盖。
 - **没有任意 Shell：** 可选任务必须按名称定义、在本机人工检查，并以配置文件精确哈希批准。
 - **不监听公网端口：** MCP 服务器只使用 stdio。
 - **没有遥测：** FolderBridge 自身不发起网络请求。
 - **密钥隔离：** OpenAI Runtime API Key 仅驻留启动器内存，并在启动本地 MCP 进程前清除。
-- **傻瓜式桌面界面：** 文件夹、权限、Tunnel 配置、诊断、启停、进程状态和脱敏日志集中在一个窗口。
+- **傻瓜式桌面界面：** 可添加/移除的文件夹列表、全局权限、Tunnel 配置、诊断、启停、进程状态和脱敏日志集中在一个窗口。
 - **适配 Windows 缩放：** 字体和窗口自动跟随当前显示器 DPI，跨不同 Scale 的显示器移动时自动刷新。
 
 ## 快速开始
@@ -56,7 +56,7 @@ cd folderbridge-mcp
 python .\folderbridge_launcher.py gui
 ```
 
-选择工作区，首次使用建议保持“只读”，然后按照状态面板完成设置。启动器偏好保存在仓库之外，Runtime API Key 永远不会落盘。
+逐个添加需要的工作区，首次使用建议保持“只读”，然后按照状态面板完成设置。启动器偏好保存在仓库之外，Runtime API Key 永远不会落盘。旧版的单工作区配置会自动迁移为列表中的第一项。
 
 `folderbridge_gui.pyw` 仅作为源码环境的便利入口保留，要求 Windows 的 `.pyw` 文件关联指向带 Tkinter 的 Python。普通用户应双击独立的 `FolderBridge.exe`。
 
@@ -102,7 +102,7 @@ ChatGPT 不能直接连接本地 stdio 进程。FolderBridge 通过 OpenAI 官�
 
 ### 3. 启动 FolderBridge
 
-1. 文件夹只选择一个明确的工作区，首次使用保持“只读（推荐）”。
+1. 在文件夹列表中逐个添加明确的工作区（最多 8 个），首次使用保持“只读（推荐）”；全局权限作用于列表内全部目录。
 2. `tunnel-client` 只选择完整包中的 `tunnel-client.exe`，不要选择 `tunnel-client-runtime-*`；Profile 保持 `folderbridge` 即可。
 3. 填写相同的 Tunnel ID 和 Runtime API Key，“高级：允许任务”保持关闭。
 4. 点击“启动连接”；启动器会执行官方 `init`、`doctor`、`run` 流程。顶部变成“运行中”后再进行下一步。以后更换文件夹或权限时，可直接再次点击“应用配置”；启动器会更新自己管理的同名 Profile。
@@ -124,7 +124,7 @@ ChatGPT 不能直接连接本地 stdio 进程。FolderBridge 通过 OpenAI 官�
 
 1. 保持 FolderBridge 顶部为“运行中”，然后在 ChatGPT 新建一个对话。
 2. 点击输入框旁的 **+**，进入“更多 / More”，选择刚创建的 FolderBridge App。
-3. 发送任务请求，例如：“请使用 FolderBridge 列出当前工作区根目录，并说明当前工作区与访问权限。”如果 ChatGPT 显示工具确认，核对后再确认。
+3. 发送任务请求，例如：“请先使用 FolderBridge 的 `server_info` 列出可用工作区，再读取我指定的工作区根目录。”如果 ChatGPT 显示工具确认，核对 `workspace_id` 和目标文件后再确认。
 
 这个入口与测试流程以 OpenAI 的[连接与测试官方说明](https://developers.openai.com/apps-sdk/deploy/connect-chatgpt)为准。启动器内的“连接设置向导”也提供相同步骤和一键复制调用示例。
 
@@ -155,7 +155,7 @@ FolderBridge 当前兼容 `2024-11-05`、`2025-03-26`、`2025-06-18`、`2025-11-
 
 ### 最简单的本地接入方式
 
-1. 在 FolderBridge 主界面选择工作区，并保持“只读（推荐）”。
+1. 在 FolderBridge 主界面添加一个或多个工作区，并保持“只读（推荐）”。
 2. 打开“连接设置向导”第 5 页，根据客户端复制 JSON、TOML 或完整 stdio 命令。
 3. 将配置粘贴到客户端的 MCP Servers 设置；字段名以该客户端自己的文档为准。
 4. 重启或刷新客户端，确认能看到 `server_info` 和 `workspace` 工具。
@@ -164,6 +164,12 @@ FolderBridge 当前兼容 `2024-11-05`、`2025-03-26`、`2025-06-18`、`2025-11-
 
 ```powershell
 FolderBridge.exe serve --workspace C:\path\to\repo --read-only
+```
+
+添加多个目录时重复 `--workspace`，所有目录仍保持独立根边界：
+
+```powershell
+FolderBridge.exe serve --workspace C:\work\frontend --workspace C:\work\backend --read-only
 ```
 
 从源码生成可直接粘贴的配置：
@@ -181,7 +187,7 @@ JSON 示例采用许多桌面客户端使用的 `mcpServers` 约定：
   "mcpServers": {
     "folderbridge": {
       "command": "C:\\Tools\\FolderBridge.exe",
-      "args": ["serve", "--workspace", "C:\\work\\project", "--read-only"]
+      "args": ["serve", "--workspace", "C:\\work\\frontend", "--workspace", "C:\\work\\backend", "--read-only"]
     }
   }
 }
@@ -196,9 +202,11 @@ JSON 示例采用许多桌面客户端使用的 `mcpServers` 约定：
 
 默认服务器提供：
 
-- `server_info`：报告当前工作区和安全边界；
-- `workspace`：列出、读取、搜索文件，并查看有界的 Git status/diff；
-- `edit_file`：创建 UTF-8 文件，或执行原子化、唯一精确替换。
+- `server_info`：报告可用工作区的名称、稳定 `workspace_id` 和安全边界；
+- `workspace`：在指定 `workspace_id` 内列出、读取、搜索文件，并查看有界的 Git status/diff；
+- `edit_file`：在指定工作区创建 UTF-8 文件，或执行原子化、唯一精确替换。
+
+只有一个工作区时，旧客户端可以继续省略 `workspace_id`。存在多个工作区时，`workspace`、`edit_file` 和 `run_task` 必须携带 `server_info` 返回的 `workspace_id`；缺失或未知 ID 会被拒绝。重复目录、父子重叠目录和超过 8 项的列表也会在启动前被拒绝。
 
 典型安全编辑循环：
 
@@ -228,7 +236,7 @@ python .\folderbridge_launcher.py approve --workspace C:\path\to\repo
 
 FolderBridge 把 MCP 请求、仓库文本和工具输出都视为不可信数据，真正的强制控制位于工具实现中，而不是仅依赖 MCP annotations。主要控制包括：
 
-- 规范路径限制与链接拒绝；
+- 每个工作区分别执行规范路径限制与链接拒绝，并拒绝重叠根目录；
 - 对 UTF-8 读取、搜索、Git 输出、子进程输出和协议消息设置上限；
 - 带当前内容哈希前置条件的原子写入；
 - 保护本地策略文件；

@@ -7,6 +7,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from folderbridge_mcp.cli import build_parser
 from folderbridge_mcp.config import load_config
 from folderbridge_mcp.mcp import McpServer
 from folderbridge_mcp.tools import ToolRuntime
@@ -110,6 +111,42 @@ class McpWorkflowTests(unittest.TestCase):
         response = server.dispatch(null_id)
         self.assertIn("error", response)
         self.assertFalse((self.workspace / "silent.txt").exists())
+
+    def test_multiple_workspaces_require_an_explicit_selector(self) -> None:
+        second = Path(self.temporary.name) / "notes"
+        second.mkdir()
+        (second / "only-here.txt").write_text("second workspace", encoding="utf-8")
+        runtime = ToolRuntime.from_roots((self.workspace, second))
+
+        info = runtime.call("server_info", {})["structuredContent"]
+        self.assertEqual(info["workspace_count"], 2)
+        ids = {item["name"]: item["workspace_id"] for item in info["workspaces"]}
+
+        missing = runtime.call("workspace", {"action": "list"})
+        self.assertEqual(missing["structuredContent"]["error"]["code"], "WORKSPACE_REQUIRED")
+
+        read = runtime.call(
+            "workspace",
+            {"workspace_id": ids["notes"], "action": "read", "path": "only-here.txt"},
+        )
+        self.assertIn("second workspace", read["structuredContent"]["text"])
+
+        wrong_workspace = runtime.call(
+            "workspace",
+            {"workspace_id": ids["repo"], "action": "read", "path": "only-here.txt"},
+        )
+        self.assertTrue(wrong_workspace["isError"])
+
+        workspace_tool = next(tool for tool in runtime.list_tools() if tool["name"] == "workspace")
+        self.assertIn("workspace_id", workspace_tool["inputSchema"]["required"])
+
+    def test_cli_preserves_repeated_workspace_arguments(self) -> None:
+        parsed = build_parser().parse_args(
+            ["serve", "--workspace", str(self.workspace), "--workspace", str(self.workspace.parent / "other"), "--read-only"]
+        )
+
+        self.assertEqual(parsed.workspaces, [str(self.workspace), str(self.workspace.parent / "other")])
+        self.assertTrue(parsed.read_only)
 
 
 if __name__ == "__main__":
