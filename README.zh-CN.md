@@ -73,11 +73,14 @@ ChatGPT 不能直接连接本地 stdio 进程。FolderBridge 通过 OpenAI 官�
 
 ### 1. 下载官方 Windows x64 客户端
 
+> [!WARNING]
+> **只下载完整包 `tunnel-client-v<版本>-windows-amd64.zip`。不要下载或选择任何 `tunnel-client-runtime-*` 文件。** Runtime 是内部组件，不支持配置所需的 `init` 命令；即使文件名看起来相似，也会导致“配置失败，请查看日志”。解压完整包后，只选择准确名为 `tunnel-client.exe` 的主程序。
+
 1. 打开 [`openai/tunnel-client` 最新 Release](https://github.com/openai/tunnel-client/releases/latest)，展开 **Assets**。
 2. 下载名为 `tunnel-client-v<版本>-windows-amd64.zip` 的完整包。Release 中的 `amd64` 就是 Windows x64，适用于绝大多数 Intel/AMD 电脑。
-3. 可同时下载 `SHA256SUMS.txt` 校验文件。不要选择 `tunnel-client-runtime-*`、`windows-arm64`、`all.zip`、Source code 或许可证文件。
+3. 可同时下载 `SHA256SUMS.txt` 校验文件。不要选择 `tunnel-client-runtime-*`、`windows-arm64`、`all.zip`、Source code 或许可证文件；Runtime 包不能代替完整客户端。
 4. 将 ZIP 全部解压到固定目录；无需安装，也不要直接在压缩包内运行。向导可创建并打开推荐目录 `%LOCALAPPDATA%\FolderBridge\bin`。
-5. 回到 FolderBridge，点击“选择已解压的 EXE”，选择 `tunnel-client.exe`。
+5. 回到 FolderBridge，点击“选择已解压的 EXE”，只选择准确名为 `tunnel-client.exe` 的文件。
 
 ### 2. 创建 Platform Tunnel
 
@@ -97,7 +100,7 @@ ChatGPT 不能直接连接本地 stdio 进程。FolderBridge 通过 OpenAI 官�
 ### 3. 启动 FolderBridge
 
 1. 文件夹只选择一个明确的工作区，首次使用保持“只读（推荐）”。
-2. `tunnel-client` 选择上一步的 EXE；Profile 保持 `folderbridge` 即可。
+2. `tunnel-client` 只选择完整包中的 `tunnel-client.exe`，不要选择 `tunnel-client-runtime-*`；Profile 保持 `folderbridge` 即可。
 3. 填写相同的 Tunnel ID 和 Runtime API Key，“高级：允许任务”保持关闭。
 4. 点击“启动连接”；启动器会执行官方 `init`、`doctor`、`run` 流程。顶部变成“运行中”后再进行下一步。
 

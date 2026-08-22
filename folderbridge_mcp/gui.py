@@ -393,8 +393,11 @@ class FolderBridgeLauncher:
         else:
             self.access_status.set("未选择")
 
-        executable = find_tunnel_client(self.tunnel_client_var.get())
-        if executable:
+        raw_client = self.tunnel_client_var.get()
+        executable = find_tunnel_client(raw_client)
+        if self._is_runtime_client_path(raw_client):
+            self.client_status.set("选错了 Runtime 内部组件；请下载完整 Windows amd64 包并选择 tunnel-client.exe。")
+        elif executable:
             self.client_status.set(f"已找到：{executable}")
         else:
             self.client_status.set("未找到。ChatGPT 网页端可在“连接设置向导”中下载；本地 stdio 客户端不需要它。")
@@ -437,11 +440,35 @@ class FolderBridgeLauncher:
 
     def _browse_tunnel_client(self) -> None:
         selected = filedialog.askopenfilename(
-            title="选择 OpenAI tunnel-client",
-            filetypes=(("tunnel-client", "tunnel-client*"), ("可执行文件", "*.exe"), ("所有文件", "*.*")),
+            title="只选择完整包中的 tunnel-client.exe（不要选 Runtime）",
+            filetypes=(("正确的 tunnel-client.exe", "tunnel-client.exe"), ("可执行文件", "*.exe"), ("所有文件", "*.*")),
         )
         if selected:
             self.tunnel_client_var.set(selected)
+            if self._is_runtime_client_path(selected):
+                self._show_error(
+                    "选错了 Runtime 内部组件。不要下载或选择 tunnel-client-runtime-*；"
+                    "请下载完整的 tunnel-client-v<版本>-windows-amd64.zip，并选择其中准确名为 tunnel-client.exe 的文件。"
+                )
+
+    @staticmethod
+    def _is_runtime_client_path(value: str) -> bool:
+        name = Path(value.strip().strip('"')).name.lower()
+        return name.startswith("tunnel-client-runtime-")
+
+    def _require_tunnel_client(self, value: str) -> Path:
+        if self._is_runtime_client_path(value):
+            raise LauncherError(
+                "选错了 Runtime 内部组件。请选择完整 Windows amd64 包中的 tunnel-client.exe；"
+                "tunnel-client-runtime-* 不支持配置所需的 init 命令。"
+            )
+        executable = find_tunnel_client(value)
+        if not executable:
+            raise LauncherError(
+                "没有找到官方 tunnel-client.exe。请下载完整的 tunnel-client-v<版本>-windows-amd64.zip；"
+                "不要下载 tunnel-client-runtime-*。"
+            )
+        return executable
 
     def _toggle_key_visibility(self) -> None:
         self.key_entry.configure(show="" if self.show_key_var.get() else "●")
@@ -456,9 +483,7 @@ class FolderBridgeLauncher:
         try:
             settings = self._settings_from_form()
             workspace = settings.validate(require_tunnel_id=True)
-            executable = find_tunnel_client(settings.tunnel_client_path)
-            if not executable:
-                raise LauncherError("没有找到官方 tunnel-client，请选择可执行文件或先下载")
+            executable = self._require_tunnel_client(settings.tunnel_client_path)
             env = control_plane_environment(self.api_key_var.get())
             fingerprint = settings.fingerprint()
             self._save_form(settings)
@@ -511,9 +536,7 @@ class FolderBridgeLauncher:
         try:
             settings = self._settings_from_form()
             workspace = settings.validate(require_tunnel_id=True)
-            executable = find_tunnel_client(settings.tunnel_client_path)
-            if not executable:
-                raise LauncherError("没有找到官方 tunnel-client")
+            executable = self._require_tunnel_client(settings.tunnel_client_path)
             env = control_plane_environment(self.api_key_var.get())
             fingerprint = settings.fingerprint()
             self._save_form(settings)
@@ -544,9 +567,7 @@ class FolderBridgeLauncher:
         try:
             settings = self._settings_from_form()
             settings.validate(require_tunnel_id=False)
-            executable = find_tunnel_client(settings.tunnel_client_path)
-            if not executable:
-                raise LauncherError("没有找到官方 tunnel-client")
+            executable = self._require_tunnel_client(settings.tunnel_client_path)
             env = control_plane_environment(self.api_key_var.get())
             self._save_form(settings)
         except (LauncherError, OSError) as exc:
@@ -645,9 +666,12 @@ class FolderBridgeLauncher:
         notebook.grid(row=2, column=0, sticky="nsew")
         wrap = self._px(720)
 
-        client_status = tk.StringVar(
-            value=f"✓ 已找到：{executable}" if executable else "尚未找到 tunnel-client.exe"
-        )
+        raw_client = self.tunnel_client_var.get()
+        if self._is_runtime_client_path(raw_client):
+            initial_client_status = "✗ 选错了 Runtime 内部组件；请重新下载完整包。"
+        else:
+            initial_client_status = f"✓ 已找到：{executable}" if executable else "尚未找到 tunnel-client.exe"
+        client_status = tk.StringVar(value=initial_client_status)
         client_tab = self._guide_tab(
             notebook,
             "下载并解压官方客户端",
@@ -655,10 +679,10 @@ class FolderBridgeLauncher:
                 f"1. 点击“打开官方 Release”，展开 Assets，下载 {WINDOWS_X64_ASSET_PATTERN}。",
                 "2. x64 在 Release 文件名中写作 amd64；绝大多数 Intel/AMD Windows 电脑都选它。",
                 "3. 可同时下载 SHA256SUMS.txt 校验；把 ZIP 全部解压到固定目录，不要在压缩包里直接运行。",
-                "4. 点击“选择已解压的 EXE”，选解压目录中的 tunnel-client.exe。",
+                "4. 点击“选择已解压的 EXE”，只选准确名为 tunnel-client.exe 的主程序。",
             ),
             wrap,
-            warning="不要选 tunnel-client-runtime、windows-arm64、all.zip、Source code 或许可证文件。",
+            warning="不要下载或选择 tunnel-client-runtime-*：它只是内部组件，不支持 init，必然配置失败。只下载完整的 tunnel-client-v<版本>-windows-amd64.zip。",
         )
         notebook.add(client_tab, text="1  Windows x64 客户端")
         ttk.Label(client_tab, textvariable=client_status, style="Body.TLabel", wraplength=wrap).pack(anchor="w", pady=(8, 6))
@@ -702,7 +726,7 @@ class FolderBridgeLauncher:
             "FolderBridge 主界面这样填",
             (
                 "1. 文件夹：只选一个明确工作区；权限首次使用保持“只读（推荐）”。",
-                "2. tunnel-client：选择上一步解压出的 tunnel-client.exe；Profile 保持 folderbridge 即可。",
+                "2. tunnel-client：只选择完整包中准确名为 tunnel-client.exe 的主程序；不要选 tunnel-client-runtime-*。Profile 保持 folderbridge 即可。",
                 "3. Tunnel ID：粘贴 Platform 中 tunnel_ 开头的 ID；Runtime API Key：粘贴控制面 Key（仅留内存，不保存）。",
                 "4. “高级：允许任务”保持关闭。点击“启动连接”，等待顶部状态变成“运行中”。",
                 "5. 使用期间必须保持 FolderBridge 运行；若失败，点“诊断”并查看脱敏日志。",
@@ -808,8 +832,12 @@ class FolderBridgeLauncher:
 
     def _choose_client_from_guide(self, status: tk.StringVar) -> None:
         self._browse_tunnel_client()
-        executable = find_tunnel_client(self.tunnel_client_var.get())
-        status.set(f"✓ 已找到：{executable}" if executable else "尚未找到 tunnel-client.exe")
+        raw_client = self.tunnel_client_var.get()
+        executable = find_tunnel_client(raw_client)
+        if self._is_runtime_client_path(raw_client):
+            status.set("✗ 选错了 Runtime 内部组件；请选择完整包中的 tunnel-client.exe。")
+        else:
+            status.set(f"✓ 已找到：{executable}" if executable else "尚未找到 tunnel-client.exe")
 
     def _open_recommended_client_dir(self) -> None:
         folder = recommended_client_directory()

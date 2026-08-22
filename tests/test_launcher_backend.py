@@ -17,7 +17,9 @@ from folderbridge_mcp.launcher_backend import (
     build_init_argv,
     build_run_argv,
     control_plane_environment,
+    find_tunnel_client,
     mcp_argv,
+    mcp_command,
     redact_text,
     render_client_config,
     run_short_command,
@@ -88,7 +90,8 @@ class LauncherBackendTests(unittest.TestCase):
         self.assertEqual(init[5], settings.profile)
         self.assertEqual(init[6:8], ["--tunnel-id", settings.tunnel_id])
         self.assertEqual(init[8], "--mcp-command")
-        self.assertIn(str(self.root), init[9])
+        expected_workspace = str(self.root).replace("\\", "/") if os.name == "nt" else str(self.root)
+        self.assertIn(expected_workspace, init[9])
         self.assertEqual(build_doctor_argv(self.client, settings.profile), [str(self.client), "doctor", "--profile", settings.profile, "--explain"])
         self.assertEqual(build_run_argv(self.client, settings.profile), [str(self.client), "run", "--profile", settings.profile])
 
@@ -119,6 +122,25 @@ class LauncherBackendTests(unittest.TestCase):
     def test_client_config_rejects_unknown_output_format(self) -> None:
         with self.assertRaises(LauncherError):
             render_client_config(self.root, "read_only", False, "yaml")
+
+    @unittest.skipUnless(os.name == "nt", "Windows tunnel command quoting regression")
+    def test_tunnel_command_preserves_windows_paths_for_posix_style_parser(self) -> None:
+        with mock.patch.object(sys, "frozen", True, create=True):
+            command = mcp_command(self.root, "read_only", False)
+
+        executable = str(Path(sys.executable).resolve()).replace("\\", "/")
+        workspace = str(self.root).replace("\\", "/")
+        self.assertIn(executable, command)
+        self.assertIn(workspace, command)
+        self.assertNotIn("\\", command)
+
+    def test_runtime_component_is_not_accepted_as_tunnel_client(self) -> None:
+        suffix = ".exe" if os.name == "nt" else ""
+        runtime = Path(self.temp.name) / f"tunnel-client-runtime-cloudflared{suffix}"
+        runtime.write_bytes(b"not a tunnel client")
+
+        self.assertEqual(find_tunnel_client(str(self.client)), self.client.resolve())
+        self.assertIsNone(find_tunnel_client(str(runtime)))
 
     def test_fingerprint_changes_when_workspace_access_changes(self) -> None:
         settings = self.settings()

@@ -191,6 +191,12 @@ def mcp_argv(workspace: Path, access_mode: str, allow_tasks: bool) -> list[str]:
 
 def mcp_command(workspace: Path, access_mode: str, allow_tasks: bool) -> str:
     argv = mcp_argv(workspace, access_mode, allow_tasks)
+    # tunnel-client parses --mcp-command with POSIX-style escaping even on
+    # Windows. Backslashes would therefore be consumed (C:\Users -> C:Users).
+    # Windows accepts forward slashes for these absolute executable and
+    # workspace paths, while list2cmdline still quotes arguments with spaces.
+    if os.name == "nt":
+        argv = [argument.replace("\\", "/") for argument in argv]
     return subprocess.list2cmdline(argv) if os.name == "nt" else _posix_join(argv)
 
 
@@ -205,7 +211,7 @@ def render_client_config(
     argv = mcp_argv(workspace, access_mode, allow_tasks)
     command, args = argv[0], argv[1:]
     if output_format == "tunnel":
-        return subprocess.list2cmdline(argv) if os.name == "nt" else _posix_join(argv)
+        return mcp_command(workspace, access_mode, allow_tasks)
     if output_format == "json":
         return json.dumps(
             {"mcpServers": {"folderbridge": {"command": command, "args": args}}},
@@ -229,7 +235,7 @@ def find_tunnel_client(explicit: str = "") -> Path | None:
             resolved = candidate.resolve(strict=True)
         except OSError:
             return None
-        if resolved.is_file() and resolved.name.lower().startswith("tunnel-client"):
+        if resolved.is_file() and resolved.name.lower() in {"tunnel-client", "tunnel-client.exe"}:
             return resolved
         return None
     if getattr(sys, "frozen", False):

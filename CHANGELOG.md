@@ -2,6 +2,12 @@
 
 All notable changes to FolderBridge MCP are documented here.
 
+## 0.1.4 — 2026-08-22
+
+- Fixed Windows Tunnel profile creation when the FolderBridge executable or workspace path contains spaces: generated `--mcp-command` paths now survive the official client's POSIX-style parsing.
+- Reject `tunnel-client-runtime-*` internal components instead of treating them as the full client.
+- Added prominent in-app and bilingual README warnings to download the complete Windows amd64 archive and select only `tunnel-client.exe`.
+
 ## 0.1.3 — 2026-08-22
 
 - Added a fifth setup-guide page for non-ChatGPT MCP clients.

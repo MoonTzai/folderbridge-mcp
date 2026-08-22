@@ -73,11 +73,14 @@ Click **网页端一键引导** (Web setup guide) in the launcher's upper-right 
 
 ### 1. Download the official Windows x64 client
 
+> [!WARNING]
+> **Download only the complete `tunnel-client-v<version>-windows-amd64.zip` archive. Never download or select a `tunnel-client-runtime-*` file.** Runtime files are internal components and do not implement the `init` command needed for setup; their similar names can still lead to “configuration failed.” After extracting the complete archive, select only the main program named exactly `tunnel-client.exe`.
+
 1. Open the latest [`openai/tunnel-client` release](https://github.com/openai/tunnel-client/releases/latest) and expand **Assets**.
 2. Download the complete archive named `tunnel-client-v<version>-windows-amd64.zip`. In release filenames, `amd64` means Windows x64 and is correct for most Intel/AMD PCs.
-3. Optionally download `SHA256SUMS.txt` for verification. Do not choose `tunnel-client-runtime-*`, `windows-arm64`, `all.zip`, source-code archives, or license files.
+3. Optionally download `SHA256SUMS.txt` for verification. Do not choose `tunnel-client-runtime-*`, `windows-arm64`, `all.zip`, source-code archives, or license files; a Runtime archive cannot replace the complete client.
 4. Extract the entire ZIP to a stable folder; there is no installer, and you should not run it from inside the archive. The guide can create and open `%LOCALAPPDATA%\FolderBridge\bin` as a recommended location.
-5. Return to FolderBridge, click **选择已解压的 EXE**, and select `tunnel-client.exe`.
+5. Return to FolderBridge, click **选择已解压的 EXE**, and select only the file named exactly `tunnel-client.exe`.
 
 ### 2. Create the Platform Tunnel
 
@@ -97,7 +100,7 @@ Create the key for `tunnel-client` under the same Platform organization's [Runti
 ### 3. Start FolderBridge
 
 1. Select exactly one workspace folder and keep **Read only (recommended)** for the first run.
-2. Select the extracted `tunnel-client.exe`; the default `folderbridge` profile is suitable.
+2. Select `tunnel-client.exe` from the complete archive, never a `tunnel-client-runtime-*` component; the default `folderbridge` profile is suitable.
 3. Enter the same Tunnel ID and Runtime API key, and leave advanced named tasks disabled.
 4. Click **Start connection**. The launcher runs the official `init`, `doctor`, and `run` flow. Continue only after the top status reads **运行中** (Running).
 
