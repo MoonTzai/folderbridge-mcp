@@ -6,6 +6,10 @@
 ![Python 3.11+](https://img.shields.io/badge/Python-3.11%2B-3776AB)
 ![Transport: stdio](https://img.shields.io/badge/MCP-stdio-6B5CE7)
 
+> [!TIP]
+> **Windows 用户：[直接下载 FolderBridge.exe](https://github.com/MoonTzai/folderbridge-mcp/releases/latest/download/FolderBridge.exe)**
+> 安装包位于 GitHub **Releases → 最新版本 → Assets**，不会出现在仓库的源码文件列表中。也可打开[完整发布页面](https://github.com/MoonTzai/folderbridge-mcp/releases/latest)下载 EXE 和 SHA-256 校验文件。
+
 **在 AI 客户端与一个由你明确选择的本地文件夹之间，建立更安全的本地优先桥梁。**
 
 FolderBridge MCP 是一个零第三方依赖的 Python MCP 服务器和桌面启动器。它让 ChatGPT 网页端或其他支持本地 stdio MCP 的客户端，在明确边界内查看并谨慎修改本地工作区。项目主动舍弃了公网 HTTP 服务器、任意 Shell、遥测以及静默常驻服务。
@@ -35,7 +39,7 @@ FolderBridge MCP 是一个零第三方依赖的 Python MCP 服务器和桌面启
 
 ### Windows EXE（推荐）
 
-从 [GitHub 最新版本](https://github.com/MoonTzai/folderbridge-mcp/releases/latest)下载 `FolderBridge.exe` 和 `FolderBridge.exe.sha256`。无需安装 Python；校验哈希后直接双击 `FolderBridge.exe`。
+从 [GitHub 最新版本的 Assets](https://github.com/MoonTzai/folderbridge-mcp/releases/latest)下载 `FolderBridge.exe` 和 `FolderBridge.exe.sha256`，或[直接下载 EXE](https://github.com/MoonTzai/folderbridge-mcp/releases/latest/download/FolderBridge.exe)。安装包不会出现在仓库的源码文件列表中。无需安装 Python；校验哈希后直接双击 `FolderBridge.exe`。
 
 EXE 包含 FolderBridge 及其 Python 运行时，但**不会**捆绑 OpenAI 的 `tunnel-client`。使用 ChatGPT 网页端时，仍需从 OpenAI 官方 Release 单独下载并在启动器中选择。
 

@@ -6,6 +6,10 @@
 ![Python 3.11+](https://img.shields.io/badge/Python-3.11%2B-3776AB)
 ![Transport: stdio](https://img.shields.io/badge/MCP-stdio-6B5CE7)
 
+> [!TIP]
+> **Windows users: [download FolderBridge.exe directly](https://github.com/MoonTzai/folderbridge-mcp/releases/latest/download/FolderBridge.exe).**
+> The binary is under GitHub **Releases → latest release → Assets**; it does not appear in the repository's source-file list. You can also open the [full release page](https://github.com/MoonTzai/folderbridge-mcp/releases/latest) for the EXE and its SHA-256 checksum file.
+
 **A safer, local-first bridge between AI clients and one folder you explicitly choose.**
 
 FolderBridge MCP is a zero-dependency Python MCP server plus a desktop launcher. It lets ChatGPT on the web—or any client that supports local stdio MCP—inspect and carefully edit a bounded local workspace. It deliberately avoids a public HTTP server, arbitrary shell access, telemetry, and silent background services.
@@ -35,7 +39,7 @@ Requirements:
 
 ### Windows executable — recommended
 
-Download `FolderBridge.exe` and `FolderBridge.exe.sha256` from the [latest GitHub release](https://github.com/MoonTzai/folderbridge-mcp/releases/latest). No Python installation is required. Verify the checksum, then double-click `FolderBridge.exe`.
+Download `FolderBridge.exe` and `FolderBridge.exe.sha256` from the [latest GitHub release Assets](https://github.com/MoonTzai/folderbridge-mcp/releases/latest), or [download the EXE directly](https://github.com/MoonTzai/folderbridge-mcp/releases/latest/download/FolderBridge.exe). The binary does not appear in the repository's source-file list. No Python installation is required. Verify the checksum, then double-click `FolderBridge.exe`.
 
 The executable contains FolderBridge and its Python runtime, but it does **not** bundle OpenAI's `tunnel-client`; download the official client separately from OpenAI's release and select it in the launcher when using ChatGPT on the web.
 
