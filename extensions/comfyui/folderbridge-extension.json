@@ -1,0 +1,68 @@
+{
+  "schema_version": 1,
+  "id": "comfyui",
+  "name": "Local ComfyUI",
+  "version": "1.0.0",
+  "description": "Connect to a local ComfyUI API fixed to 127.0.0.1:8188 and return generated images to the model.",
+  "entrypoint": "plugin.py",
+  "permissions": [
+    "network.loopback:127.0.0.1:8188",
+    "workspace.read",
+    "workspace.write"
+  ],
+  "execution": {
+    "mode": "isolated-process",
+    "timeout_seconds": 600
+  },
+  "workspace_adapter": {
+    "mode": "none",
+    "state": "none"
+  },
+  "actions": {
+    "status": {
+      "read_only": true,
+      "requires_workspace": false,
+      "authorization": "none",
+      "input_schema": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false
+      }
+    },
+    "run": {
+      "read_only": true,
+      "requires_workspace": true,
+      "authorization": "global",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "workflow_path": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1024
+          },
+          "overrides": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "object",
+              "additionalProperties": true
+            }
+          },
+          "save_directory": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1024
+          },
+          "timeout_seconds": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 600,
+            "default": 180
+          }
+        },
+        "required": ["workflow_path"],
+        "additionalProperties": false
+      }
+    }
+  }
+}

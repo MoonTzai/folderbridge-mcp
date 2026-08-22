@@ -62,7 +62,10 @@ class McpWorkflowTests(unittest.TestCase):
         )
         self.assertEqual(initialized["result"]["serverInfo"]["name"], "folderbridge")
         tools = self.call(2, "tools/list", {})
-        self.assertEqual([tool["name"] for tool in tools["result"]["tools"]], ["server_info", "workspace", "edit_file"])
+        self.assertEqual(
+            [tool["name"] for tool in tools["result"]["tools"]],
+            ["server_info", "workspace", "file_info", "pptx_inspect", "image_open", "extension", "edit_file"],
+        )
         read = self.call(3, "tools/call", {"name": "workspace", "arguments": {"action": "read", "path": "calc.py"}})
         content = read["result"]["structuredContent"]
         self.assertIn("return a - b", content["text"])
@@ -148,6 +151,21 @@ class McpWorkflowTests(unittest.TestCase):
         self.assertEqual(parsed.workspaces, [str(self.workspace), str(self.workspace.parent / "other")])
         self.assertTrue(parsed.read_only)
 
+    def test_cli_preserves_global_capability_flags(self) -> None:
+        parsed = build_parser().parse_args(
+            [
+                "serve",
+                "--workspace",
+                str(self.workspace),
+                "--capability",
+                "package-windows",
+                "--capability",
+                "git-push",
+            ]
+        )
+        self.assertEqual(parsed.capabilities, ["package-windows", "git-push"])
+
 
 if __name__ == "__main__":
     unittest.main()
+

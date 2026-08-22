@@ -13,6 +13,7 @@ from folderbridge_mcp.launcher_backend import (
     LauncherError,
     LauncherSettings,
     LauncherSettingsStore,
+    TunnelSupervisor,
     build_doctor_argv,
     build_init_argv,
     build_run_argv,
@@ -90,7 +91,8 @@ class LauncherBackendTests(unittest.TestCase):
 
         migrated = LauncherSettingsStore(path).load()
 
-        self.assertEqual(migrated.version, 2)
+        self.assertEqual(migrated.version, 3)
+        self.assertEqual(migrated.capabilities, [])
         self.assertEqual(migrated.workspaces, [str(self.root)])
         self.assertEqual(migrated.configured_fingerprint, "legacy")
 
@@ -193,6 +195,84 @@ class LauncherBackendTests(unittest.TestCase):
         settings.access_mode = "read_write"
         second = settings.fingerprint()
         self.assertNotEqual(first, second)
+
+    def test_global_capabilities_persist_and_flow_into_server_command(self) -> None:
+        path = Path(self.temp.name) / "launcher-capabilities.json"
+        store = LauncherSettingsStore(path)
+        settings = self.settings()
+        settings.capabilities = ["package-windows", "git-push"]
+        store.save(settings)
+
+        loaded = store.load()
+        self.assertEqual(loaded.capabilities, settings.capabilities)
+        argv = mcp_argv((self.root,), "read_only", False, loaded.capabilities)
+        self.assertEqual(argv.count("--capability"), 2)
+        for name in loaded.capabilities:
+            self.assertIn(name, argv)
+
+        first = settings.fingerprint()
+        settings.capabilities.append("test")
+        self.assertNotEqual(first, settings.fingerprint())
+
+    def test_retired_comfyui_capability_is_migrated_without_resetting_settings(self) -> None:
+        path = Path(self.temp.name) / "launcher-v3-comfyui.json"
+        settings = self.settings()
+        payload = {
+            "version": 3,
+            "workspaces": settings.workspaces,
+            "access_mode": settings.access_mode,
+            "profile": settings.profile,
+            "tunnel_id": settings.tunnel_id,
+            "tunnel_client_path": settings.tunnel_client_path,
+            "allow_tasks": False,
+            "capabilities": ["test", "comfyui", "git-push"],
+            "configured_fingerprint": "kept",
+        }
+        path.write_text(json.dumps(payload), encoding="utf-8")
+
+        loaded = LauncherSettingsStore(path).load()
+
+        self.assertEqual(loaded.workspaces, settings.workspaces)
+        self.assertEqual(loaded.capabilities, ["test", "git-push"])
+        self.assertEqual(loaded.configured_fingerprint, "kept")
+
+    def test_unknown_global_capability_is_rejected(self) -> None:
+        settings = self.settings()
+        settings.capabilities = ["arbitrary-shell"]
+        with self.assertRaises(LauncherError):
+            settings.validate(require_tunnel_id=True)
+
+    def test_tunnel_stop_terminates_owned_process_tree_before_returning(self) -> None:
+        class FakeProcess:
+            def __init__(self) -> None:
+                self.pid = 4321
+                self.returncode = None
+                self.stdout = None
+
+            def poll(self):
+                return self.returncode
+
+            def wait(self, timeout=None):
+                if self.returncode is None:
+                    raise AssertionError("wait called before process tree termination")
+                return self.returncode
+
+            def kill(self):
+                self.returncode = -9
+
+        supervisor = TunnelSupervisor(lambda _text: None)
+        process = FakeProcess()
+        supervisor._process = process  # type: ignore[assignment]
+
+        def terminate(fake):
+            fake.returncode = -9
+
+        with mock.patch("folderbridge_mcp.launcher_backend._terminate_process_tree", side_effect=terminate) as terminate_tree:
+            code = supervisor.stop()
+
+        terminate_tree.assert_called_once_with(process)
+        self.assertEqual(code, -9)
+        self.assertFalse(supervisor.running())
 
     def test_control_plane_environment_is_a_copy(self) -> None:
         with mock.patch.dict(os.environ, {}, clear=True):

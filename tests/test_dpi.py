@@ -35,6 +35,14 @@ class DpiTests(unittest.TestCase):
         self.assertEqual(fitted_window_size(144, 2560, 1440), (1410, 1230))
         self.assertEqual(fitted_window_size(192, 1920, 1080), (1766, 972))
 
+    def test_96_to_144_to_96_has_no_cumulative_metric_drift(self) -> None:
+        logical_metrics = (2, 6, 9, 18, 115, 285, 320, 820)
+        first_96 = tuple(scaled_pixels(value, scale_for_dpi(96)) for value in logical_metrics)
+        at_144 = tuple(scaled_pixels(value, scale_for_dpi(144)) for value in logical_metrics)
+        second_96 = tuple(scaled_pixels(value, scale_for_dpi(96)) for value in logical_metrics)
+        self.assertEqual(first_96, second_96)
+        self.assertNotEqual(first_96, at_144)
+
 
 if __name__ == "__main__":
     unittest.main()

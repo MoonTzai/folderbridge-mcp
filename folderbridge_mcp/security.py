@@ -470,6 +470,12 @@ def _clean_path(workspace: Path) -> str:
 
 def clean_environment(workspace: Path) -> dict[str, str]:
     allowed = ("COMSPEC", "LANG", "LC_ALL", "PATHEXT", "SYSTEMROOT", "TEMP", "TMP", "WINDIR")
+    if os.name == "nt":
+        # pathlib.Path.home() on Windows relies on USERPROFILE, with
+        # HOMEDRIVE/HOMEPATH as its fallback. Approved tasks still run with
+        # the current OS user's permissions, so preserve only these standard
+        # home-resolution variables rather than copying the full environment.
+        allowed += ("USERPROFILE", "HOMEDRIVE", "HOMEPATH")
     env = {name: os.environ[name] for name in allowed if os.environ.get(name)}
     env["PATH"] = _clean_path(workspace)
     return env

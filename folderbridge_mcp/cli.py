@@ -9,6 +9,7 @@ import sys
 from pathlib import Path
 
 from . import __version__
+from .capabilities import CAPABILITY_NAMES
 from .config import (
     CONFIG_NAME,
     ConfigError,
@@ -49,17 +50,38 @@ def build_parser() -> argparse.ArgumentParser:
     config.add_argument("--format", choices=("tunnel", "json", "toml"), default="tunnel")
     config.add_argument("--read-only", action="store_true")
     config.add_argument("--allow-tasks", action="store_true")
+    config.add_argument(
+        "--capability",
+        dest="capabilities",
+        action="append",
+        choices=CAPABILITY_NAMES,
+        help="Globally pre-authorized capability. Repeat to enable multiple capabilities.",
+    )
 
     serve = subparsers.add_parser("serve", help="Run the MCP server over stdio.")
     _workspace_arguments(serve)
     serve.add_argument("--read-only", action="store_true", help="Do not advertise the edit tool.")
+    serve.add_argument(
+        "--capability",
+        dest="capabilities",
+        action="append",
+        choices=CAPABILITY_NAMES,
+        help="Globally pre-authorized capability. Repeat to enable multiple capabilities.",
+    )
     serve.add_argument(
         "--allow-tasks",
         action="store_true",
         help="Advertise named task execution; the task config must also be locally approved.",
     )
 
+    extensions = subparsers.add_parser("extensions", help="List installed FolderBridge extensions.")
+    extensions.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    extensions.add_argument("--self-test", action="store_true", help="Run the bundled extension worker smoke test.")
+
     subparsers.add_parser("gui", help="Open the local graphical launcher.")
+    worker = subparsers.add_parser("extension-worker", help=argparse.SUPPRESS)
+    worker.add_argument("--extension-path", required=True, help=argparse.SUPPRESS)
+    worker.add_argument("--bundled", action="store_true", help=argparse.SUPPRESS)
     return parser
 
 
@@ -82,6 +104,30 @@ def main(argv: list[str] | None = None) -> int:
         from .gui import main as gui_main
 
         return gui_main()
+    if args.command == "extension-worker":
+        from .extension_worker import worker_main
+
+        return worker_main(args.extension_path, bundled=args.bundled)
+    if args.command == "extensions":
+        import json
+
+        from .extensions import ExtensionRegistry
+
+        registry = ExtensionRegistry()
+        if args.self_test:
+            result = registry.run("comfyui", "status", {}, workspace=None, read_only=True)
+            print(json.dumps(result, ensure_ascii=False, sort_keys=True))
+            return 0
+        description = registry.describe()
+        if args.json:
+            print(json.dumps(description, ensure_ascii=False, sort_keys=True))
+        else:
+            for item in description["extensions"]:
+                state = "loaded" if item["loaded"] else "enabled" if item["enabled"] else "approved" if item["trusted"] else "not-approved"
+                print(f"{item['id']} {item['version']} [{state}] {item['name']}")
+            for error in description["errors"]:
+                print(f"error: {error['path']}: {error['error']}", file=sys.stderr)
+        return 0
     try:
         if args.command in {"client-config", "serve"}:
             workspaces = canonical_workspaces(args.workspaces or ["."])
@@ -91,6 +137,7 @@ def main(argv: list[str] | None = None) -> int:
                     output_format=args.format,
                     read_only=args.read_only,
                     allow_tasks=args.allow_tasks,
+                    capabilities=args.capabilities or [],
                 )
             # tunnel-client needs this secret, but the local MCP subprocess does not.
             # Drop it before any tool or approved repository task can run.
@@ -99,11 +146,13 @@ def main(argv: list[str] | None = None) -> int:
                 workspaces,
                 read_only=args.read_only,
                 allow_tasks=args.allow_tasks,
+                capabilities=args.capabilities or [],
             )
             names = ",".join(workspace.name for workspace in workspaces)
             print(
                 f"folderbridge-mcp {__version__}: stdio workspaces={len(workspaces)} ({names}) "
-                f"mode={'read-only' if args.read_only else 'read/write'} tasks={args.allow_tasks}",
+                f"mode={'read-only' if args.read_only else 'read/write'} tasks={args.allow_tasks} "
+                f"capabilities={','.join(args.capabilities or []) or 'none'}",
                 file=sys.stderr,
                 flush=True,
             )
@@ -166,14 +215,19 @@ def _doctor(workspace: Path) -> int:
     return 0
 
 
-def _client_config(workspaces: tuple[Path, ...], *, output_format: str, read_only: bool, allow_tasks: bool) -> int:
+def _client_config(
+    workspaces: tuple[Path, ...],
+    *,
+    output_format: str,
+    read_only: bool,
+    allow_tasks: bool,
+    capabilities: list[str],
+) -> int:
     if allow_tasks:
         for workspace in workspaces:
-            config = load_config(workspace, required=True)
-            if not config_is_trusted(workspace, config):
-                raise ConfigError(f"{CONFIG_NAME} is not approved for {workspace} on this machine")
+            load_config(workspace, required=False)
     access_mode = "read_only" if read_only else "read_write"
-    print(render_client_config(workspaces, access_mode, allow_tasks, output_format))
+    print(render_client_config(workspaces, access_mode, allow_tasks, output_format, capabilities))
     return 0
 
 

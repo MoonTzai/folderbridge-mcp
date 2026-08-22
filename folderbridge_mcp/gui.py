@@ -9,7 +9,10 @@ from pathlib import Path
 import tkinter as tk
 from tkinter import filedialog, messagebox, scrolledtext, ttk
 
+from .capabilities import CAPABILITY_LABELS, CAPABILITY_NAMES
 from .config import canonical_workspaces, workspace_id
+from .extensions import ExtensionRegistry, extension_root_path
+from .extension_spec import EXTENSION_FORMAT_SUMMARY, EXTENSION_LLM_PROMPT
 from .dpi import (
     enable_windows_dpi_awareness,
     fitted_window_size,
@@ -33,6 +36,7 @@ from .launcher_backend import (
     render_client_config,
     run_short_command,
 )
+from .managed_services import ManagedServiceError, default_managed_service_manager
 from .setup_guide import (
     CHATGPT_INVOCATION_EXAMPLE,
     WINDOWS_X64_ASSET_PATTERN,
@@ -57,8 +61,18 @@ class FolderBridgeLauncher:
         self.settings = self.store.load()
         self.events: queue.Queue[tuple[str, object]] = queue.Queue(maxsize=1_000)
         self.supervisor = TunnelSupervisor(self._queue_tunnel_output)
+        self.extension_registry = ExtensionRegistry()
+        self.managed_services = default_managed_service_manager()
+        self._managed_service_states: dict[str, dict[str, object]] = {}
+        self._managed_service_busy: set[str] = set()
+        self._managed_service_prompted: set[str] = set()
+        self._sidebar_visible = False
+        self.extension_vars: dict[str, tk.BooleanVar] = {}
+        self.managed_service_auto_vars: dict[str, tk.BooleanVar] = {}
+        self._extension_wrapped_labels: list[ttk.Label] = []
         self._busy = False
         self._closing = False
+        self._shutdown_in_progress = False
         self._active_secret = ""
         self._last_exit_reported: int | None = None
         self._log_drop_reported = False
@@ -77,6 +91,8 @@ class FolderBridgeLauncher:
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
         self.root.bind("<Configure>", self._schedule_dpi_refresh, add="+")
         self.root.after(120, self._drain_events)
+        self.root.after(300, self._initialize_managed_services)
+        self.root.after(400, self._poll_dpi)
         self.root.after(500, self._poll_process)
 
     def _create_variables(self) -> None:
@@ -86,6 +102,11 @@ class FolderBridgeLauncher:
         self.tunnel_id_var = tk.StringVar(value=self.settings.tunnel_id)
         self.tunnel_client_var = tk.StringVar(value=self.settings.tunnel_client_path)
         self.allow_tasks_var = tk.BooleanVar(value=self.settings.allow_tasks)
+        enabled_capabilities = set(self.settings.capabilities)
+        self.capability_vars = {
+            name: tk.BooleanVar(value=name in enabled_capabilities)
+            for name in CAPABILITY_NAMES
+        }
         self.api_key_var = tk.StringVar()
         self.show_key_var = tk.BooleanVar()
 
@@ -103,6 +124,7 @@ class FolderBridgeLauncher:
             self.tunnel_id_var,
             self.tunnel_client_var,
             self.allow_tasks_var,
+            *self.capability_vars.values(),
         ):
             variable.trace_add("write", self._on_form_changed)
 
@@ -141,8 +163,18 @@ class FolderBridgeLauncher:
         if self._closing:
             return
         current_dpi = window_dpi(self.root)
-        if current_dpi == self._dpi:
+        if current_dpi != self._dpi:
+            self._apply_dpi(current_dpi)
+
+    def _poll_dpi(self) -> None:
+        if self._closing:
             return
+        current_dpi = window_dpi(self.root)
+        if current_dpi != self._dpi:
+            self._apply_dpi(current_dpi)
+        self.root.after(400, self._poll_dpi)
+
+    def _apply_dpi(self, current_dpi: int) -> None:
         self._dpi = current_dpi
         self._ui_scale = scale_for_dpi(current_dpi)
         try:
@@ -159,6 +191,34 @@ class FolderBridgeLauncher:
             min(self._px(820), width),
             min(self._px(700), height),
         )
+        self._refresh_dpi_metrics()
+
+    def _refresh_dpi_metrics(self) -> None:
+        if hasattr(self, "page"):
+            self.page.configure(padding=(self._px(24), self._px(20), self._px(24), self._px(20)))
+        if hasattr(self, "extension_sidebar"):
+            self.extension_sidebar.configure(width=self._px(320), padding=self._px(14))
+        if hasattr(self, "extension_sidebar_hint"):
+            self.extension_sidebar_hint.configure(wraplength=self._px(285))
+        if hasattr(self, "extension_canvas"):
+            self.extension_canvas.configure(width=self._px(285))
+        for label in getattr(self, "_extension_wrapped_labels", []):
+            try:
+                label.configure(wraplength=self._px(270))
+            except tk.TclError:
+                pass
+        if hasattr(self, "workspace_tree"):
+            self.workspace_tree.column("workspace_id", width=self._px(115))
+        if hasattr(self, "status_dot"):
+            dot_size = self._px(18)
+            inset = self._px(2)
+            self.status_dot.configure(width=dot_size, height=dot_size)
+            self.status_dot.coords(self.status_dot_id, inset, inset, dot_size - inset, dot_size - inset)
+            self.status_dot.grid_configure(padx=(0, self._px(9)), pady=(self._px(2), 0))
+        if hasattr(self, "log"):
+            self.log.configure(padx=self._px(10), pady=self._px(9))
+        if hasattr(self, "start_button"):
+            self.start_button.configure(padx=self._px(24), pady=self._px(9))
 
     def _configure_styles(self) -> None:
         style = ttk.Style(self.root)
@@ -183,14 +243,25 @@ class FolderBridgeLauncher:
         style.configure("TNotebook.Tab", padding=(self._px(12), self._px(8)), font=("Segoe UI", 9, "bold"))
         style.configure("TEntry", padding=self._px(6))
         style.configure("TButton", padding=(self._px(10), self._px(7)), font=("Segoe UI", 9))
+        style.configure("Compact.TButton", padding=(self._px(6), self._px(2)), font=("Segoe UI", 8))
         style.configure("TRadiobutton", background="#ffffff", font=("Segoe UI", 9))
         style.configure("TCheckbutton", background="#ffffff", font=("Segoe UI", 9))
         style.configure("Workspace.Treeview", font=("Segoe UI", 9), rowheight=self._px(25))
         style.configure("Workspace.Treeview.Heading", font=("Segoe UI", 9, "bold"))
 
     def _build_ui(self) -> None:
-        page = ttk.Frame(self.root, style="Page.TFrame", padding=(24, 20, 24, 20))
-        page.pack(fill="both", expand=True)
+        shell = ttk.Frame(self.root, style="Page.TFrame")
+        shell.pack(fill="both", expand=True)
+        shell.columnconfigure(0, weight=1)
+        shell.rowconfigure(0, weight=1)
+
+        self.page = ttk.Frame(
+            shell,
+            style="Page.TFrame",
+            padding=(self._px(24), self._px(20), self._px(24), self._px(20)),
+        )
+        page = self.page
+        page.grid(row=0, column=0, sticky="nsew")
         page.columnconfigure(0, weight=1)
         page.rowconfigure(4, weight=1)
 
@@ -205,12 +276,475 @@ class FolderBridgeLauncher:
         ).grid(row=1, column=0, sticky="w", pady=(2, 0))
         self.guide_button = ttk.Button(header, text="连接设置向导", command=self._open_web_setup)
         self.guide_button.grid(row=0, column=1, rowspan=2, sticky="e")
+        self.extension_toggle_button = ttk.Button(header, text="插件 ▸", command=self._toggle_extension_sidebar)
+        self.extension_toggle_button.grid(row=0, column=2, rowspan=2, sticky="e", padx=(8, 0))
 
         self._build_overview(page).grid(row=1, column=0, sticky="ew", pady=(0, 12))
         self._build_local_settings(page).grid(row=2, column=0, sticky="ew", pady=(0, 12))
         self._build_tunnel_settings(page).grid(row=3, column=0, sticky="ew", pady=(0, 12))
         self._build_log(page).grid(row=4, column=0, sticky="nsew", pady=(0, 12))
         self._build_actions(page).grid(row=5, column=0, sticky="ew")
+
+        self.extension_sidebar = self._build_extension_sidebar(shell)
+        self.extension_sidebar.grid(row=0, column=1, sticky="ns", padx=(0, 12), pady=12)
+        self.extension_sidebar.grid_remove()
+
+    def _build_extension_sidebar(self, parent: ttk.Frame) -> ttk.Frame:
+        frame = ttk.Frame(parent, style="Card.TFrame", padding=self._px(14), width=self._px(320))
+        frame.grid_propagate(False)
+        frame.columnconfigure(0, weight=1)
+        frame.rowconfigure(2, weight=1)
+
+        header = ttk.Frame(frame, style="Card.TFrame")
+        header.grid(row=0, column=0, sticky="ew")
+        header.columnconfigure(0, weight=1)
+        ttk.Label(header, text="Extensions", style="CardTitle.TLabel").grid(row=0, column=0, sticky="w")
+        ttk.Button(header, text="重新扫描", command=self._rescan_extensions).grid(row=0, column=1, padx=(6, 0))
+        ttk.Button(header, text="插件目录", command=self._open_extension_folder).grid(row=0, column=2, padx=(6, 0))
+        self.extension_sidebar_hint = ttk.Label(
+            frame,
+            text="默认折叠 · 热扫描 · 勾选即全局批准/加载；新插件不会新增 MCP tool。",
+            style="Muted.TLabel",
+            wraplength=self._px(285),
+        )
+        self.extension_sidebar_hint.grid(row=1, column=0, sticky="w", pady=(self._px(5), self._px(9)))
+
+        container = ttk.Frame(frame, style="Card.TFrame")
+        container.grid(row=2, column=0, sticky="nsew")
+        container.columnconfigure(0, weight=1)
+        container.rowconfigure(0, weight=1)
+        canvas = tk.Canvas(container, bg="#ffffff", highlightthickness=0, width=self._px(285))
+        scrollbar = ttk.Scrollbar(container, orient="vertical", command=canvas.yview)
+        canvas.configure(yscrollcommand=scrollbar.set)
+        canvas.grid(row=0, column=0, sticky="nsew")
+        scrollbar.grid(row=0, column=1, sticky="ns")
+        inner = ttk.Frame(canvas, style="Card.TFrame")
+        window_id = canvas.create_window((0, 0), window=inner, anchor="nw")
+        inner.bind("<Configure>", lambda _event: canvas.configure(scrollregion=canvas.bbox("all")))
+        canvas.bind("<Configure>", lambda event: canvas.itemconfigure(window_id, width=event.width))
+        self.extension_canvas = canvas
+        self.extension_list_frame = inner
+        self._refresh_extension_sidebar()
+        return frame
+
+    def _rescan_extensions(self) -> None:
+        self._refresh_extension_sidebar()
+        self._refresh_managed_service_statuses_async()
+
+    def _toggle_extension_sidebar(self) -> None:
+        self._sidebar_visible = not self._sidebar_visible
+        current_width = max(1, self.root.winfo_width())
+        current_height = max(1, self.root.winfo_height())
+        if self._sidebar_visible:
+            self._refresh_extension_sidebar()
+            self._refresh_managed_service_statuses_async()
+            self.extension_sidebar.grid()
+            self.extension_toggle_button.configure(text="插件 ◂")
+            self._sidebar_original_width = current_width
+            available = max(current_width, self.root.winfo_screenwidth() - self._px(40))
+            added = min(self._px(330), max(0, available - current_width))
+            self._sidebar_width_added = added
+            if added:
+                self.root.geometry(f"{current_width + added}x{current_height}")
+        else:
+            self.extension_sidebar.grid_remove()
+            self.extension_toggle_button.configure(text="插件 ▸")
+            original = int(getattr(self, "_sidebar_original_width", 0))
+            if original:
+                self.root.geometry(f"{original}x{current_height}")
+            self._sidebar_width_added = 0
+            self._sidebar_original_width = 0
+
+    def _refresh_extension_sidebar(self) -> None:
+        if not hasattr(self, "extension_list_frame"):
+            return
+        for child in self.extension_list_frame.winfo_children():
+            child.destroy()
+        self.extension_vars = {}
+        self.managed_service_auto_vars = {}
+        self._extension_wrapped_labels = []
+        description = self.extension_registry.describe()
+        extensions = description.get("extensions", [])
+        if not extensions:
+            empty_label = ttk.Label(
+                self.extension_list_frame,
+                text="未发现插件。把符合 ABI v1 的插件文件夹放入插件目录后点“重新扫描”。",
+                style="Body.TLabel",
+                wraplength=self._px(270),
+            )
+            empty_label.pack(fill="x", pady=(2, 8))
+            self._extension_wrapped_labels.append(empty_label)
+        for item in extensions:
+            extension_id = str(item["id"])
+            card = ttk.Frame(self.extension_list_frame, style="Card.TFrame", padding=(0, 4, 0, 8))
+            card.pack(fill="x")
+            var = tk.BooleanVar(value=bool(item.get("enabled")))
+            self.extension_vars[extension_id] = var
+            check = ttk.Checkbutton(
+                card,
+                text=f"{item['name']}  {item['version']}",
+                variable=var,
+                command=lambda eid=extension_id: self._toggle_extension_enabled(eid),
+            )
+            check.pack(anchor="w")
+            if item.get("approval_stale"):
+                status = "⚠ 文件/权限已变化 · 需重新批准"
+            elif item.get("loaded"):
+                status = "✓ 已批准 · 已加载"
+            elif item.get("trusted"):
+                status = "已批准 · 未加载"
+            elif item.get("bundled"):
+                status = "随 FolderBridge 提供 · 执行动作待批准"
+            else:
+                status = "未批准"
+            status_label = ttk.Label(card, text=status, style="Muted.TLabel", wraplength=self._px(270))
+            status_label.pack(anchor="w", padx=(22, 0))
+            self._extension_wrapped_labels.append(status_label)
+            permissions = item.get("permissions", [])
+            if permissions:
+                permissions_label = ttk.Label(
+                    card,
+                    text="权限：" + " · ".join(str(value) for value in permissions),
+                    style="Muted.TLabel",
+                    wraplength=self._px(270),
+                )
+                permissions_label.pack(anchor="w", padx=(22, 0), pady=(2, 0))
+                self._extension_wrapped_labels.append(permissions_label)
+
+            controller = self.managed_services.controller(extension_id)
+            if controller is not None:
+                cached = self._managed_service_states.get(extension_id)
+                config = controller.config()
+                service_state = cached or {
+                    "online": False,
+                    "owned": False,
+                    "external": False,
+                    "install_root": config.install_root,
+                    "auto_start": config.auto_start,
+                    "detail": "尚未检测",
+                }
+                online = bool(service_state.get("online"))
+                owned = bool(service_state.get("owned"))
+                external = bool(service_state.get("external"))
+                busy = extension_id in self._managed_service_busy
+                if cached is None:
+                    service_text = "服务：检测中…"
+                elif online and owned:
+                    service_text = "服务：在线 · FolderBridge 托管"
+                elif online and external:
+                    service_text = "服务：在线 · 外部服务（不会被 FolderBridge 终止）"
+                else:
+                    service_text = "服务：离线"
+                service_label = ttk.Label(card, text=service_text, style="Muted.TLabel", wraplength=self._px(270))
+                service_label.pack(anchor="w", padx=(22, 0), pady=(4, 0))
+                self._extension_wrapped_labels.append(service_label)
+                install_root = str(service_state.get("install_root") or config.install_root or "未选择")
+                path_label = ttk.Label(
+                    card,
+                    text=f"ComfyUI：{install_root}",
+                    style="Muted.TLabel",
+                    wraplength=self._px(270),
+                )
+                path_label.pack(anchor="w", padx=(22, 0), pady=(2, 0))
+                self._extension_wrapped_labels.append(path_label)
+                auto_var = tk.BooleanVar(value=bool(service_state.get("auto_start", config.auto_start)))
+                self.managed_service_auto_vars[extension_id] = auto_var
+                service_controls = ttk.Frame(card, style="Card.TFrame")
+                service_controls.pack(fill="x", padx=(22, 0), pady=(4, 0))
+                ttk.Checkbutton(
+                    service_controls,
+                    text="自动启动",
+                    variable=auto_var,
+                    command=lambda eid=extension_id: self._toggle_managed_service_auto_start(eid),
+                ).pack(side="left")
+                choose_button = ttk.Button(
+                    service_controls,
+                    text="选择目录…",
+                    command=lambda eid=extension_id: self._select_managed_service_directory(eid),
+                )
+                choose_button.pack(side="left", padx=(6, 0))
+                start_button = ttk.Button(
+                    service_controls,
+                    text="启动",
+                    command=lambda eid=extension_id: self._start_managed_service(eid),
+                )
+                start_button.pack(side="left", padx=(6, 0))
+                stop_button = ttk.Button(
+                    service_controls,
+                    text="停止",
+                    command=lambda eid=extension_id: self._stop_managed_service(eid),
+                )
+                stop_button.pack(side="left", padx=(6, 0))
+                if busy or online or owned or not config.install_root or not item.get("loaded"):
+                    start_button.configure(state="disabled")
+                if busy or not owned:
+                    stop_button.configure(state="disabled")
+
+            buttons = ttk.Frame(card, style="Card.TFrame")
+            buttons.pack(anchor="e", pady=(3, 0))
+            ttk.Button(
+                buttons,
+                text="详情",
+                command=lambda eid=extension_id: self._show_extension_details(eid),
+            ).pack(side="left")
+            if item.get("trusted") or item.get("approval_stale"):
+                ttk.Button(
+                    buttons,
+                    text="撤销批准",
+                    command=lambda eid=extension_id: self._revoke_extension(eid),
+                ).pack(side="left", padx=(6, 0))
+            ttk.Separator(self.extension_list_frame, orient="horizontal").pack(fill="x", pady=(0, 5))
+        for error in description.get("errors", []):
+            error_label = ttk.Label(
+                self.extension_list_frame,
+                text=f"加载失败：{error.get('path', '')}\n{error.get('error', '')}",
+                style="GuideWarn.TLabel",
+                wraplength=self._px(270),
+            )
+            error_label.pack(fill="x", pady=(3, 6))
+            self._extension_wrapped_labels.append(error_label)
+        self.root.after_idle(lambda: self.extension_canvas.configure(scrollregion=self.extension_canvas.bbox("all")))
+
+    def _toggle_extension_enabled(self, extension_id: str) -> None:
+        var = self.extension_vars.get(extension_id)
+        if var is None:
+            return
+        try:
+            record = self.extension_registry.get(extension_id)
+            status = self.extension_registry.trust_store.status(record)
+            if var.get():
+                if not status["trusted"]:
+                    permissions = "\n".join(f"• {permission}" for permission in record.manifest.permissions) or "• 无额外权限声明"
+                    warning = (
+                        f"批准并全局加载扩展：{record.manifest.name} {record.manifest.version}\n\n"
+                        f"SHA-256：{record.sha256}\n\n请求权限：\n{permissions}\n\n"
+                        "插件代码会在独立子进程运行，但这不是完整 OS 沙箱。来源不可信的插件应放入 VM/容器。\n"
+                        "任一插件文件或权限发生变化后，本批准会自动失效。"
+                    )
+                    if not messagebox.askyesno("批准 FolderBridge Extension", warning, parent=self.root):
+                        var.set(False)
+                        return
+                    self.extension_registry.trust_store.approve(record, enabled=True)
+                else:
+                    self.extension_registry.trust_store.set_enabled(record, True)
+                self._log(f"扩展已全局加载：{record.manifest.name}")
+                self._ensure_managed_service_async(extension_id)
+            else:
+                if self.managed_services.controller(extension_id) is not None:
+                    var.set(True)
+                    self._disable_or_revoke_extension_async(extension_id, revoke=False)
+                    return
+                self.extension_registry.trust_store.set_enabled(record, False)
+                self._log(f"扩展已停用：{record.manifest.name}（批准记录保留）")
+        except (OSError, ValueError) as exc:
+            var.set(False)
+            self._show_error(f"无法更新扩展授权：{exc}")
+        finally:
+            self._refresh_extension_sidebar()
+
+    def _revoke_extension(self, extension_id: str) -> None:
+        try:
+            record = self.extension_registry.get(extension_id)
+        except (OSError, ValueError) as exc:
+            self._show_error(f"无法读取扩展：{exc}")
+            return
+        if not messagebox.askyesno(
+            "撤销 Extension 批准",
+            f"撤销 {record.manifest.name} 的本机批准记录并立即停用？\n\n之后再次启用时需要重新核对 hash 与权限。",
+            parent=self.root,
+        ):
+            return
+        if self.managed_services.controller(extension_id) is not None:
+            self._disable_or_revoke_extension_async(extension_id, revoke=True)
+            return
+        try:
+            self.extension_registry.trust_store.revoke(extension_id)
+            self._log(f"已撤销扩展批准：{record.manifest.name}")
+        except OSError as exc:
+            self._show_error(f"无法撤销扩展批准：{exc}")
+        finally:
+            self._refresh_extension_sidebar()
+
+    def _show_extension_details(self, extension_id: str) -> None:
+        try:
+            record = self.extension_registry.get(extension_id)
+            status = self.extension_registry.trust_store.status(record)
+        except (OSError, ValueError) as exc:
+            self._show_error(f"无法读取扩展：{exc}")
+            return
+        actions = "\n".join(
+            f"• {action.name} · auth={action.authorization} · workspace={action.requires_workspace}"
+            for action in record.manifest.actions.values()
+        )
+        permissions = "\n".join(f"• {value}" for value in record.manifest.permissions) or "• 无"
+        messagebox.showinfo(
+            "Extension 详情",
+            f"{record.manifest.name} {record.manifest.version}\n"
+            f"ID: {record.manifest.extension_id}\n"
+            f"Bundled: {record.bundled}\n"
+            f"Trusted: {status['trusted']} · Enabled: {status['enabled']}\n"
+            f"SHA-256: {record.sha256}\n\n权限：\n{permissions}\n\n动作：\n{actions}\n\n"
+            f"{record.manifest.description}",
+            parent=self.root,
+        )
+
+    def _open_extension_folder(self) -> None:
+        folder = extension_root_path()
+        try:
+            folder.mkdir(parents=True, exist_ok=True)
+            if os.name == "nt":
+                os.startfile(folder)  # type: ignore[attr-defined]
+            else:
+                webbrowser.open(folder.as_uri())
+            self._log(f"已打开 Extension 目录：{folder}")
+        except OSError as exc:
+            self._show_error(f"无法打开 Extension 目录：{exc}")
+
+    def _loaded_extension_ids(self) -> tuple[str, ...]:
+        description = self.extension_registry.describe()
+        return tuple(str(item["id"]) for item in description.get("extensions", []) if item.get("loaded"))
+
+    def _initialize_managed_services(self) -> None:
+        if self._closing:
+            return
+        for extension_id in self._loaded_extension_ids():
+            self._ensure_managed_service_async(extension_id)
+
+    def _refresh_managed_service_statuses_async(self) -> None:
+        if self._closing:
+            return
+        for extension_id in self._loaded_extension_ids():
+            if self.managed_services.controller(extension_id) is not None:
+                self._run_managed_service_action(extension_id, "status")
+
+    def _ensure_managed_service_async(self, extension_id: str) -> None:
+        if self.managed_services.controller(extension_id) is not None:
+            self._run_managed_service_action(extension_id, "ensure")
+
+    def _start_managed_service(self, extension_id: str) -> None:
+        self._run_managed_service_action(extension_id, "start")
+
+    def _stop_managed_service(self, extension_id: str) -> None:
+        self._run_managed_service_action(extension_id, "stop")
+
+    def _run_managed_service_action(self, extension_id: str, action: str) -> None:
+        controller = self.managed_services.controller(extension_id)
+        if controller is None or extension_id in self._managed_service_busy or self._closing:
+            return
+        self._managed_service_busy.add(extension_id)
+        self._refresh_extension_sidebar()
+
+        def work() -> None:
+            try:
+                if action == "ensure":
+                    state = controller.ensure_auto_started()
+                elif action == "status":
+                    state = controller.status()
+                elif action == "start":
+                    state = controller.start()
+                elif action == "stop":
+                    state = controller.stop()
+                else:
+                    raise ValueError(f"unknown managed service action: {action}")
+                self._queue_event("managed-service-state", (extension_id, state))
+                if action == "ensure" and state.get("reason") == "path-required":
+                    self._queue_event("managed-service-path-required", extension_id)
+            except (ManagedServiceError, OSError, ValueError) as exc:
+                self._queue_event("managed-service-error", (extension_id, str(exc)))
+            finally:
+                self._queue_event("managed-service-idle", extension_id)
+
+        threading.Thread(
+            target=work,
+            name=f"folderbridge-service-{extension_id}-{action}",
+            daemon=True,
+        ).start()
+
+    def _select_managed_service_directory(self, extension_id: str) -> None:
+        controller = self.managed_services.controller(extension_id)
+        if controller is None:
+            return
+        current = controller.config().install_root
+        selected = filedialog.askdirectory(
+            title="选择 ComfyUI 安装目录",
+            initialdir=current or str(Path.home()),
+            parent=self.root,
+        )
+        if not selected:
+            return
+        try:
+            install = controller.configure_install(selected, auto_start=True)
+        except (ManagedServiceError, OSError, ValueError) as exc:
+            self._show_error(str(exc))
+            return
+        self._managed_service_states[extension_id] = {
+            **self._managed_service_states.get(extension_id, {}),
+            "online": False,
+            "owned": False,
+            "external": False,
+            "install_root": str(install.install_root),
+            "auto_start": True,
+        }
+        self._log(f"已保存 ComfyUI 安装目录：{install.install_root}")
+        self._refresh_extension_sidebar()
+        self._start_managed_service(extension_id)
+
+    def _prompt_managed_service_path(self, extension_id: str) -> None:
+        if extension_id in self._managed_service_prompted or self._closing:
+            return
+        self._managed_service_prompted.add(extension_id)
+        self._select_managed_service_directory(extension_id)
+
+    def _toggle_managed_service_auto_start(self, extension_id: str) -> None:
+        controller = self.managed_services.controller(extension_id)
+        variable = self.managed_service_auto_vars.get(extension_id)
+        if controller is None or variable is None:
+            return
+        try:
+            config = controller.set_auto_start(variable.get())
+        except OSError as exc:
+            self._show_error(f"无法保存自动启动设置：{exc}")
+            return
+        state = dict(self._managed_service_states.get(extension_id, {}))
+        state["install_root"] = config.install_root
+        state["auto_start"] = config.auto_start
+        self._managed_service_states[extension_id] = state
+        self._log(f"ComfyUI 自动启动已{'开启' if config.auto_start else '关闭'}。")
+        self._refresh_extension_sidebar()
+
+    def _disable_or_revoke_extension_async(self, extension_id: str, *, revoke: bool) -> None:
+        if extension_id in self._managed_service_busy:
+            return
+        controller = self.managed_services.controller(extension_id)
+        if controller is None:
+            return
+        self._managed_service_busy.add(extension_id)
+        self._log("正在先安全停止 FolderBridge 托管的插件服务…")
+        self._refresh_extension_sidebar()
+
+        def work() -> None:
+            try:
+                state = controller.stop()
+                self._queue_event("managed-service-state", (extension_id, state))
+                record = self.extension_registry.get(extension_id)
+                if revoke:
+                    self.extension_registry.trust_store.revoke(extension_id)
+                    notice = f"已撤销扩展批准：{record.manifest.name}"
+                else:
+                    self.extension_registry.trust_store.set_enabled(record, False)
+                    notice = f"扩展已停用：{record.manifest.name}（批准记录保留）"
+                self._queue_event("log", notice)
+                self._queue_event("extension-refresh", extension_id)
+            except (ManagedServiceError, OSError, ValueError) as exc:
+                self._queue_event("managed-service-error", (extension_id, str(exc)))
+            finally:
+                self._queue_event("managed-service-idle", extension_id)
+
+        threading.Thread(
+            target=work,
+            name=f"folderbridge-extension-stop-{extension_id}",
+            daemon=True,
+        ).start()
 
     def _build_overview(self, parent: ttk.Frame) -> ttk.Frame:
         card = ttk.Frame(parent, style="Card.TFrame", padding=16)
@@ -297,12 +831,46 @@ class FolderBridgeLauncher:
         )
         self.read_write_radio.pack(side="left", padx=(18, 0))
 
+        ttk.Label(card, text="全局预授权", style="Field.TLabel").grid(row=4, column=0, sticky="nw", pady=(13, 0))
+        capability_frame = ttk.Frame(card, style="Card.TFrame")
+        capability_frame.grid(row=4, column=1, columnspan=2, sticky="w", pady=(9, 0))
+        capability_toolbar = ttk.Frame(capability_frame, style="Card.TFrame")
+        capability_toolbar.grid(row=0, column=0, columnspan=3, sticky="w", pady=(0, 5))
+        self.capability_select_all_button = ttk.Button(
+            capability_toolbar,
+            text="全选",
+            style="Compact.TButton",
+            command=lambda: self._set_all_capabilities(True),
+        )
+        self.capability_select_all_button.pack(side="left")
+        self.capability_clear_button = ttk.Button(
+            capability_toolbar,
+            text="清空",
+            style="Compact.TButton",
+            command=lambda: self._set_all_capabilities(False),
+        )
+        self.capability_clear_button.pack(side="left", padx=(6, 0))
+        self.capability_checks: list[ttk.Checkbutton] = []
+        for index, name in enumerate(CAPABILITY_NAMES):
+            check = ttk.Checkbutton(
+                capability_frame,
+                text=CAPABILITY_LABELS[name],
+                variable=self.capability_vars[name],
+            )
+            check.grid(row=1 + index // 3, column=index % 3, sticky="w", padx=(0, 18), pady=(0, 4))
+            self.capability_checks.append(check)
+        ttk.Label(
+            capability_frame,
+            text="一次启用后适用于以后加入的所有工作区；构建/封装会执行项目代码，GitHub 推送仅允许 HTTPS origin 的当前分支且禁止 force。插件授权在右侧 Extensions 侧栏单独管理。",
+            style="Muted.TLabel",
+        ).grid(row=3, column=0, columnspan=3, sticky="w", pady=(2, 0))
+
         self.tasks_check = ttk.Checkbutton(
             card,
-            text="高级：允许已在本机单独批准的测试任务（默认关闭）",
+            text="高级：允许每个工作区单独 hash 批准的自定义任务（默认关闭）",
             variable=self.allow_tasks_var,
         )
-        self.tasks_check.grid(row=4, column=1, columnspan=2, sticky="w", pady=(9, 0))
+        self.tasks_check.grid(row=5, column=1, columnspan=2, sticky="w", pady=(9, 0))
         return card
 
     def _build_tunnel_settings(self, parent: ttk.Frame) -> ttk.Frame:
@@ -366,8 +934,8 @@ class FolderBridgeLauncher:
             foreground="#d8e2f0",
             insertbackground="#ffffff",
             font=("Cascadia Mono", 8),
-            padx=10,
-            pady=9,
+            padx=self._px(10),
+            pady=self._px(9),
             state="disabled",
         )
         self.log.grid(row=1, column=0, sticky="nsew")
@@ -383,6 +951,8 @@ class FolderBridgeLauncher:
         self.doctor_button = ttk.Button(frame, text="诊断", command=self._diagnose)
         self.doctor_button.grid(row=0, column=2, padx=(0, 8))
         ttk.Button(frame, text="官方文档", command=lambda: webbrowser.open(DOCS_URL)).grid(row=0, column=3)
+        self.exit_button = ttk.Button(frame, text="退出", command=self._exit_application)
+        self.exit_button.grid(row=0, column=5, sticky="e", padx=(0, 8))
         self.start_button = tk.Button(
             frame,
             text="启动连接",
@@ -395,11 +965,16 @@ class FolderBridgeLauncher:
             relief="flat",
             cursor="hand2",
             font=("Segoe UI", 11, "bold"),
-            padx=24,
-            pady=9,
+            padx=self._px(24),
+            pady=self._px(9),
         )
-        self.start_button.grid(row=0, column=5, sticky="e")
+        self.start_button.grid(row=0, column=6, sticky="e")
         return frame
+
+    def _set_all_capabilities(self, enabled: bool) -> None:
+        for variable in self.capability_vars.values():
+            variable.set(bool(enabled))
+        self._refresh_status_cards()
 
     def _on_form_changed(self, *_args: object) -> None:
         if hasattr(self, "workspace_status"):
@@ -453,6 +1028,10 @@ class FolderBridgeLauncher:
             tunnel_id=self.tunnel_id_var.get().strip(),
             tunnel_client_path=self.tunnel_client_var.get().strip(),
             allow_tasks=bool(self.allow_tasks_var.get()),
+            capabilities=[
+                name for name in CAPABILITY_NAMES
+                if self.capability_vars[name].get()
+            ],
             configured_fingerprint=self.settings.configured_fingerprint,
         )
 
@@ -664,7 +1243,7 @@ class FolderBridgeLauncher:
         try:
             settings = self._settings_from_form()
             workspaces = settings.validate(require_tunnel_id=False)
-            command = mcp_command(workspaces, settings.access_mode, settings.allow_tasks)
+            command = mcp_command(workspaces, settings.access_mode, settings.allow_tasks, settings.capabilities)
         except LauncherError as exc:
             self._show_error(str(exc))
             return
@@ -710,7 +1289,7 @@ class FolderBridgeLauncher:
         ttk.Button(header, text="关闭", command=dialog.destroy).grid(row=0, column=2, padx=(8, 0))
         ttk.Label(
             body,
-            text="ChatGPT 网页端按 1 → 4 完成；其他支持本地 stdio 的客户端直接看第 5 页。向导文字可拖选并用 Ctrl+C 复制。",
+            text="ChatGPT 网页端按 1 → 4 完成；其他支持本地 stdio 的客户端看第 5 页；插件开发见附录。向导文字可拖选并用 Ctrl+C 复制。",
             style="Body.TLabel",
         ).grid(row=1, column=0, sticky="w", pady=(3, 14))
 
@@ -784,7 +1363,7 @@ class FolderBridgeLauncher:
                 "1. 文件夹列表：逐个添加明确的工作区，最多 8 个；重复或父子重叠目录会被拒绝。全局权限首次使用保持“只读（推荐）”。",
                 "2. tunnel-client：只选择完整包中准确名为 tunnel-client.exe 的主程序；不要选 tunnel-client-runtime-*。Profile 保持 folderbridge 即可。",
                 "3. Tunnel ID：粘贴 Platform 中 tunnel_ 开头的 ID；Runtime API Key：粘贴控制面 Key（仅留内存，不保存）。",
-                "4. “高级：允许任务”保持关闭。点击“启动连接”，等待顶部状态变成“运行中”。",
+                "4. 按需勾选一次“全局预授权”（测试/构建/EXE/APK/GitHub/本地 ComfyUI），以后所有工作区继承；“高级：自定义任务”通常保持关闭。点击“启动连接”，等待顶部状态变成“运行中”。",
                 "5. 使用期间必须保持 FolderBridge 运行；若失败，点“诊断”并查看脱敏日志。",
             ),
             wrap,
@@ -839,7 +1418,7 @@ class FolderBridgeLauncher:
                 "2. 接入命令：FolderBridge.exe serve --workspace <路径1> --workspace <路径2> --read-only；每增加一个目录就重复一次 --workspace。通常由客户端自动启停，无需打开 GUI。",
                 "3. 客户端使用 mcpServers 风格时复制 JSON；使用 mcp_servers 风格时复制 TOML；字段名仍以该客户端文档为准。",
                 "4. 只支持远程 HTTP/SSE、网页或移动端且不能启动本地进程时，不能直接连接；需要该厂商的官方网关、Tunnel 或显式代理。",
-                "5. 客户端是否弹出工具确认属于客户端行为。FolderBridge 仍强制文件夹边界、只读开关、哈希防冲突和任务白名单。",
+                "5. 客户端是否弹出工具确认属于客户端行为。FolderBridge 仍强制文件夹边界、只读开关、哈希防冲突、全局能力白名单和逐工作区自定义任务批准。",
             ),
             wrap,
             warnings_after_steps={
@@ -864,6 +1443,37 @@ class FolderBridgeLauncher:
             other_buttons,
             text="复制 stdio 命令",
             command=lambda: self._copy_client_config("tunnel"),
+        ).pack(side="left", padx=(8, 0))
+
+        extension_tab = self._guide_tab(
+            notebook,
+            "FolderBridge Extension ABI v1",
+            (
+                "1. 每个插件是一个独立文件夹，至少包含 folderbridge-extension.json 与 plugin.py；插件安装后仍统一通过 extension(list/info/run) 调用，不会新增 MCP tool。",
+                "2. manifest 必须声明精确权限、动作 input_schema、execution 和 workspace_adapter。外部插件按完整目录 SHA-256 + permissions 批准；文件或权限变化会自动失效。",
+                "3. 需要适配项目时使用 workspace_adapter.mode=dynamic + detect.any_of/all_of。FolderBridge 每次调用都会重新检测，禁止靠安装时向每个工作区注入 .folderbridge.json task。",
+                "4. 插件代码在独立子进程中运行，环境清理、超时和输出都有边界；这能隔离崩溃，但不是完整 OS 沙箱。不可信插件请放 VM/容器。",
+                "5. 右侧 Extensions 侧栏默认折叠；把插件放入用户插件目录后点“重新扫描”，勾选时会显示 hash 与权限并请求一次批准。之后可热加载/停用，无需重建 Connector。",
+                "6. 下方“复制给 LLM 的插件开发指令”包含完整 ABI 速查，并要求 LLM 在资料不足时主动向用户索取/要求上传必要的 API 文档、脚本、workflow、示例文件或项目结构。",
+            ),
+            wrap,
+            warnings_after_steps={
+                4: "独立子进程不是安全容器。权限声明是 FolderBridge 的授权契约，不应被描述成能阻止恶意 Python 绕过操作系统权限。",
+            },
+        )
+        notebook.add(extension_tab, text="附录  插件标准")
+        extension_buttons = ttk.Frame(extension_tab, style="Guide.TFrame")
+        extension_buttons.pack(fill="x", pady=(10, 0))
+        ttk.Button(extension_buttons, text="打开插件目录", command=self._open_extension_folder).pack(side="left")
+        ttk.Button(
+            extension_buttons,
+            text="复制标准格式",
+            command=lambda: self._copy_text(EXTENSION_FORMAT_SUMMARY, "Extension ABI v1 标准格式已复制。"),
+        ).pack(side="left", padx=(8, 0))
+        ttk.Button(
+            extension_buttons,
+            text="复制给 LLM 的插件开发指令",
+            command=lambda: self._copy_text(EXTENSION_LLM_PROMPT, "LLM 插件开发指令已复制。"),
         ).pack(side="left", padx=(8, 0))
 
         dialog.update_idletasks()
@@ -984,6 +1594,7 @@ class FolderBridgeLauncher:
                 settings.access_mode,
                 settings.allow_tasks,
                 output_format,
+                settings.capabilities,
             )
         except LauncherError as exc:
             self._show_error(str(exc))
@@ -1044,6 +1655,39 @@ class FolderBridgeLauncher:
                 messagebox.showinfo("FolderBridge MCP", str(payload), parent=self.root)
             elif kind == "busy":
                 self._set_busy(bool(payload))
+            elif kind == "managed-service-state":
+                extension_id, raw_state = payload  # type: ignore[misc]
+                state = dict(raw_state)
+                self._managed_service_states[str(extension_id)] = state
+                warning = str(state.get("warning") or "")
+                if warning:
+                    self._log(warning)
+                if state.get("started"):
+                    self._log(f"托管服务已启动：{extension_id}")
+                elif state.get("stopped"):
+                    self._log(f"托管服务已停止：{extension_id}")
+                self._refresh_extension_sidebar()
+            elif kind == "managed-service-idle":
+                self._managed_service_busy.discard(str(payload))
+                self._refresh_extension_sidebar()
+            elif kind == "managed-service-path-required":
+                extension_id = str(payload)
+                self.root.after_idle(lambda eid=extension_id: self._prompt_managed_service_path(eid))
+            elif kind == "managed-service-error":
+                extension_id, message = payload  # type: ignore[misc]
+                self._log(f"托管服务 {extension_id}：{message}（Tunnel 不受影响）")
+                self._refresh_extension_sidebar()
+            elif kind == "extension-refresh":
+                self._refresh_extension_sidebar()
+            elif kind == "shutdown-error":
+                self._shutdown_in_progress = False
+                self.exit_button.configure(state="normal")
+                if not self.supervisor.running():
+                    self.start_button.configure(state="normal")
+                self._show_error(str(payload))
+            elif kind == "shutdown-complete":
+                self._finish_shutdown()
+                return
         self.root.after(120, self._drain_events)
 
     def _poll_process(self) -> None:
@@ -1109,6 +1753,9 @@ class FolderBridgeLauncher:
             self.show_key_check,
             self.read_only_radio,
             self.read_write_radio,
+            self.capability_select_all_button,
+            self.capability_clear_button,
+            *self.capability_checks,
             self.tasks_check,
         ):
             widget.configure(state=state)
@@ -1140,19 +1787,67 @@ class FolderBridgeLauncher:
         self._log(f"错误：{safe}")
         messagebox.showerror("FolderBridge MCP", safe, parent=self.root)
 
+    def _exit_application(self) -> None:
+        self._shutdown_application()
+
     def _on_close(self) -> None:
-        if self.supervisor.running():
-            if not messagebox.askyesno("退出 FolderBridge MCP", "Tunnel 仍在运行。退出并停止连接吗？", parent=self.root):
-                return
-            try:
-                self.supervisor.stop()
-            except Exception:
-                pass
+        if not messagebox.askyesno(
+            "退出 FolderBridge MCP",
+            "将先停止 FolderBridge 托管的插件服务和 Tunnel，然后退出。外部启动的软件不会被终止。",
+            parent=self.root,
+        ):
+            return
+        self._shutdown_application()
+
+    def _shutdown_application(self) -> None:
+        if self._closing or self._shutdown_in_progress:
+            return
         try:
             settings = self._settings_from_form()
             self._save_form(settings)
         except (OSError, tk.TclError):
             pass
+
+        loaded_extension_ids = self._loaded_extension_ids()
+        self._shutdown_in_progress = True
+        self.exit_button.configure(state="disabled")
+        self.start_button.configure(state="disabled")
+        self._log("正在按已加载 Extension 顺序停止 FolderBridge 托管服务…")
+
+        def work() -> None:
+            service_results = self.managed_services.shutdown(loaded_extension_ids)
+            failures = [result for result in service_results if result.get("error")]
+            for result in service_results:
+                warning = str(result.get("warning") or "")
+                if warning:
+                    self._queue_event("log", warning)
+            if failures:
+                rendered = "; ".join(
+                    f"{item.get('service_id')}: {item.get('error')}" for item in failures
+                )
+                self._queue_event(
+                    "shutdown-error",
+                    f"托管插件服务未能可靠停止，FolderBridge 将保持打开：{rendered}",
+                )
+                return
+            try:
+                if self.supervisor.running():
+                    self._queue_event("log", "托管插件服务已处理完毕，正在关闭 Tunnel/MCP 进程树…")
+                    self.supervisor.stop()
+                if self.supervisor.running():
+                    raise RuntimeError("Tunnel/MCP 进程树仍在运行")
+            except Exception as exc:
+                self._queue_event(
+                    "shutdown-error",
+                    f"连接进程未能可靠关闭，FolderBridge 将保持打开：{exc}",
+                )
+                return
+            self._queue_event("shutdown-complete", None)
+
+        threading.Thread(target=work, name="folderbridge-shutdown", daemon=True).start()
+
+    def _finish_shutdown(self) -> None:
+        self._log("FolderBridge 托管服务与 Tunnel/MCP 已安全关闭；外部启动的软件未被终止。")
         self._active_secret = ""
         self.api_key_var.set("")
         self._closing = True

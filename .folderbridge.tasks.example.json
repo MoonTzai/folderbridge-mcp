@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "tasks": {
+    "test": {
+      "argv": [
+        "python",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests",
+        "-p",
+        "test_*.py",
+        "-v"
+      ],
+      "timeout_seconds": 180
+    },
+    "build-windows": {
+      "argv": [
+        "powershell.exe",
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        "scripts\\build_windows.ps1",
+        "-Python",
+        ".build-venv\\Scripts\\python.exe"
+      ],
+      "timeout_seconds": 600
+    }
+  }
+}

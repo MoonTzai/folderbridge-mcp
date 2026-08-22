@@ -2,6 +2,37 @@
 
 All notable changes to FolderBridge MCP are documented here.
 
+## 0.4.1 — 2026-08-23
+
+- Fixed `--allow-tasks` startup semantics so workspaces without `.folderbridge.json`, approved-task workspaces, extension-only workspaces, and workspaces with unapproved configs can coexist; approval is enforced only when a named task is actually executed.
+- Added Launcher-owned ComfyUI managed-service support: select a validated Portable / `.venv` / `venv` install once, optionally auto-start it on extension load, and reuse an already-running external `127.0.0.1:8188` instance without starting a duplicate.
+- Hardened ComfyUI process ownership: only the `Popen` handle created by the current FolderBridge run is stoppable; no PID is persisted, no BAT/CMD or arbitrary shell command is launched, and FolderBridge never discovers/kills a process merely because it owns port 8188.
+- Reworked application shutdown into a background orchestration that stops FolderBridge-owned managed services in loaded-extension order, waits for their expected ports, then stops Tunnel/MCP, clears the in-memory Runtime API key, and destroys Tk only on the main thread. External services remain untouched.
+- Improved Windows Per-Monitor DPI V2 handling with a 400 ms fallback DPI poll, absolute `dpi / 96` metric recalculation, and refreshes for fixed Treeview/sidebar/canvas/status/log/button metrics when moving across differently scaled displays.
+- Added a compact button style used only by the global-capability Select all / Clear controls.
+- Added formal regression coverage for mixed `allow_tasks` workspaces, ComfyUI managed-service ownership/safety, shutdown ordering, and 96 → 144 → 96 DPI round trips.
+
+## 0.4.0 — 2026-08-23
+
+- Added FolderBridge Extension ABI v1 with hot scanning, exact directory-hash approval, declared permission contracts, bounded out-of-process execution, per-extension state directories, and dynamic workspace adapters that re-detect project features at call time instead of injecting workspace tasks.
+- Replaced per-plugin MCP tool growth with one stable `extension` gateway (`list` / `info` / `run`), so installing future extensions does not change the Connector tool catalog.
+- Migrated local ComfyUI into the first bundled extension while keeping the loopback-only API helper and generated-image MCP content path; the old 0.3.x `comfyui` global capability value is migrated out without resetting other launcher settings.
+- Added a default-collapsed Extensions sidebar with hot rescan, exact-hash permission approval, enable/disable state, stale-approval detection, details, and direct access to the user extension directory.
+- Added global capability “select all” and “clear” controls.
+- Added an explicit Exit button and hardened shutdown so FolderBridge terminates its owned Tunnel/MCP process tree before the GUI exits; independently started local software such as ComfyUI is left running.
+- Added an Extension ABI appendix to the connection guide, including one-click copy of the standard format and an LLM-ready plugin-development instruction that requires the LLM to request/upload missing API docs, scripts, workflows, sample files, or project structure instead of guessing.
+- Added a bundled-extension build smoke test so Windows packaging fails if the new EXE cannot discover the bundled ComfyUI extension.
+
+## 0.3.0 — 2026-08-23
+
+- Promoted binary metadata, PPTX/SmartArt inspection, image opening, and local ComfyUI integration to built-in MCP tools that do not depend on per-workspace task configuration.
+- Added persistent global pre-authorizations for test, build, Windows EXE packaging, Android APK packaging, constrained GitHub push, and ComfyUI workflow execution; current and future workspaces inherit the selected capabilities.
+- Discover supported project entry points at call time so capabilities can become available after a workspace was originally added.
+- Restricted global GitHub push to a GitHub HTTPS origin and the current branch, without force push or repository-local credential helpers / push-target rewrites.
+- Restricted ComfyUI to loopback `127.0.0.1:8188`, disabled proxies and redirects, required API-format workflow JSON from an allowed workspace, and returned generated images as MCP image content.
+- Preserved per-workspace exact-hash-approved named tasks for unusual custom commands rather than using them for common built-in/global capabilities.
+- Fixed approved Windows task environments so `Path.home()` and PyInstaller work under the minimal environment, including a build-script recovery path for older packaged runners.
+
 ## 0.2.0 — 2026-08-23
 
 - Added an add/remove workspace list in the Windows launcher, with up to eight independent roots per connection.

@@ -61,7 +61,7 @@ def canonical_workspace(raw: str | os.PathLike[str]) -> Path:
     anchor = Path(root.anchor).resolve(strict=True)
     try:
         home = Path.home().resolve(strict=True)
-    except OSError:
+    except (OSError, RuntimeError):
         home = None
     if root == anchor or (home is not None and root == home):
         raise ConfigError("Workspace is too broad; choose a project directory, not a drive root or home directory")

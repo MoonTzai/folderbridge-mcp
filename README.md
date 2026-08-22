@@ -17,6 +17,16 @@ FolderBridge MCP is a zero-dependency Python MCP server plus a desktop launcher.
 > [!IMPORTANT]
 > This project is in an early public beta. It reduces the attack surface; it is not an operating-system sandbox. Only expose folders and repositories you trust.
 
+## 0.4.1 highlights
+
+- **Mixed workspaces with `--allow-tasks`:** workspaces with no `.folderbridge.json`, approved named tasks, extension-only usage, and not-yet-approved task configs can coexist in one connection. Task approval is enforced only when that workspace's named task is actually called.
+- **Launcher-managed ComfyUI:** the Windows launcher can remember a validated ComfyUI Portable / `.venv` / `venv` installation and auto-start it when the bundled Local ComfyUI extension loads. An already-running `127.0.0.1:8188` instance is detected as external and reused instead of duplicated.
+- **Strict process ownership:** FolderBridge never persists a ComfyUI PID or arbitrary launch command and never kills a process merely because it owns port 8188. Only the in-memory `Popen` handle created by the current launcher run is stoppable.
+- **Safer shutdown:** FolderBridge-owned managed services stop before Tunnel/MCP, external services are left alone, and blocking process waits happen off the Tk main thread.
+- **Per-monitor DPI hardening:** Per-Monitor V2 remains enabled, with a lightweight DPI fallback poll and absolute `dpi / 96` metric recalculation to avoid cumulative scale drift when moving between monitors.
+
+See [CHANGELOG.md](CHANGELOG.md) for the full release history and [Extension ABI v1](docs/extensions.md) for managed-service and plugin boundaries.
+
 ## Why FolderBridge?
 
 - **Independent folder boundaries:** one connection can contain up to eight canonical workspaces; every multi-workspace tool call selects a `workspace_id` instead of merging roots.
@@ -104,7 +114,7 @@ Create the key for `tunnel-client` under the same Platform organization's [Runti
 
 1. Add one or more explicit workspace folders (up to eight) and keep **Read only (recommended)** for the first run. The global access mode applies to every listed folder.
 2. Select `tunnel-client.exe` from the complete archive, never a `tunnel-client-runtime-*` component; the default `folderbridge` profile is suitable.
-3. Enter the same Tunnel ID and Runtime API key, and leave advanced named tasks disabled.
+3. Enter the same Tunnel ID and Runtime API key. Optionally enable the global capabilities you want once; leave per-workspace advanced named tasks disabled unless you need a custom command.
 4. Click **Start connection**. The launcher runs the official `init`, `doctor`, and `run` flow. Continue only after the top status reads **运行中** (Running). When changing the folder or access mode later, click **应用配置** (Apply configuration) again; the launcher updates the same profile that it manages.
 
 ### 4. Create the ChatGPT developer-mode app
@@ -200,13 +210,17 @@ See the [client compatibility research](docs/client-compatibility-research.md) f
 
 ## Tools and editing workflow
 
-The default server exposes:
+The built-in server tools do not depend on per-workspace task configuration:
 
-- `server_info`: reports each available workspace name, stable `workspace_id`, and safety boundary;
+- `server_info`: reports each available workspace name, stable `workspace_id`, built-in/global capabilities, and safety boundary;
 - `workspace`: lists, reads, searches, and shows bounded Git status/diff output inside the selected `workspace_id`;
-- `edit_file`: creates or exactly edits a UTF-8 file inside the selected workspace.
+- `file_info`: returns bounded metadata and SHA-256 for binary files;
+- `pptx_inspect`: inspects PPTX text, OOXML diagram relationships, and SmartArt data without executing Office content;
+- `image_open`: returns bounded PNG/JPEG/GIF/WebP image content to the MCP client, including exact image members inside ZIP files;
+- `extension`: the stable `list` / `info` / `run` gateway for hot-loaded extensions; installing more plugins does not add MCP tool names;
+- `edit_file`: in read/write mode, creates or exactly edits a UTF-8 file inside the selected workspace.
 
-With one workspace, existing clients may continue omitting `workspace_id`. With multiple workspaces, `workspace`, `edit_file`, and `run_task` require a `workspace_id` returned by `server_info`; missing or unknown IDs are rejected. Duplicate roots, parent/child overlaps, and lists beyond eight entries are rejected before startup.
+With one workspace, existing clients may continue omitting `workspace_id`. With multiple workspaces, workspace-scoped tools require a `workspace_id` returned by `server_info`; missing or unknown IDs are rejected. Duplicate roots, parent/child overlaps, and lists beyond eight entries are rejected before startup.
 
 A safe edit loop is:
 
@@ -217,9 +231,33 @@ A safe edit loop is:
 
 The server cannot delete or move files. Absolute paths, `..`, symlinks, junctions/reparse points, VCS internals, common dependency/build folders, and credential-like names are denied.
 
-## Optional named tasks
+## Global pre-authorized capabilities
 
-Arbitrary command text is never accepted through MCP. If you need a test-after-edit loop, create and review a local task policy:
+The launcher can authorize common capabilities once for all current and future workspaces: `test`, `build`, `package-windows`, `package-android`, and `git-push`. These permissions live in the launcher settings rather than `.folderbridge.json`, so a workspace can gain a supported build script months after it was added and FolderBridge will detect it at call time. The launcher also provides **Select all** and **Clear** controls for this group.
+
+`git-push` is intentionally constrained to a GitHub HTTPS `origin`, the current branch, no force push, and no repository-local credential helper / push-target rewrite configuration. Build/package capabilities may execute local project code, so enable only the global capabilities you want.
+
+For direct stdio clients, repeat `--capability <name>` on the `serve` or `client-config` command. The Windows launcher exposes the same choices as persistent checkboxes.
+
+## Extensions
+
+FolderBridge Extension ABI v1 is the preferred way to add future global integrations such as ComfyUI, FFmpeg, Blender, Ollama, ADB, or other local tools without changing the MCP tool catalog. The Windows launcher has a default-collapsed **Extensions** sidebar that hot-scans the user extension directory, shows installed/approved/loaded state, and lets you approve or disable plugins while the Tunnel remains connected.
+
+Each extension is a directory containing at least `folderbridge-extension.json` and `plugin.py`. External plugins are approved against the exact SHA-256 of the complete plugin directory plus the declared permission list; changing any file or permission makes the approval stale. Extensions execute in a separate subprocess with a cleaned environment, bounded protocol I/O, and a declared timeout. This isolates crashes and protocol pollution, but it is **not an OS security sandbox**: use a VM/container for untrusted plugin code.
+
+Workspace-specific adaptation should use `workspace_adapter.mode=dynamic` with `detect.any_of` / `detect.all_of`. FolderBridge re-evaluates those patterns at call time, so extensions do not need to inject `.folderbridge.json` tasks when installed and can become applicable after a project changes later. Persistent plugin state should use the provided profile state directory rather than polluting repositories.
+
+ComfyUI is the first bundled extension. Its status action checks the fixed loopback endpoint `127.0.0.1:8188`; workflow execution requires one-time approval in the Extensions sidebar. In FolderBridge 0.4.1 the Windows launcher can also manage the local ComfyUI process itself: choose a supported Portable root (`python_embeded\\python.exe` + `ComfyUI\\main.py`) or source root (`main.py` + `.venv\\Scripts\\python.exe` / `venv\\Scripts\\python.exe`) once, and the launcher can auto-start it with explicit Python/main.py arguments, `shell=False`, and fixed `127.0.0.1:8188` binding. If that endpoint is already online before FolderBridge starts it, the service is marked external and reused rather than duplicated.
+
+Managed-service ownership is intentionally stricter than Extension permissions. FolderBridge stores only `install_root` and `auto_start`, never a PID or arbitrary command. Only the in-memory `Popen` handle created by the current launcher run is considered owned and stoppable. FolderBridge never runs a user-selected BAT/CMD for ComfyUI and never looks up or kills an unknown process merely because it occupies port 8188. On exit it stops owned managed services before Tunnel/MCP; external ComfyUI remains running.
+
+On Windows, the launcher requests Per-Monitor DPI V2 awareness and also polls the current window DPI as a lightweight fallback. Fixed GUI metrics are recalculated from their original logical sizes (`dpi / 96`) only when DPI actually changes, so moving 96 → 144 → 96 DPI does not accumulate scale drift.
+
+ABI v1 plugins should use FolderBridge-packaged modules and the Python standard library rather than assuming arbitrary pip dependencies inside the one-file EXE. Extra software should normally be reached through a precise loopback API or a declared `process.execute:<basename>` dependency. Run `FolderBridge.exe extensions --json` to inspect what the packaged executable can discover. The connection guide appendix contains the complete format plus a one-click **LLM plugin-development prompt** that tells the model to request/upload missing API docs, scripts, workflows, sample files, or project structure instead of guessing. See [Extension ABI v1](docs/extensions.md).
+
+## Optional per-workspace named tasks
+
+Arbitrary command text is never accepted through MCP. For unusual repository-specific commands that are not covered by global capabilities, create and review a local task policy:
 
 ```powershell
 python .\folderbridge_launcher.py init --workspace C:\path\to\repo
@@ -227,7 +265,7 @@ python .\folderbridge_launcher.py init --workspace C:\path\to\repo
 python .\folderbridge_launcher.py approve --workspace C:\path\to\repo
 ```
 
-Then enable approved tasks in the launcher or add `--allow-tasks` to the generated server command. The model can select only a task name; it cannot provide a command, arguments, environment variables, or working directory.
+Then enable approved tasks in the launcher or add `--allow-tasks` to the generated server command. Enabling this switch does **not** require every configured workspace to contain `.folderbridge.json`: no-config workspaces, approved-task workspaces, extension-only workspaces, and workspaces whose config has not yet been approved can coexist in one connection. Approval is checked when that workspace's named task is actually invoked. The model can select only a task name; it cannot provide a command, arguments, environment variables, or working directory.
 
 > [!WARNING]
 > Tests, build tools, and package scripts execute repository code with your current OS user permissions. Use a disposable VM or container for untrusted repositories, or leave task execution disabled.
@@ -241,6 +279,7 @@ FolderBridge treats MCP requests, repository text, and tool output as untrusted 
 - atomic writes with a current-content hash precondition;
 - protected local policy files;
 - `shell=False`, fixed argument arrays, clean task environments, and timeouts;
+- extension manifests reject unknown/overbroad permission names, extension approvals bind exact code hashes and permissions, and plugin execution is moved out of the MCP process;
 - no inbound network listener and no FolderBridge telemetry.
 
 Read [the complete security model](docs/security-model.md) and [the upstream design research](docs/upstream-research.md). To report a vulnerability, follow [SECURITY.md](SECURITY.md).

@@ -13,13 +13,14 @@ import tempfile
 import threading
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import BinaryIO, Callable
+from typing import BinaryIO, Callable, Iterable
 
 from . import __version__
+from .capabilities import CAPABILITY_NAMES, normalize_capability_names
 from .config import ConfigError, MAX_WORKSPACES, canonical_workspaces, config_is_trusted, load_config
 
 
-LAUNCHER_SETTINGS_VERSION = 2
+LAUNCHER_SETTINGS_VERSION = 3
 MAX_SETTINGS_BYTES = 64 * 1024
 MAX_COMMAND_OUTPUT = 256 * 1024
 PROFILE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,39}$")
@@ -43,6 +44,7 @@ class LauncherSettings:
     tunnel_id: str = ""
     tunnel_client_path: str = ""
     allow_tasks: bool = False
+    capabilities: list[str] = field(default_factory=list)
     configured_fingerprint: str = ""
 
     def validate(self, *, require_tunnel_id: bool = False) -> tuple[Path, ...]:
@@ -64,12 +66,14 @@ class LauncherSettings:
             raise LauncherError("Tunnel ID 格式无效")
         if not isinstance(self.allow_tasks, bool):
             raise LauncherError("任务开关配置无效")
+        try:
+            normalize_capability_names(self.capabilities)
+        except (TypeError, ValueError) as exc:
+            raise LauncherError(f"全局能力配置无效：{exc}") from exc
         if self.allow_tasks:
             try:
                 for workspace in workspaces:
-                    config = load_config(workspace, required=True)
-                    if not config_is_trusted(workspace, config):
-                        raise LauncherError(f"工作区 {workspace.name} 的测试任务尚未在本机审核批准；请先用命令行 init/approve")
+                    load_config(workspace, required=False)
             except ConfigError as exc:
                 raise LauncherError(str(exc)) from exc
         return workspaces
@@ -86,7 +90,8 @@ class LauncherSettings:
             "profile": self.profile,
             "tunnel_id": self.tunnel_id,
             "allow_tasks": self.allow_tasks,
-            "mcp_command": mcp_command(workspaces, self.access_mode, self.allow_tasks),
+            "capabilities": list(normalize_capability_names(self.capabilities)),
+            "mcp_command": mcp_command(workspaces, self.access_mode, self.allow_tasks, self.capabilities),
         }
         encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
         return hashlib.sha256(encoded).hexdigest()
@@ -131,8 +136,32 @@ class LauncherSettingsStore:
                 "tunnel_id": raw.get("tunnel_id", ""),
                 "tunnel_client_path": raw.get("tunnel_client_path", ""),
                 "allow_tasks": raw.get("allow_tasks", False),
+                "capabilities": [],
                 "configured_fingerprint": raw.get("configured_fingerprint", ""),
             }
+        elif raw.get("version") == 2:
+            version_two_allowed = {
+                "version",
+                "workspaces",
+                "access_mode",
+                "profile",
+                "tunnel_id",
+                "tunnel_client_path",
+                "allow_tasks",
+                "configured_fingerprint",
+            }
+            if set(raw).difference(version_two_allowed):
+                return LauncherSettings()
+            raw = {
+                **raw,
+                "version": LAUNCHER_SETTINGS_VERSION,
+                "capabilities": [],
+            }
+        # 0.3.x exposed ComfyUI as a global capability. In 0.4 it is the
+        # first hot-loaded extension, so preserve the rest of the v3 launcher
+        # settings while dropping only that retired capability value.
+        if raw.get("version") == LAUNCHER_SETTINGS_VERSION and isinstance(raw.get("capabilities"), list):
+            raw = {**raw, "capabilities": [item for item in raw["capabilities"] if item != "comfyui"]}
         allowed = set(LauncherSettings.__dataclass_fields__)
         if set(raw).difference(allowed):
             return LauncherSettings()
@@ -158,7 +187,13 @@ class LauncherSettingsStore:
                 )
             )
             or not isinstance(settings.allow_tasks, bool)
+            or not isinstance(settings.capabilities, list)
+            or not all(isinstance(value, str) for value in settings.capabilities)
         ):
+            return LauncherSettings()
+        try:
+            normalize_capability_names(settings.capabilities)
+        except ValueError:
             return LauncherSettings()
         return settings
 
@@ -220,8 +255,14 @@ def _workspace_tuple(workspaces: tuple[Path, ...] | list[Path] | Path) -> tuple[
     return roots
 
 
-def mcp_argv(workspaces: tuple[Path, ...] | list[Path] | Path, access_mode: str, allow_tasks: bool) -> list[str]:
+def mcp_argv(
+    workspaces: tuple[Path, ...] | list[Path] | Path,
+    access_mode: str,
+    allow_tasks: bool,
+    capabilities: Iterable[str] = (),
+) -> list[str]:
     roots = _workspace_tuple(workspaces)
+    normalized_capabilities = normalize_capability_names(capabilities)
     if getattr(sys, "frozen", False):
         argv = [str(Path(sys.executable).resolve()), "serve"]
     else:
@@ -230,13 +271,20 @@ def mcp_argv(workspaces: tuple[Path, ...] | list[Path] | Path, access_mode: str,
         argv.extend(("--workspace", str(workspace)))
     if access_mode == "read_only":
         argv.append("--read-only")
+    for capability in normalized_capabilities:
+        argv.extend(("--capability", capability))
     if allow_tasks:
         argv.append("--allow-tasks")
     return argv
 
 
-def mcp_command(workspaces: tuple[Path, ...] | list[Path] | Path, access_mode: str, allow_tasks: bool) -> str:
-    argv = mcp_argv(workspaces, access_mode, allow_tasks)
+def mcp_command(
+    workspaces: tuple[Path, ...] | list[Path] | Path,
+    access_mode: str,
+    allow_tasks: bool,
+    capabilities: Iterable[str] = (),
+) -> str:
+    argv = mcp_argv(workspaces, access_mode, allow_tasks, capabilities)
     # tunnel-client parses --mcp-command with POSIX-style escaping even on
     # Windows. Backslashes would therefore be consumed (C:\Users -> C:Users).
     # Windows accepts forward slashes for these absolute executable and
@@ -251,13 +299,14 @@ def render_client_config(
     access_mode: str,
     allow_tasks: bool,
     output_format: str,
+    capabilities: Iterable[str] = (),
 ) -> str:
     """Render a portable stdio client configuration without starting the server."""
 
-    argv = mcp_argv(workspaces, access_mode, allow_tasks)
+    argv = mcp_argv(workspaces, access_mode, allow_tasks, capabilities)
     command, args = argv[0], argv[1:]
     if output_format == "tunnel":
-        return mcp_command(workspaces, access_mode, allow_tasks)
+        return mcp_command(workspaces, access_mode, allow_tasks, capabilities)
     if output_format == "json":
         return json.dumps(
             {"mcpServers": {"folderbridge": {"command": command, "args": args}}},
@@ -303,7 +352,7 @@ def build_init_argv(executable: Path, settings: LauncherSettings, workspaces: tu
         "--tunnel-id",
         settings.tunnel_id,
         "--mcp-command",
-        mcp_command(workspaces, settings.access_mode, settings.allow_tasks),
+        mcp_command(workspaces, settings.access_mode, settings.allow_tasks, settings.capabilities),
         # The launcher owns this profile after the user explicitly applies the
         # form. Re-applying settings must update it instead of failing merely
         # because the same profile name already exists.
@@ -486,16 +535,16 @@ class TunnelSupervisor:
         if process is None:
             return None
         if process.poll() is None:
+            # Kill the FolderBridge-owned Tunnel tree while the parent PID is
+            # still alive. On Windows this lets taskkill /T reliably include
+            # the MCP subprocesses spawned by tunnel-client instead of leaving
+            # an orphan after terminating only the parent first.
+            _terminate_process_tree(process)
             try:
-                process.terminate()
-                process.wait(timeout=3)
-            except (OSError, subprocess.TimeoutExpired):
-                _terminate_process_tree(process)
-                try:
-                    process.wait(timeout=5)
-                except subprocess.TimeoutExpired:
-                    process.kill()
-                    process.wait(timeout=5)
+                process.wait(timeout=8)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=5)
         if process.stdout:
             process.stdout.close()
         return process.returncode

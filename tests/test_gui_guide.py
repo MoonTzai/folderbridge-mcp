@@ -2,6 +2,7 @@ import tkinter as tk
 import unittest
 from tkinter import ttk
 
+from folderbridge_mcp.extension_spec import EXTENSION_FORMAT_SUMMARY, EXTENSION_LLM_PROMPT
 from folderbridge_mcp.gui import FolderBridgeLauncher
 
 
@@ -13,6 +14,17 @@ class _WidgetStub:
         self.state = state
 
 
+class _BoolVarStub:
+    def __init__(self, value: bool = False) -> None:
+        self.value = value
+
+    def set(self, value: bool) -> None:
+        self.value = bool(value)
+
+    def get(self) -> bool:
+        return self.value
+
+
 class _RunningSupervisor:
     @staticmethod
     def running() -> bool:
@@ -20,6 +32,23 @@ class _RunningSupervisor:
 
 
 class GuideGuiTests(unittest.TestCase):
+    def test_extension_llm_prompt_requires_active_file_requests(self) -> None:
+        self.assertIn("主动要求我上传/提供", EXTENSION_LLM_PROMPT)
+        self.assertIn("优先让用户上传文件", EXTENSION_LLM_PROMPT)
+        self.assertIn("workspace_adapter.mode=dynamic", EXTENSION_LLM_PROMPT)
+        self.assertIn("folderbridge-extension.json", EXTENSION_FORMAT_SUMMARY)
+        self.assertIn("独立子进程", EXTENSION_FORMAT_SUMMARY)
+
+    def test_global_capability_select_all_and_clear(self) -> None:
+        launcher = FolderBridgeLauncher.__new__(FolderBridgeLauncher)
+        launcher.capability_vars = {"a": _BoolVarStub(), "b": _BoolVarStub()}
+        launcher._refresh_status_cards = lambda: None
+
+        launcher._set_all_capabilities(True)
+        self.assertTrue(all(variable.get() for variable in launcher.capability_vars.values()))
+        launcher._set_all_capabilities(False)
+        self.assertFalse(any(variable.get() for variable in launcher.capability_vars.values()))
+
     def test_running_connection_keeps_guide_button_enabled(self) -> None:
         launcher = FolderBridgeLauncher.__new__(FolderBridgeLauncher)
         launcher.supervisor = _RunningSupervisor()
