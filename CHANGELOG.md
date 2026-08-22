@@ -2,6 +2,12 @@
 
 All notable changes to FolderBridge MCP are documented here.
 
+## 0.1.7 — 2026-08-22
+
+- Made every setup-guide instruction selectable and copyable, including filenames and configuration values.
+- Kept the connection-guide button available while the Tunnel is starting or running.
+- Added the post-setup ChatGPT conversation flow and a copyable example invocation prompt.
+
 ## 0.1.6 — 2026-08-22
 
 - Fixed “configuration failed” when applying settings after the `folderbridge` Tunnel profile already exists.

@@ -120,6 +120,14 @@ ChatGPT 不能直接连接本地 stdio 进程。FolderBridge 通过 OpenAI 官�
 > [!WARNING]
 > 不要保留表单默认的 **OAuth**，也不要把 `https://tunnel-service...` 地址填入 Server URL。FolderBridge 不实现用户 OAuth；这样配置会出现 `does not implement OAuth` 错误。
 
+#### 在 Chat 界面调用
+
+1. 保持 FolderBridge 顶部为“运行中”，然后在 ChatGPT 新建一个对话。
+2. 点击输入框旁的 **+**，进入“更多 / More”，选择刚创建的 FolderBridge App。
+3. 发送任务请求，例如：“请使用 FolderBridge 列出当前工作区根目录，并说明当前工作区与访问权限。”如果 ChatGPT 显示工具确认，核对后再确认。
+
+这个入口与测试流程以 OpenAI 的[连接与测试官方说明](https://developers.openai.com/apps-sdk/deploy/connect-chatgpt)为准。启动器内的“连接设置向导”也提供相同步骤和一键复制调用示例。
+
 ChatGPT 使用工作区期间需要保持启动器运行；关闭启动器会停止 Tunnel。开发者模式和 App 安装属于账号级安全操作，最终确认仍在 ChatGPT 网页中完成；FolderBridge 不会接管浏览器登录态或修改安全设置。
 
 不需要安装浏览器扩展。FolderBridge 也不会静默下载或执行来自网络的二进制文件。

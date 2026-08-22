@@ -2,6 +2,7 @@ import unittest
 from pathlib import Path
 
 from folderbridge_mcp.setup_guide import (
+    CHATGPT_INVOCATION_EXAMPLE,
     WINDOWS_X64_ASSET_GLOB,
     WINDOWS_X64_ASSET_PATTERN,
     looks_like_tunnel_id,
@@ -28,6 +29,11 @@ class SetupGuideTests(unittest.TestCase):
         self.assertTrue(looks_like_tunnel_id(" tunnel_0123456789abcdef "))
         self.assertFalse(looks_like_tunnel_id("https://example.test/v1/mcp/tunnel_123"))
         self.assertFalse(looks_like_tunnel_id("tunnel_"))
+
+    def test_chatgpt_invocation_example_is_actionable(self) -> None:
+        self.assertIn("FolderBridge", CHATGPT_INVOCATION_EXAMPLE)
+        self.assertIn("列出", CHATGPT_INVOCATION_EXAMPLE)
+        self.assertIn("访问权限", CHATGPT_INVOCATION_EXAMPLE)
 
 
 if __name__ == "__main__":

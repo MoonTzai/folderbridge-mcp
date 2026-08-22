@@ -9,6 +9,7 @@ from pathlib import Path
 
 WINDOWS_X64_ASSET_PATTERN = "tunnel-client-v<版本>-windows-amd64.zip"
 WINDOWS_X64_ASSET_GLOB = "tunnel-client-v*-windows-amd64.zip"
+CHATGPT_INVOCATION_EXAMPLE = "请使用 FolderBridge 列出当前工作区根目录，并说明当前工作区与访问权限。"
 
 
 def recommended_client_directory(

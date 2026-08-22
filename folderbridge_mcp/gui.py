@@ -33,6 +33,7 @@ from .launcher_backend import (
     run_short_command,
 )
 from .setup_guide import (
+    CHATGPT_INVOCATION_EXAMPLE,
     WINDOWS_X64_ASSET_PATTERN,
     looks_like_tunnel_id,
     recommended_client_directory,
@@ -658,7 +659,7 @@ class FolderBridgeLauncher:
         ttk.Button(header, text="关闭", command=dialog.destroy).grid(row=0, column=2, padx=(8, 0))
         ttk.Label(
             body,
-            text="ChatGPT 网页端按 1 → 4 完成；其他支持本地 stdio 的客户端直接看第 5 页。",
+            text="ChatGPT 网页端按 1 → 4 完成；其他支持本地 stdio 的客户端直接看第 5 页。向导文字可拖选并用 Ctrl+C 复制。",
             style="Body.TLabel",
         ).grid(row=1, column=0, sticky="w", pady=(3, 14))
 
@@ -750,22 +751,28 @@ class FolderBridgeLauncher:
 
         chatgpt_tab = self._guide_tab(
             notebook,
-            "ChatGPT 开发态 App 这样选",
+            "ChatGPT 开发态 App：创建并在 Chat 中调用",
             (
                 "1. 先在 ChatGPT 设置中启用开发者模式；团队工作区可能需要管理员授权。",
                 "2. 打开 Plugins，点击 + 创建 App。Connection（连接方式）选择“隧道 / Tunnel”。",
                 "3. Available Tunnel 选择同一个 Tunnel；若列表没有，粘贴 tunnel_ 开头的 ID，并回查 workspace 关联。",
                 "4. Authentication（身份验证）选择“无身份验证 / No authentication”。确认风险提示后再创建。",
-                "5. 创建后在对话中启用该 App；FolderBridge 顶部必须保持“运行中”。",
+                "5. 创建后新建一个 Chat；点击输入框旁的 +，进入“更多 / More”，选择刚创建的 App。",
+                f"6. 发送任务请求，例如：“{CHATGPT_INVOCATION_EXAMPLE}”。如 ChatGPT 显示工具确认，核对后再确认。FolderBridge 顶部必须保持“运行中”。",
             ),
             wrap,
             warning="不要保留默认 OAuth，也不要把 https://tunnel-service... 地址当“服务器 URL”填写，否则会报 does not implement OAuth。",
         )
-        notebook.add(chatgpt_tab, text="4  ChatGPT App")
+        notebook.add(chatgpt_tab, text="4  ChatGPT 创建与调用")
         chatgpt_buttons = ttk.Frame(chatgpt_tab, style="Guide.TFrame")
         chatgpt_buttons.pack(fill="x", pady=(10, 0))
         ttk.Button(chatgpt_buttons, text="打开 ChatGPT Plugins", command=lambda: webbrowser.open(CHATGPT_PLUGINS_URL)).pack(side="left")
         ttk.Button(chatgpt_buttons, text="开发者模式说明", command=lambda: webbrowser.open(HELP_URL)).pack(side="left", padx=(8, 0))
+        ttk.Button(
+            chatgpt_buttons,
+            text="复制 Chat 调用示例",
+            command=lambda: self._copy_text(CHATGPT_INVOCATION_EXAMPLE, "ChatGPT 调用示例已复制。"),
+        ).pack(side="left", padx=(8, 0))
 
         other_tab = self._guide_tab(
             notebook,
@@ -814,21 +821,67 @@ class FolderBridgeLauncher:
         warning: str = "",
     ) -> ttk.Frame:
         tab = ttk.Frame(notebook, style="Guide.TFrame", padding=(20, 18, 20, 18))
-        ttk.Label(tab, text=title, style="CardTitle.TLabel").pack(anchor="w", pady=(0, 12))
+        guide_text = scrolledtext.ScrolledText(
+            tab,
+            wrap="word",
+            width=max(40, wrap // max(1, self._px(8))),
+            height=14,
+            borderwidth=0,
+            relief="flat",
+            highlightthickness=0,
+            background="#ffffff",
+            foreground="#364157",
+            insertbackground="#172033",
+            selectbackground="#c7d7fe",
+            selectforeground="#172033",
+            cursor="xterm",
+            exportselection=True,
+            padx=0,
+            pady=0,
+        )
+        guide_text.tag_configure(
+            "title",
+            foreground="#172033",
+            font=("Segoe UI", 11, "bold"),
+            spacing3=self._px(12),
+        )
+        guide_text.tag_configure(
+            "step",
+            foreground="#364157",
+            font=("Segoe UI", 9),
+            spacing3=self._px(9),
+        )
+        guide_text.tag_configure(
+            "warning",
+            background="#fff1f2",
+            foreground="#b42318",
+            font=("Segoe UI", 9, "bold"),
+            lmargin1=self._px(10),
+            lmargin2=self._px(10),
+            rmargin=self._px(10),
+            spacing1=self._px(8),
+            spacing3=self._px(8),
+        )
+        guide_text.insert("end", f"{title}\n", "title")
         for step in steps:
-            ttk.Label(tab, text=step, style="GuideStep.TLabel", wraplength=wrap, justify="left").pack(
-                anchor="w", fill="x", pady=(0, 9)
-            )
+            guide_text.insert("end", f"{step}\n", "step")
         if warning:
-            ttk.Label(
-                tab,
-                text=f"注意：{warning}",
-                style="GuideWarn.TLabel",
-                wraplength=wrap,
-                justify="left",
-                padding=(10, 8),
-            ).pack(anchor="w", fill="x", pady=(3, 0))
+            guide_text.insert("end", f"\n注意：{warning}\n", "warning")
+        guide_text.configure(state="disabled")
+        guide_text.bind("<Control-a>", self._select_all_guide_text)
+        guide_text.bind("<Control-A>", self._select_all_guide_text)
+        guide_text.pack(fill="both", expand=True)
+        tab.guide_text = guide_text  # type: ignore[attr-defined]
         return tab
+
+    @staticmethod
+    def _select_all_guide_text(event: tk.Event[tk.Misc]) -> str:
+        widget = event.widget
+        if isinstance(widget, tk.Text):
+            widget.tag_add("sel", "1.0", "end-1c")
+            widget.mark_set("insert", "1.0")
+            widget.see("insert")
+        return "break"
 
     def _choose_client_from_guide(self, status: tk.StringVar) -> None:
         self._browse_tunnel_client()
@@ -963,8 +1016,9 @@ class FolderBridgeLauncher:
     def _set_busy(self, busy: bool, *, allow_stop: bool = True) -> None:
         self._busy = busy
         enabled = not busy and not self.supervisor.running()
-        for widget in (self.apply_button, self.doctor_button, self.copy_button, self.guide_button):
+        for widget in (self.apply_button, self.doctor_button, self.copy_button):
             widget.configure(state="normal" if enabled else "disabled")
+        self.guide_button.configure(state="normal")
         if busy:
             can_stop = allow_stop and self.supervisor.running()
             self.start_button.configure(state="normal" if can_stop else "disabled")

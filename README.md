@@ -120,6 +120,14 @@ Open [ChatGPT Plugins](https://chatgpt.com/plugins), click **+**, and use these 
 > [!WARNING]
 > Do not leave the form on its default **OAuth** choice, and do not paste a `https://tunnel-service...` address into Server URL. FolderBridge does not implement user OAuth, so that configuration produces a `does not implement OAuth` error.
 
+#### Invoke the app in a ChatGPT conversation
+
+1. Keep the FolderBridge status at **运行中** (Running), then start a new ChatGPT conversation.
+2. Select the **+** beside the composer, open **More**, and choose the FolderBridge app that you just created.
+3. Send a task such as: “Use FolderBridge to list the workspace root and explain the current workspace and access level.” Review any tool confirmation that ChatGPT presents before approving it.
+
+This entry point follows OpenAI's official [connect and test guidance](https://developers.openai.com/apps-sdk/deploy/connect-chatgpt). The launcher's connection guide includes the same steps and a one-click copyable example prompt.
+
 Keep the launcher running while ChatGPT uses the workspace. Closing it stops the Tunnel process. Account-level developer-mode and app installation confirmations remain in ChatGPT; FolderBridge does not automate your browser session or security settings.
 
 No browser extension is required. FolderBridge intentionally does not silently download or execute network-delivered binaries.
