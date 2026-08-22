@@ -37,7 +37,7 @@ Requirements:
 
 Download `FolderBridge.exe` and `FolderBridge.exe.sha256` from the [latest GitHub release](https://github.com/MoonTzai/folderbridge-mcp/releases/latest). No Python installation is required. Verify the checksum, then double-click `FolderBridge.exe`.
 
-The executable contains FolderBridge and its Python runtime, but it does **not** bundle OpenAI's `tunnel-client`; select the separately downloaded official client in the launcher when using ChatGPT on the web.
+The executable contains FolderBridge and its Python runtime, but it does **not** bundle OpenAI's `tunnel-client`; download the official client separately from OpenAI's release and select it in the launcher when using ChatGPT on the web.
 
 > [!NOTE]
 > The current community build is not code-signed, so Windows identifies its publisher as unknown. If you do not trust an unsigned binary, build it from the audited source instead.
@@ -60,16 +60,55 @@ Choose a workspace, keep **Read only** selected for the first run, and use the s
 
 ChatGPT cannot connect directly to a local stdio process. FolderBridge uses OpenAI's official [Secure MCP Tunnel](https://developers.openai.com/api/docs/guides/secure-mcp-tunnels) for this path. You need:
 
-- a `tunnel_id` and Runtime API key from [OpenAI Platform Tunnel settings](https://platform.openai.com/settings/organization/tunnels);
+- a `tunnel_id` from [OpenAI Platform Tunnel settings](https://platform.openai.com/settings/organization/tunnels);
+- a key for `tunnel-client` from the same organization's [Runtime API Keys](https://platform.openai.com/settings/organization/api-keys);
 - the official [`tunnel-client`](https://github.com/openai/tunnel-client/releases/latest);
 - ChatGPT developer-mode access appropriate for your account or workspace.
 
-In the launcher:
+Click **网页端一键引导** (Web setup guide) in the launcher's upper-right corner for the same four steps and shortcuts below.
 
-1. Click **网页端一键引导** (Web setup guide) to open the official Tunnel and ChatGPT pages.
-2. Select the downloaded `tunnel-client`, then enter the Tunnel ID and Runtime API key.
-3. Click **Start connection**. The launcher runs the official `init`, `doctor`, and `run` flow.
-4. Open [ChatGPT Plugins](https://chatgpt.com/plugins), create a developer-mode app, choose **Tunnel** as the connection, and select or paste the same Tunnel ID.
+### 1. Download the official Windows x64 client
+
+1. Open the latest [`openai/tunnel-client` release](https://github.com/openai/tunnel-client/releases/latest) and expand **Assets**.
+2. Download the complete archive named `tunnel-client-v<version>-windows-amd64.zip`. In release filenames, `amd64` means Windows x64 and is correct for most Intel/AMD PCs.
+3. Optionally download `SHA256SUMS.txt` for verification. Do not choose `tunnel-client-runtime-*`, `windows-arm64`, `all.zip`, source-code archives, or license files.
+4. Extract the entire ZIP to a stable folder; there is no installer, and you should not run it from inside the archive. The guide can create and open `%LOCALAPPDATA%\FolderBridge\bin` as a recommended location.
+5. Return to FolderBridge, click **选择已解压的 EXE**, and select `tunnel-client.exe`.
+
+### 2. Create the Platform Tunnel
+
+Open [OpenAI Platform Tunnel settings](https://platform.openai.com/settings/organization/tunnels), click **Create tunnel**, and use these current choices:
+
+| Field | Recommended value | Notes |
+| --- | --- | --- |
+| Name | `FolderBridge` | Customizable display name |
+| Description | `Local FolderBridge MCP for private workspace access` | Required; customizable |
+| Organizations | `Personal` for a personal account | For teams, select the Platform organization that manages this Tunnel |
+| ChatGPT workspaces | The workspace where you will create the app | Do not leave it blank; a personal account usually has one workspace ID |
+
+After creation, copy the Tunnel ID beginning with `tunnel_`. Running and selecting it requires **Tunnels Read + Use**; creating or editing it also requires **Manage**. Associate only the organizations and ChatGPT workspaces that need access to this local workspace.
+
+Create the key for `tunnel-client` under the same Platform organization's [Runtime API Keys](https://platform.openai.com/settings/organization/api-keys); its creator needs **Tunnels Read + Use**. Paste it only into FolderBridge, where it remains in process memory. Do **not** use an Admin API key, and do not put the Runtime key into the ChatGPT app's Authentication field.
+
+### 3. Start FolderBridge
+
+1. Select exactly one workspace folder and keep **Read only (recommended)** for the first run.
+2. Select the extracted `tunnel-client.exe`; the default `folderbridge` profile is suitable.
+3. Enter the same Tunnel ID and Runtime API key, and leave advanced named tasks disabled.
+4. Click **Start connection**. The launcher runs the official `init`, `doctor`, and `run` flow. Continue only after the top status reads **运行中** (Running).
+
+### 4. Create the ChatGPT developer-mode app
+
+Open [ChatGPT Plugins](https://chatgpt.com/plugins), click **+**, and use these critical choices:
+
+| Field | Required choice |
+| --- | --- |
+| Connection | **Tunnel** |
+| Available Tunnel | Select the same Tunnel, or paste its `tunnel_...` ID |
+| Authentication | **No authentication** |
+
+> [!WARNING]
+> Do not leave the form on its default **OAuth** choice, and do not paste a `https://tunnel-service...` address into Server URL. FolderBridge does not implement user OAuth, so that configuration produces a `does not implement OAuth` error.
 
 Keep the launcher running while ChatGPT uses the workspace. Closing it stops the Tunnel process. Account-level developer-mode and app installation confirmations remain in ChatGPT; FolderBridge does not automate your browser session or security settings.
 

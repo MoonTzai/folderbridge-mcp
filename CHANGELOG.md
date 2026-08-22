@@ -2,6 +2,14 @@
 
 All notable changes to FolderBridge MCP are documented here.
 
+## 0.1.2 — 2026-08-22
+
+- Replaced the short web setup popup with a DPI-aware four-step connection guide.
+- Added exact Windows x64 official `tunnel-client` download, checksum, extraction, and executable-selection guidance.
+- Documented every current Platform Tunnel field and the least-privilege Tunnel permissions.
+- Added a prominent ChatGPT configuration warning: choose Tunnel plus No authentication, not OAuth or Server URL.
+- Added a safe per-user extraction folder shortcut without silently downloading or running network binaries.
+
 ## 0.1.1 — 2026-08-22
 
 - Made the launcher follow Windows display scaling instead of forcing a fixed Tk scale.

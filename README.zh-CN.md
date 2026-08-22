@@ -37,7 +37,7 @@ FolderBridge MCP 是一个零第三方依赖的 Python MCP 服务器和桌面启
 
 从 [GitHub 最新版本](https://github.com/MoonTzai/folderbridge-mcp/releases/latest)下载 `FolderBridge.exe` 和 `FolderBridge.exe.sha256`。无需安装 Python；校验哈希后直接双击 `FolderBridge.exe`。
 
-EXE 包含 FolderBridge 及其 Python 运行时，但**不会**捆绑 OpenAI 的 `tunnel-client`。使用 ChatGPT 网页端时，仍需在启动器中选择单独下载的官方客户端。
+EXE 包含 FolderBridge 及其 Python 运行时，但**不会**捆绑 OpenAI 的 `tunnel-client`。使用 ChatGPT 网页端时，仍需从 OpenAI 官方 Release 单独下载并在启动器中选择。
 
 > [!NOTE]
 > 当前社区构建尚未进行代码签名，因此 Windows 会显示发布者未知。如果你不信任未签名二进制文件，请按照下方步骤从已审核源码自行构建。
@@ -60,16 +60,55 @@ python .\folderbridge_launcher.py gui
 
 ChatGPT 不能直接连接本地 stdio 进程。FolderBridge 通过 OpenAI 官方 [Secure MCP Tunnel](https://developers.openai.com/api/docs/guides/secure-mcp-tunnels) 完成这条链路。你需要：
 
-- 从 [OpenAI Platform Tunnel 设置](https://platform.openai.com/settings/organization/tunnels)取得 `tunnel_id` 和 Runtime API Key；
+- 从 [OpenAI Platform Tunnel 设置](https://platform.openai.com/settings/organization/tunnels)取得 `tunnel_id`；
+- 从同一组织的 [Runtime API Keys](https://platform.openai.com/settings/organization/api-keys)创建供 `tunnel-client` 使用的 Key；
 - 官方 [`tunnel-client`](https://github.com/openai/tunnel-client/releases/latest)；
 - 与账号或工作区相匹配的 ChatGPT 开发者模式权限。
 
-在启动器中：
+点击启动器右上角“网页端一键引导”，可以直接查看以下四步和快捷按钮。
 
-1. 点击“网页端一键引导”，打开官方 Tunnel 和 ChatGPT 页面。
-2. 选择下载好的 `tunnel-client`，填写 Tunnel ID 与 Runtime API Key。
-3. 点击“启动连接”；启动器会依次执行官方 `init`、`doctor`、`run` 流程。
-4. 打开 [ChatGPT Plugins](https://chatgpt.com/plugins)，创建开发态 App，Connection 选择 **Tunnel**，再选择或粘贴相同的 Tunnel ID。
+### 1. 下载官方 Windows x64 客户端
+
+1. 打开 [`openai/tunnel-client` 最新 Release](https://github.com/openai/tunnel-client/releases/latest)，展开 **Assets**。
+2. 下载名为 `tunnel-client-v<版本>-windows-amd64.zip` 的完整包。Release 中的 `amd64` 就是 Windows x64，适用于绝大多数 Intel/AMD 电脑。
+3. 可同时下载 `SHA256SUMS.txt` 校验文件。不要选择 `tunnel-client-runtime-*`、`windows-arm64`、`all.zip`、Source code 或许可证文件。
+4. 将 ZIP 全部解压到固定目录；无需安装，也不要直接在压缩包内运行。向导可创建并打开推荐目录 `%LOCALAPPDATA%\FolderBridge\bin`。
+5. 回到 FolderBridge，点击“选择已解压的 EXE”，选择 `tunnel-client.exe`。
+
+### 2. 创建 Platform Tunnel
+
+在 [OpenAI Platform Tunnel 设置](https://platform.openai.com/settings/organization/tunnels)点击 **Create tunnel**，当前表单按下表填写：
+
+| 选项 | 建议值 | 说明 |
+| --- | --- | --- |
+| Name | `FolderBridge` | 可自定义，只用于识别 |
+| Description | `Local FolderBridge MCP for private workspace access` | 必填，可自定义 |
+| Organizations | 个人账号选 `Personal` | 团队账号选择实际管理此 Tunnel 的 Platform organization |
+| ChatGPT workspaces | 选择将创建 App 的目标工作区 | 不要留空；个人账号通常选择列表中唯一的 workspace ID |
+
+创建后复制 `tunnel_` 开头的 Tunnel ID。运行和选择 Tunnel 至少需要 **Tunnels Read + Use**；创建或修改还需要 **Manage**。只关联确实需要访问这个本地工作区的组织和 ChatGPT workspace。
+
+另需在同一 Platform organization 的 [Runtime API Keys](https://platform.openai.com/settings/organization/api-keys)创建供 `tunnel-client` 使用的 Key；创建者需要 **Tunnels Read + Use**。它只粘贴到 FolderBridge 主界面，保留在当前进程内存；**不要**使用 Admin API Key，也不要把 Runtime Key 填进 ChatGPT App 的 Authentication。
+
+### 3. 启动 FolderBridge
+
+1. 文件夹只选择一个明确的工作区，首次使用保持“只读（推荐）”。
+2. `tunnel-client` 选择上一步的 EXE；Profile 保持 `folderbridge` 即可。
+3. 填写相同的 Tunnel ID 和 Runtime API Key，“高级：允许任务”保持关闭。
+4. 点击“启动连接”；启动器会执行官方 `init`、`doctor`、`run` 流程。顶部变成“运行中”后再进行下一步。
+
+### 4. 创建 ChatGPT 开发态 App
+
+打开 [ChatGPT Plugins](https://chatgpt.com/plugins)，点击 **+** 创建 App，关键选项如下：
+
+| 选项 | 必须选择 |
+| --- | --- |
+| Connection / 连接方式 | **Tunnel / 隧道** |
+| Available Tunnel | 选择相同 Tunnel，或粘贴 `tunnel_...` ID |
+| Authentication / 身份验证 | **No authentication / 无身份验证** |
+
+> [!WARNING]
+> 不要保留表单默认的 **OAuth**，也不要把 `https://tunnel-service...` 地址填入 Server URL。FolderBridge 不实现用户 OAuth；这样配置会出现 `does not implement OAuth` 错误。
 
 ChatGPT 使用工作区期间需要保持启动器运行；关闭启动器会停止 Tunnel。开发者模式和 App 安装属于账号级安全操作，最终确认仍在 ChatGPT 网页中完成；FolderBridge 不会接管浏览器登录态或修改安全设置。
 

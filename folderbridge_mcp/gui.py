@@ -31,11 +31,17 @@ from .launcher_backend import (
     redact_text,
     run_short_command,
 )
+from .setup_guide import (
+    WINDOWS_X64_ASSET_PATTERN,
+    looks_like_tunnel_id,
+    recommended_client_directory,
+)
 
 
 DOCS_URL = "https://developers.openai.com/api/docs/guides/secure-mcp-tunnels"
 TUNNEL_SETTINGS_URL = "https://platform.openai.com/settings/organization/tunnels"
 TUNNEL_RELEASE_URL = "https://github.com/openai/tunnel-client/releases/latest"
+RUNTIME_KEYS_URL = "https://platform.openai.com/settings/organization/api-keys"
 CHATGPT_PLUGINS_URL = "https://chatgpt.com/plugins"
 HELP_URL = "https://help.openai.com/en/articles/12584461-developer-mode-and-full-mcp-connectors-in-chatgpt"
 MAX_LOG_CHARS = 180_000
@@ -168,6 +174,12 @@ class FolderBridgeLauncher:
         style.configure("Field.TLabel", background="#ffffff", foreground="#364157", font=("Segoe UI", 9, "bold"))
         style.configure("Status.TLabel", background="#ffffff", foreground="#172033", font=("Segoe UI", 10, "bold"))
         style.configure("Muted.TLabel", background="#ffffff", foreground="#7a869c", font=("Segoe UI", 8))
+        style.configure("Guide.TFrame", background="#ffffff")
+        style.configure("GuideTitle.TLabel", background="#ffffff", foreground="#172033", font=("Segoe UI", 14, "bold"))
+        style.configure("GuideStep.TLabel", background="#ffffff", foreground="#364157", font=("Segoe UI", 9))
+        style.configure("GuideWarn.TLabel", background="#fff1f2", foreground="#b42318", font=("Segoe UI", 9, "bold"))
+        style.configure("TNotebook", background="#ffffff", borderwidth=0)
+        style.configure("TNotebook.Tab", padding=(self._px(12), self._px(8)), font=("Segoe UI", 9, "bold"))
         style.configure("TEntry", padding=self._px(6))
         style.configure("TButton", padding=(self._px(10), self._px(7)), font=("Segoe UI", 9))
         style.configure("TRadiobutton", background="#ffffff", font=("Segoe UI", 9))
@@ -589,74 +601,207 @@ class FolderBridgeLauncher:
     def _open_web_setup(self) -> None:
         tunnel_id = self.tunnel_id_var.get().strip()
         executable = find_tunnel_client(self.tunnel_client_var.get())
-        if tunnel_id:
-            self.root.clipboard_clear()
-            self.root.clipboard_append(tunnel_id)
 
         dialog = tk.Toplevel(self.root)
-        dialog.title("网页端连接引导")
+        dialog.title("FolderBridge · 网页端连接向导")
         dialog.transient(self.root)
         dialog.grab_set()
-        dialog.resizable(False, False)
+        dialog.resizable(True, True)
         dialog.configure(bg="#ffffff")
-        body = ttk.Frame(dialog, style="Card.TFrame", padding=22)
+        width, height = fitted_window_size(
+            self._dpi,
+            self.root.winfo_screenwidth(),
+            self.root.winfo_screenheight(),
+            base_width=860,
+            base_height=670,
+        )
+        dialog.geometry(f"{width}x{height}")
+        dialog.minsize(min(self._px(720), width), min(self._px(560), height))
+
+        body = ttk.Frame(dialog, style="Guide.TFrame", padding=(22, 18, 22, 18))
         body.pack(fill="both", expand=True)
-        ttk.Label(body, text="网页端连接，只需确认三件事", style="CardTitle.TLabel").grid(row=0, column=0, columnspan=2, sticky="w")
+        body.columnconfigure(0, weight=1)
+        body.rowconfigure(2, weight=1)
+        header = ttk.Frame(body, style="Guide.TFrame")
+        header.grid(row=0, column=0, sticky="ew")
+        header.columnconfigure(0, weight=1)
+        ttk.Label(header, text="网页端连接向导", style="GuideTitle.TLabel").grid(row=0, column=0, sticky="w")
+        ttk.Button(
+            header,
+            text="一键打开配置页面",
+            command=lambda: self._open_required_pages(
+                find_tunnel_client(self.tunnel_client_var.get()) is not None
+            ),
+        ).grid(row=0, column=1, padx=(12, 0))
+        ttk.Button(header, text="关闭", command=dialog.destroy).grid(row=0, column=2, padx=(8, 0))
         ttk.Label(
             body,
-            text="账号级开关必须由你本人/管理员确认；启动器不会读取或操纵 ChatGPT 登录态。",
+            text="按 1 → 4 完成。账号和工作区安全确认仍由你本人完成；启动器不会读取或操纵登录态。",
             style="Body.TLabel",
-        ).grid(row=1, column=0, columnspan=2, sticky="w", pady=(4, 16))
+        ).grid(row=1, column=0, sticky="w", pady=(3, 14))
 
-        checks = (
-            ("1", "Platform Tunnel", "创建 Tunnel、取得 tunnel_id 和 Runtime API Key，并关联目标 ChatGPT workspace。"),
-            ("2", "本地连接", "回到主界面填写信息并点击“启动连接”，保持状态为运行中。"),
-            ("3", "ChatGPT 自定义 App", "打开 Plugins，点 +，Connection 选 Tunnel，再选择或粘贴 Tunnel ID。"),
+        notebook = ttk.Notebook(body)
+        notebook.grid(row=2, column=0, sticky="nsew")
+        wrap = self._px(720)
+
+        client_status = tk.StringVar(
+            value=f"✓ 已找到：{executable}" if executable else "尚未找到 tunnel-client.exe"
         )
-        for row, (number, title, detail) in enumerate(checks, start=2):
-            badge = tk.Label(
-                body,
-                text=number,
-                bg="#dbeafe",
-                fg="#1d4ed8",
-                width=2,
-                font=("Segoe UI", 9, "bold"),
-            )
-            badge.grid(row=row, column=0, sticky="n", padx=(0, 10), pady=(4, 10))
-            text_frame = ttk.Frame(body, style="Card.TFrame")
-            text_frame.grid(row=row, column=1, sticky="w", pady=(0, 10))
-            ttk.Label(text_frame, text=title, style="Status.TLabel").pack(anchor="w")
-            ttk.Label(text_frame, text=detail, style="Body.TLabel", wraplength=620).pack(anchor="w", pady=(2, 0))
-
-        status = "✓ 已找到 tunnel-client" if executable else "! 尚未找到 tunnel-client，可从官方 Release 下载"
-        ttk.Label(body, text=status, style="Body.TLabel").grid(row=5, column=1, sticky="w", pady=(0, 12))
-        if tunnel_id:
-            ttk.Label(body, text="✓ Tunnel ID 已复制到剪贴板", style="Body.TLabel").grid(row=6, column=1, sticky="w", pady=(0, 12))
-
-        buttons = ttk.Frame(body, style="Card.TFrame")
-        buttons.grid(row=7, column=0, columnspan=2, sticky="ew", pady=(4, 0))
+        client_tab = self._guide_tab(
+            notebook,
+            "下载并解压官方客户端",
+            (
+                f"1. 点击“打开官方 Release”，展开 Assets，下载 {WINDOWS_X64_ASSET_PATTERN}。",
+                "2. x64 在 Release 文件名中写作 amd64；绝大多数 Intel/AMD Windows 电脑都选它。",
+                "3. 可同时下载 SHA256SUMS.txt 校验；把 ZIP 全部解压到固定目录，不要在压缩包里直接运行。",
+                "4. 点击“选择已解压的 EXE”，选解压目录中的 tunnel-client.exe。",
+            ),
+            wrap,
+            warning="不要选 tunnel-client-runtime、windows-arm64、all.zip、Source code 或许可证文件。",
+        )
+        notebook.add(client_tab, text="1  Windows x64 客户端")
+        ttk.Label(client_tab, textvariable=client_status, style="Body.TLabel", wraplength=wrap).pack(anchor="w", pady=(8, 6))
+        client_buttons = ttk.Frame(client_tab, style="Guide.TFrame")
+        client_buttons.pack(fill="x", pady=(4, 0))
+        ttk.Button(client_buttons, text="打开官方 Release", command=lambda: webbrowser.open(TUNNEL_RELEASE_URL)).pack(side="left")
+        ttk.Button(client_buttons, text="打开推荐解压目录", command=self._open_recommended_client_dir).pack(side="left", padx=(8, 0))
         ttk.Button(
-            buttons,
-            text="一键打开所需页面",
-            command=lambda: self._open_required_pages(executable is not None),
-        ).pack(side="left")
-        ttk.Button(buttons, text="Tunnel 设置", command=lambda: webbrowser.open(TUNNEL_SETTINGS_URL)).pack(side="left", padx=(8, 0))
-        if not executable:
-            ttk.Button(buttons, text="下载官方客户端", command=lambda: webbrowser.open(TUNNEL_RELEASE_URL)).pack(side="left", padx=(8, 0))
-        ttk.Button(buttons, text="ChatGPT Plugins", command=lambda: webbrowser.open(CHATGPT_PLUGINS_URL)).pack(side="left", padx=(8, 0))
-        ttk.Button(buttons, text="权限说明", command=lambda: webbrowser.open(HELP_URL)).pack(side="left", padx=(8, 0))
-        ttk.Button(buttons, text="完成", command=dialog.destroy).pack(side="right", padx=(16, 0))
+            client_buttons,
+            text="选择已解压的 EXE",
+            command=lambda: self._choose_client_from_guide(client_status),
+        ).pack(side="left", padx=(8, 0))
+        ttk.Button(
+            client_buttons,
+            text="复制应下载的文件名",
+            command=lambda: self._copy_text(WINDOWS_X64_ASSET_PATTERN, "Windows x64 文件名已复制。"),
+        ).pack(side="left", padx=(8, 0))
+
+        platform_tab = self._guide_tab(
+            notebook,
+            "Platform Tunnel 各项这样填",
+            (
+                "1. 点击 Create tunnel。Name：FolderBridge；Description：Local FolderBridge MCP for private workspace access。",
+                "2. Organizations：个人账号保持 Personal；团队账号选实际管理此 Tunnel 的 Platform organization。",
+                "3. ChatGPT workspaces：必须选将要创建 App 的目标工作区；个人账号通常选择列表中的唯一 workspace ID。",
+                "4. 创建后复制 tunnel_ 开头的 Tunnel ID。运行账号至少需 Tunnels Read + Use；创建/修改还需 Manage。",
+                "5. 打开 Runtime API Keys，在同一 Platform organization 创建 Key；创建者需 Tunnels Read + Use。它只填在 FolderBridge。",
+            ),
+            wrap,
+            warning="只关联需要访问此本地工作区的 Organization / ChatGPT workspace，不要无范围地多选。",
+        )
+        notebook.add(platform_tab, text="2  Platform Tunnel")
+        platform_buttons = ttk.Frame(platform_tab, style="Guide.TFrame")
+        platform_buttons.pack(fill="x", pady=(10, 0))
+        ttk.Button(platform_buttons, text="打开 Tunnel 设置", command=lambda: webbrowser.open(TUNNEL_SETTINGS_URL)).pack(side="left")
+        ttk.Button(platform_buttons, text="创建 Runtime API Key", command=lambda: webbrowser.open(RUNTIME_KEYS_URL)).pack(side="left", padx=(8, 0))
+        ttk.Button(platform_buttons, text="打开官方说明", command=lambda: webbrowser.open(DOCS_URL)).pack(side="left", padx=(8, 0))
+
+        local_tab = self._guide_tab(
+            notebook,
+            "FolderBridge 主界面这样填",
+            (
+                "1. 文件夹：只选一个明确工作区；权限首次使用保持“只读（推荐）”。",
+                "2. tunnel-client：选择上一步解压出的 tunnel-client.exe；Profile 保持 folderbridge 即可。",
+                "3. Tunnel ID：粘贴 Platform 中 tunnel_ 开头的 ID；Runtime API Key：粘贴控制面 Key（仅留内存，不保存）。",
+                "4. “高级：允许任务”保持关闭。点击“启动连接”，等待顶部状态变成“运行中”。",
+                "5. 使用期间必须保持 FolderBridge 运行；若失败，点“诊断”并查看脱敏日志。",
+            ),
+            wrap,
+        )
+        notebook.add(local_tab, text="3  启动 FolderBridge")
+        local_buttons = ttk.Frame(local_tab, style="Guide.TFrame")
+        local_buttons.pack(fill="x", pady=(10, 0))
+        if looks_like_tunnel_id(tunnel_id):
+            ttk.Button(
+                local_buttons,
+                text="复制当前 Tunnel ID",
+                command=lambda: self._copy_text(tunnel_id, "Tunnel ID 已复制。"),
+            ).pack(side="left")
+        ttk.Label(
+            local_buttons,
+            text="当前已填写 Tunnel ID" if looks_like_tunnel_id(tunnel_id) else "当前还没有有效的 tunnel_ ID",
+            style="Body.TLabel",
+        ).pack(side="left", padx=(8, 0))
+
+        chatgpt_tab = self._guide_tab(
+            notebook,
+            "ChatGPT 开发态 App 这样选",
+            (
+                "1. 先在 ChatGPT 设置中启用开发者模式；团队工作区可能需要管理员授权。",
+                "2. 打开 Plugins，点击 + 创建 App。Connection（连接方式）选择“隧道 / Tunnel”。",
+                "3. Available Tunnel 选择同一个 Tunnel；若列表没有，粘贴 tunnel_ 开头的 ID，并回查 workspace 关联。",
+                "4. Authentication（身份验证）选择“无身份验证 / No authentication”。确认风险提示后再创建。",
+                "5. 创建后在对话中启用该 App；FolderBridge 顶部必须保持“运行中”。",
+            ),
+            wrap,
+            warning="不要保留默认 OAuth，也不要把 https://tunnel-service... 地址当“服务器 URL”填写，否则会报 does not implement OAuth。",
+        )
+        notebook.add(chatgpt_tab, text="4  ChatGPT App")
+        chatgpt_buttons = ttk.Frame(chatgpt_tab, style="Guide.TFrame")
+        chatgpt_buttons.pack(fill="x", pady=(10, 0))
+        ttk.Button(chatgpt_buttons, text="打开 ChatGPT Plugins", command=lambda: webbrowser.open(CHATGPT_PLUGINS_URL)).pack(side="left")
+        ttk.Button(chatgpt_buttons, text="开发者模式说明", command=lambda: webbrowser.open(HELP_URL)).pack(side="left", padx=(8, 0))
+
         dialog.update_idletasks()
         x = self.root.winfo_rootx() + max(0, (self.root.winfo_width() - dialog.winfo_width()) // 2)
-        y = self.root.winfo_rooty() + max(0, (self.root.winfo_height() - dialog.winfo_height()) // 3)
-        dialog.geometry(f"+{x}+{y}")
+        y = self.root.winfo_rooty() + max(0, (self.root.winfo_height() - dialog.winfo_height()) // 2)
+        dialog.geometry(f"{dialog.winfo_width()}x{dialog.winfo_height()}+{x}+{y}")
+
+    def _guide_tab(
+        self,
+        notebook: ttk.Notebook,
+        title: str,
+        steps: tuple[str, ...],
+        wrap: int,
+        *,
+        warning: str = "",
+    ) -> ttk.Frame:
+        tab = ttk.Frame(notebook, style="Guide.TFrame", padding=(20, 18, 20, 18))
+        ttk.Label(tab, text=title, style="CardTitle.TLabel").pack(anchor="w", pady=(0, 12))
+        for step in steps:
+            ttk.Label(tab, text=step, style="GuideStep.TLabel", wraplength=wrap, justify="left").pack(
+                anchor="w", fill="x", pady=(0, 9)
+            )
+        if warning:
+            ttk.Label(
+                tab,
+                text=f"注意：{warning}",
+                style="GuideWarn.TLabel",
+                wraplength=wrap,
+                justify="left",
+                padding=(10, 8),
+            ).pack(anchor="w", fill="x", pady=(3, 0))
+        return tab
+
+    def _choose_client_from_guide(self, status: tk.StringVar) -> None:
+        self._browse_tunnel_client()
+        executable = find_tunnel_client(self.tunnel_client_var.get())
+        status.set(f"✓ 已找到：{executable}" if executable else "尚未找到 tunnel-client.exe")
+
+    def _open_recommended_client_dir(self) -> None:
+        folder = recommended_client_directory()
+        try:
+            folder.mkdir(parents=True, exist_ok=True)
+            if os.name == "nt":
+                os.startfile(folder)  # type: ignore[attr-defined]
+            else:
+                webbrowser.open(folder.as_uri())
+            self._log(f"已打开推荐的官方客户端解压目录：{folder}")
+        except OSError as exc:
+            self._show_error(f"无法打开推荐目录：{exc}")
+
+    def _copy_text(self, value: str, notice: str) -> None:
+        self.root.clipboard_clear()
+        self.root.clipboard_append(value)
+        self._log(notice)
 
     def _open_required_pages(self, client_ready: bool) -> None:
         webbrowser.open(TUNNEL_SETTINGS_URL)
         if not client_ready:
             webbrowser.open(TUNNEL_RELEASE_URL)
+        webbrowser.open(RUNTIME_KEYS_URL)
         webbrowser.open(CHATGPT_PLUGINS_URL)
-        self._log("已打开 OpenAI Tunnel 设置、官方客户端下载页（如需要）和 ChatGPT Plugins。")
+        self._log("已打开 OpenAI Tunnel 设置、Runtime API Keys、官方客户端下载页（如需要）和 ChatGPT Plugins。")
 
     def _queue_tunnel_output(self, text: str) -> None:
         self._queue_event("log", text)
