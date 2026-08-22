@@ -1,0 +1,37 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "folderbridge-mcp"
+version = "0.1.0"
+description = "A safer local-first MCP workspace bridge with a desktop launcher"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = []
+license = {text = "Apache-2.0"}
+authors = [{name = "MoonTzai"}]
+keywords = ["mcp", "model-context-protocol", "local-first", "chatgpt", "developer-tools"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "License :: OSI Approved :: Apache Software License",
+  "Operating System :: OS Independent",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Topic :: Software Development :: Libraries :: Application Frameworks",
+]
+
+[project.urls]
+Homepage = "https://github.com/MoonTzai/folderbridge-mcp"
+Repository = "https://github.com/MoonTzai/folderbridge-mcp"
+Issues = "https://github.com/MoonTzai/folderbridge-mcp/issues"
+
+[project.scripts]
+folderbridge-mcp = "folderbridge_mcp.cli:main"
+
+[project.gui-scripts]
+folderbridge-mcp-gui = "folderbridge_mcp.gui:main"
+
+[tool.setuptools]
+packages = ["folderbridge_mcp"]
