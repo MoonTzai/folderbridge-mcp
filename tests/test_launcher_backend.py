@@ -19,6 +19,7 @@ from folderbridge_mcp.launcher_backend import (
     control_plane_environment,
     mcp_argv,
     redact_text,
+    render_client_config,
     run_short_command,
 )
 
@@ -99,6 +100,25 @@ class LauncherBackendTests(unittest.TestCase):
         self.assertEqual(argv[0], str(Path(sys.executable).resolve()))
         self.assertEqual(argv[1:4], ["serve", "--workspace", str(workspace)])
         self.assertEqual(argv[-1], "--read-only")
+
+    def test_client_configs_preserve_command_and_argument_boundaries(self) -> None:
+        with mock.patch.object(sys, "frozen", True, create=True):
+            rendered_json = render_client_config(self.root, "read_only", False, "json")
+            rendered_toml = render_client_config(self.root, "read_only", False, "toml")
+            rendered_command = render_client_config(self.root, "read_only", False, "tunnel")
+
+        parsed = json.loads(rendered_json)
+        server = parsed["mcpServers"]["folderbridge"]
+        self.assertEqual(server["command"], str(Path(sys.executable).resolve()))
+        self.assertEqual(server["args"][:3], ["serve", "--workspace", str(self.root)])
+        self.assertEqual(server["args"][-1], "--read-only")
+        self.assertIn("[mcp_servers.folderbridge]", rendered_toml)
+        self.assertIn(str(self.root).replace("\\", "\\\\"), rendered_toml)
+        self.assertIn("--read-only", rendered_command)
+
+    def test_client_config_rejects_unknown_output_format(self) -> None:
+        with self.assertRaises(LauncherError):
+            render_client_config(self.root, "read_only", False, "yaml")
 
     def test_fingerprint_changes_when_workspace_access_changes(self) -> None:
         settings = self.settings()

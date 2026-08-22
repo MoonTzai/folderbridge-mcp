@@ -116,18 +116,63 @@ ChatGPT 使用工作区期间需要保持启动器运行；关闭启动器会停
 
 ## 连接其他本地 MCP 客户端
 
-输出可直接使用的配置：
+有。FolderBridge 的预留兼容接口就是标准 MCP `stdio` 服务器；ChatGPT Tunnel 只是网页端不能直接启动本地进程时使用的桥。MCP 官方 `stdio` 传输同样规定由客户端启动服务器子进程，并通过标准输入/输出交换 JSON-RPC 消息。[MCP stdio 规范](https://modelcontextprotocol.io/specification/2026-07-28/basic/transports/stdio)
+
+### 客户端需要满足的条件
+
+- 能配置本地 **command + args**，并启动一个长期运行的子进程；
+- 使用 MCP `stdio`，保持 stdout 只传协议消息，并读取服务器的工具列表和工具调用结果；
+- 支持 MCP 工具发现/调用（`initialize`、`tools/list`、`tools/call`，或 2026-07-28 的现代发现流程）；
+- 在会话结束时关闭 stdin 或终止子进程；
+- 最好具有工具授权/确认界面，但不能把客户端提示框当成唯一安全边界。
+
+FolderBridge 当前兼容 `2024-11-05`、`2025-03-26`、`2025-06-18`、`2025-11-25` 和 `2026-07-28` 协议路线。它提供标准工具 schema、文本结果与 `structuredContent`；是否展示确认弹窗由具体客户端决定。[MCP Tools 规范](https://modelcontextprotocol.io/specification/2026-07-28/server/tools)
+
+| 客户端类型 | 能否直接接入 | 接入方式 |
+| --- | --- | --- |
+| 本地桌面应用或 IDE，支持启动 stdio MCP | 可以 | 配置 `FolderBridge.exe` 为 command，`serve ...` 为 args |
+| 本地应用只提供一个“命令”输入框 | 通常可以 | 复制完整 stdio 命令；注意路径引号 |
+| 只接受远程 HTTP/SSE URL | 不能直接接入 | 使用该客户端官方的 stdio 网关/代理，或另行部署受保护的 MCP 桥 |
+| 纯网页、移动端或云端沙箱 | 通常不能直接接入本机 | 使用厂商官方 Tunnel/远程连接机制，并让桥在能访问本机工作区的受信主机上运行 |
+
+### 最简单的本地接入方式
+
+1. 在 FolderBridge 主界面选择工作区，并保持“只读（推荐）”。
+2. 打开“连接设置向导”第 5 页，根据客户端复制 JSON、TOML 或完整 stdio 命令。
+3. 将配置粘贴到客户端的 MCP Servers 设置；字段名以该客户端自己的文档为准。
+4. 重启或刷新客户端，确认能看到 `server_info` 和 `workspace` 工具。
+
+直接 stdio 接入时不需要 `tunnel-client`、Tunnel ID、Runtime API Key，也不需要保持 FolderBridge GUI 打开。客户端会在需要时自动运行：
 
 ```powershell
-python .\folderbridge_launcher.py client-config --workspace C:\path\to\repo --format toml
-python .\folderbridge_launcher.py client-config --workspace C:\path\to\repo --format json
+FolderBridge.exe serve --workspace C:\path\to\repo --read-only
 ```
 
-生成只读命令：
+从源码生成可直接粘贴的配置：
 
 ```powershell
+python .\folderbridge_launcher.py client-config --workspace C:\path\to\repo --format json --read-only
+python .\folderbridge_launcher.py client-config --workspace C:\path\to\repo --format toml --read-only
 python .\folderbridge_launcher.py client-config --workspace C:\path\to\repo --format tunnel --read-only
 ```
+
+JSON 示例采用许多桌面客户端使用的 `mcpServers` 约定：
+
+```json
+{
+  "mcpServers": {
+    "folderbridge": {
+      "command": "C:\\Tools\\FolderBridge.exe",
+      "args": ["serve", "--workspace", "C:\\work\\project", "--read-only"]
+    }
+  }
+}
+```
+
+> [!IMPORTANT]
+> JSON/TOML 顶层键只是常见约定，不是所有客户端都相同。真正的兼容条件是客户端能把 command/args 原样作为 MCP stdio 子进程启动。若客户端只接受 URL，当前版本没有内置 HTTP/SSE 监听器，不要把本机端口直接暴露到公网。
+
+更完整的协议版本、进程生命周期、`cwd`/`env`、审批边界和远程桥接说明见[客户端兼容性研究](docs/client-compatibility-research.md)。
 
 ## 工具与编辑流程
 

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import argparse
-import json
 import os
 import shlex
 import shutil
@@ -21,6 +20,7 @@ from .config import (
     write_default_config,
 )
 from .mcp import McpServer
+from .launcher_backend import render_client_config
 from .tools import ToolRuntime
 
 
@@ -161,22 +161,8 @@ def _client_config(workspace: Path, *, output_format: str, read_only: bool, allo
         config = load_config(workspace, required=True)
         if not config_is_trusted(workspace, config):
             raise ConfigError(f"{CONFIG_NAME} is not approved on this machine")
-    command, args = _server_argv(workspace, read_only=read_only, allow_tasks=allow_tasks)
-    if output_format == "tunnel":
-        print(_join_command([command, *args]))
-    elif output_format == "json":
-        print(
-            json.dumps(
-                {"mcpServers": {"folderbridge": {"command": command, "args": args}}},
-                ensure_ascii=False,
-                indent=2,
-            )
-        )
-    else:
-        encoded_args = ", ".join(json.dumps(item, ensure_ascii=False) for item in args)
-        print("[mcp_servers.folderbridge]")
-        print(f"command = {json.dumps(command, ensure_ascii=False)}")
-        print(f"args = [{encoded_args}]")
+    access_mode = "read_only" if read_only else "read_write"
+    print(render_client_config(workspace, access_mode, allow_tasks, output_format))
     return 0
 
 

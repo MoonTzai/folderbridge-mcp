@@ -2,6 +2,14 @@
 
 All notable changes to FolderBridge MCP are documented here.
 
+## 0.1.3 — 2026-08-22
+
+- Added a fifth setup-guide page for non-ChatGPT MCP clients.
+- Added one-click JSON, TOML, and complete stdio command copying from the GUI.
+- Documented the compatibility requirements and routes for local stdio, URL-only, web, mobile, and cloud clients.
+- Clarified that direct stdio clients start and stop FolderBridge themselves and need no Tunnel credentials or running GUI.
+- Centralized generated client configurations so CLI and GUI preserve identical command/argument boundaries.
+
 ## 0.1.2 — 2026-08-22
 
 - Replaced the short web setup popup with a DPI-aware four-step connection guide.

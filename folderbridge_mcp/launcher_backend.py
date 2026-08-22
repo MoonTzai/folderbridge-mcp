@@ -194,6 +194,34 @@ def mcp_command(workspace: Path, access_mode: str, allow_tasks: bool) -> str:
     return subprocess.list2cmdline(argv) if os.name == "nt" else _posix_join(argv)
 
 
+def render_client_config(
+    workspace: Path,
+    access_mode: str,
+    allow_tasks: bool,
+    output_format: str,
+) -> str:
+    """Render a portable stdio client configuration without starting the server."""
+
+    argv = mcp_argv(workspace, access_mode, allow_tasks)
+    command, args = argv[0], argv[1:]
+    if output_format == "tunnel":
+        return subprocess.list2cmdline(argv) if os.name == "nt" else _posix_join(argv)
+    if output_format == "json":
+        return json.dumps(
+            {"mcpServers": {"folderbridge": {"command": command, "args": args}}},
+            ensure_ascii=False,
+            indent=2,
+        )
+    if output_format == "toml":
+        encoded_args = ", ".join(json.dumps(item, ensure_ascii=False) for item in args)
+        return (
+            "[mcp_servers.folderbridge]\n"
+            f"command = {json.dumps(command, ensure_ascii=False)}\n"
+            f"args = [{encoded_args}]"
+        )
+    raise LauncherError("客户端配置格式必须是 tunnel、json 或 toml")
+
+
 def find_tunnel_client(explicit: str = "") -> Path | None:
     if explicit.strip():
         candidate = Path(explicit.strip().strip('"')).expanduser()

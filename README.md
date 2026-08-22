@@ -116,18 +116,63 @@ No browser extension is required. FolderBridge intentionally does not silently d
 
 ## Connect another local MCP client
 
-Print a ready-to-use configuration:
+Yes. FolderBridge's compatibility seam is its standard MCP `stdio` server. The ChatGPT Tunnel is only a bridge for a web client that cannot launch a local process. The MCP `stdio` transport likewise specifies that the client launches the server subprocess and exchanges JSON-RPC over standard input/output. [MCP stdio specification](https://modelcontextprotocol.io/specification/2026-07-28/basic/transports/stdio)
+
+### Client requirements
+
+- It can configure a local **command + args** pair and keep the subprocess running.
+- It supports MCP over `stdio`, keeping stdout reserved for protocol messages.
+- It can discover and call MCP tools (`initialize`, `tools/list`, and `tools/call`, or the modern 2026-07-28 discovery flow).
+- It closes stdin or terminates the subprocess when the session ends.
+- Prefer a client with tool approval UX, but do not treat its confirmation dialog as the only security boundary.
+
+FolderBridge currently handles the `2024-11-05`, `2025-03-26`, `2025-06-18`, `2025-11-25`, and `2026-07-28` protocol paths. It returns standard tool schemas, text content, and `structuredContent`; whether a confirmation prompt appears is client-specific. [MCP Tools specification](https://modelcontextprotocol.io/specification/2026-07-28/server/tools)
+
+| Client type | Direct connection? | Route |
+| --- | --- | --- |
+| Local desktop app or IDE with stdio MCP | Yes | Use `FolderBridge.exe` as command and `serve ...` as args |
+| Local app with one combined command field | Usually | Paste the full stdio command and preserve path quoting |
+| Client accepting only a remote HTTP/SSE URL | No | Use that client's official stdio gateway/proxy, or deploy a separately protected MCP bridge |
+| Web-only, mobile, or cloud sandbox | Usually not to the local PC | Use the vendor's official Tunnel/remote mechanism on a trusted host that can reach the workspace |
+
+### Shortest local setup
+
+1. Select the workspace in FolderBridge and keep **Read only (recommended)**.
+2. Open page 5 of **连接设置向导** and copy JSON, TOML, or the complete stdio command.
+3. Paste it into the client's MCP Servers settings; follow that client's documentation for its exact field names.
+4. Restart or refresh the client and verify that `server_info` and `workspace` appear.
+
+A direct stdio connection needs no `tunnel-client`, Tunnel ID, Runtime API key, or running FolderBridge GUI. The client starts this command when needed:
 
 ```powershell
-python .\folderbridge_launcher.py client-config --workspace C:\path\to\repo --format toml
-python .\folderbridge_launcher.py client-config --workspace C:\path\to\repo --format json
+FolderBridge.exe serve --workspace C:\path\to\repo --read-only
 ```
 
-Generate a read-only command:
+Generate ready-to-paste configurations from source:
 
 ```powershell
+python .\folderbridge_launcher.py client-config --workspace C:\path\to\repo --format json --read-only
+python .\folderbridge_launcher.py client-config --workspace C:\path\to\repo --format toml --read-only
 python .\folderbridge_launcher.py client-config --workspace C:\path\to\repo --format tunnel --read-only
 ```
+
+The JSON output follows the common `mcpServers` convention used by many desktop clients:
+
+```json
+{
+  "mcpServers": {
+    "folderbridge": {
+      "command": "C:\\Tools\\FolderBridge.exe",
+      "args": ["serve", "--workspace", "C:\\work\\project", "--read-only"]
+    }
+  }
+}
+```
+
+> [!IMPORTANT]
+> The JSON/TOML top-level keys are common conventions, not universal client requirements. Compatibility ultimately means that the client launches command/args unchanged as an MCP stdio subprocess. If the client accepts only a URL, this release has no built-in HTTP/SSE listener; do not expose an ad-hoc local port directly to the public internet.
+
+See the [client compatibility research](docs/client-compatibility-research.md) for protocol versions, process lifecycle, `cwd`/`env`, approval boundaries, and remote bridging details.
 
 ## Tools and editing workflow
 

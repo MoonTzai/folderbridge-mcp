@@ -29,6 +29,7 @@ from .launcher_backend import (
     find_tunnel_client,
     mcp_command,
     redact_text,
+    render_client_config,
     run_short_command,
 )
 from .setup_guide import (
@@ -197,10 +198,10 @@ class FolderBridgeLauncher:
         ttk.Label(header, text="FolderBridge MCP", style="Title.TLabel").grid(row=0, column=0, sticky="w")
         ttk.Label(
             header,
-            text="把一个明确的本地文件夹安全地接到 ChatGPT 网页端",
+            text="把一个明确的本地文件夹安全地接到支持 MCP 的 AI 客户端",
             style="Subtitle.TLabel",
         ).grid(row=1, column=0, sticky="w", pady=(2, 0))
-        self.guide_button = ttk.Button(header, text="网页端一键引导", command=self._open_web_setup)
+        self.guide_button = ttk.Button(header, text="连接设置向导", command=self._open_web_setup)
         self.guide_button.grid(row=0, column=1, rowspan=2, sticky="e")
 
         self._build_overview(page).grid(row=1, column=0, sticky="ew", pady=(0, 12))
@@ -396,7 +397,7 @@ class FolderBridgeLauncher:
         if executable:
             self.client_status.set(f"已找到：{executable}")
         else:
-            self.client_status.set("未找到。可点击“网页端一键引导”打开官方下载页。")
+            self.client_status.set("未找到。ChatGPT 网页端可在“连接设置向导”中下载；本地 stdio 客户端不需要它。")
 
         try:
             current = self._settings_from_form().fingerprint()
@@ -603,7 +604,7 @@ class FolderBridgeLauncher:
         executable = find_tunnel_client(self.tunnel_client_var.get())
 
         dialog = tk.Toplevel(self.root)
-        dialog.title("FolderBridge · 网页端连接向导")
+        dialog.title("FolderBridge · MCP 连接向导")
         dialog.transient(self.root)
         dialog.grab_set()
         dialog.resizable(True, True)
@@ -625,7 +626,7 @@ class FolderBridgeLauncher:
         header = ttk.Frame(body, style="Guide.TFrame")
         header.grid(row=0, column=0, sticky="ew")
         header.columnconfigure(0, weight=1)
-        ttk.Label(header, text="网页端连接向导", style="GuideTitle.TLabel").grid(row=0, column=0, sticky="w")
+        ttk.Label(header, text="MCP 连接向导", style="GuideTitle.TLabel").grid(row=0, column=0, sticky="w")
         ttk.Button(
             header,
             text="一键打开配置页面",
@@ -636,7 +637,7 @@ class FolderBridgeLauncher:
         ttk.Button(header, text="关闭", command=dialog.destroy).grid(row=0, column=2, padx=(8, 0))
         ttk.Label(
             body,
-            text="按 1 → 4 完成。账号和工作区安全确认仍由你本人完成；启动器不会读取或操纵登录态。",
+            text="ChatGPT 网页端按 1 → 4 完成；其他支持本地 stdio 的客户端直接看第 5 页。",
             style="Body.TLabel",
         ).grid(row=1, column=0, sticky="w", pady=(3, 14))
 
@@ -742,6 +743,38 @@ class FolderBridgeLauncher:
         ttk.Button(chatgpt_buttons, text="打开 ChatGPT Plugins", command=lambda: webbrowser.open(CHATGPT_PLUGINS_URL)).pack(side="left")
         ttk.Button(chatgpt_buttons, text="开发者模式说明", command=lambda: webbrowser.open(HELP_URL)).pack(side="left", padx=(8, 0))
 
+        other_tab = self._guide_tab(
+            notebook,
+            "其他 MCP 客户端：优先直接连接 stdio",
+            (
+                "1. 兼容条件：客户端能启动本地程序，分别配置 command 与 args，并通过 stdin/stdout 使用 MCP 工具。",
+                "2. 接入命令：FolderBridge.exe serve --workspace <工作区绝对路径> --read-only。通常由客户端自动启停，无需打开 GUI。",
+                "3. 客户端使用 mcpServers 风格时复制 JSON；使用 mcp_servers 风格时复制 TOML；字段名仍以该客户端文档为准。",
+                "4. 只支持远程 HTTP/SSE、网页或移动端且不能启动本地进程时，不能直接连接；需要该厂商的官方网关、Tunnel 或显式代理。",
+                "5. 客户端是否弹出工具确认属于客户端行为。FolderBridge 仍强制文件夹边界、只读开关、哈希防冲突和任务白名单。",
+            ),
+            wrap,
+            warning="首次接入保持只读。不要因为客户端显示了确认弹窗，就把它当成 FolderBridge 的唯一安全边界。",
+        )
+        notebook.add(other_tab, text="5  其他 MCP 客户端")
+        other_buttons = ttk.Frame(other_tab, style="Guide.TFrame")
+        other_buttons.pack(fill="x", pady=(10, 0))
+        ttk.Button(
+            other_buttons,
+            text="复制 JSON 配置",
+            command=lambda: self._copy_client_config("json"),
+        ).pack(side="left")
+        ttk.Button(
+            other_buttons,
+            text="复制 TOML 配置",
+            command=lambda: self._copy_client_config("toml"),
+        ).pack(side="left", padx=(8, 0))
+        ttk.Button(
+            other_buttons,
+            text="复制 stdio 命令",
+            command=lambda: self._copy_client_config("tunnel"),
+        ).pack(side="left", padx=(8, 0))
+
         dialog.update_idletasks()
         x = self.root.winfo_rootx() + max(0, (self.root.winfo_width() - dialog.winfo_width()) // 2)
         y = self.root.winfo_rooty() + max(0, (self.root.winfo_height() - dialog.winfo_height()) // 2)
@@ -794,6 +827,21 @@ class FolderBridgeLauncher:
         self.root.clipboard_clear()
         self.root.clipboard_append(value)
         self._log(notice)
+
+    def _copy_client_config(self, output_format: str) -> None:
+        try:
+            settings = self._settings_from_form()
+            workspace = settings.validate(require_tunnel_id=False)
+            rendered = render_client_config(
+                workspace,
+                settings.access_mode,
+                settings.allow_tasks,
+                output_format,
+            )
+        except LauncherError as exc:
+            self._show_error(str(exc))
+            return
+        self._copy_text(rendered, f"已复制 {output_format.upper()} 本地 stdio 客户端配置。")
 
     def _open_required_pages(self, client_ready: bool) -> None:
         webbrowser.open(TUNNEL_SETTINGS_URL)
