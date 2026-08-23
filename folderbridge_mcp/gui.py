@@ -151,6 +151,7 @@ class FolderBridgeLauncher:
         self._extension_wrapped_labels: list[ttk.Label] = []
         self._fonts: dict[str, tkfont.Font] = {}
         self._guide_text_widgets: list[tk.Text] = []
+        self._dpi_entries: list[tk.Entry] = []
         self._busy = False
         self._closing = False
         self._shutdown_in_progress = False
@@ -328,6 +329,16 @@ class FolderBridgeLauncher:
             self.log.configure(padx=self._px(10), pady=self._px(9))
         if hasattr(self, "start_button"):
             self.start_button.configure(padx=self._px(24), pady=self._px(9))
+        for entry in getattr(self, "_dpi_entries", []):
+            try:
+                entry.configure(
+                    font=self._font("body"),
+                    highlightthickness=self._px(1),
+                    insertwidth=self._px(1),
+                )
+                entry.grid_configure(ipadx=self._px(6), ipady=self._px(5))
+            except tk.TclError:
+                pass
         for guide_text in getattr(self, "_guide_text_widgets", []):
             try:
                 guide_text.tag_configure("title", spacing3=self._px(12))
@@ -1505,6 +1516,39 @@ class FolderBridgeLauncher:
         self.tasks_check.grid(row=5, column=1, columnspan=2, sticky="w", pady=(9, 0))
         return card
 
+    def _build_dpi_entry(
+        self,
+        parent: tk.Misc,
+        *,
+        textvariable: tk.Variable,
+        width: int | None = None,
+        show: str | None = None,
+    ) -> tk.Entry:
+        options: dict[str, object] = {
+            "textvariable": textvariable,
+            "font": self._font("body"),
+            "background": "#ffffff",
+            "foreground": "#172033",
+            "disabledbackground": "#f3f4f6",
+            "disabledforeground": "#98a2b3",
+            "insertbackground": "#172033",
+            "selectbackground": "#c7d7fe",
+            "selectforeground": "#172033",
+            "relief": "flat",
+            "borderwidth": 0,
+            "highlightthickness": self._px(1),
+            "highlightbackground": "#c5cbd6",
+            "highlightcolor": "#2563eb",
+            "insertwidth": self._px(1),
+        }
+        if width is not None:
+            options["width"] = width
+        if show is not None:
+            options["show"] = show
+        entry = tk.Entry(parent, **options)
+        self._dpi_entries.append(entry)
+        return entry
+
     def _build_tunnel_settings(self, parent: ttk.Frame) -> ttk.Frame:
         card = ttk.Frame(parent, style="Card.TFrame", padding=16)
         card.columnconfigure(1, weight=1)
@@ -1516,25 +1560,52 @@ class FolderBridgeLauncher:
         ).grid(row=1, column=0, columnspan=4, sticky="w", pady=(3, 12))
 
         ttk.Label(card, text="tunnel-client", style="Field.TLabel").grid(row=2, column=0, sticky="w", padx=(0, 10))
-        self.client_entry = ttk.Entry(card, textvariable=self.tunnel_client_var)
-        self.client_entry.grid(row=2, column=1, columnspan=2, sticky="ew")
+        self.client_entry = self._build_dpi_entry(card, textvariable=self.tunnel_client_var)
+        self.client_entry.grid(
+            row=2,
+            column=1,
+            columnspan=2,
+            sticky="ew",
+            ipadx=self._px(6),
+            ipady=self._px(5),
+        )
         self.browse_client_button = ttk.Button(card, text="选择…", command=self._browse_tunnel_client)
         self.browse_client_button.grid(row=2, column=3, padx=(8, 0))
         ttk.Label(card, textvariable=self.client_status, style="Muted.TLabel").grid(row=3, column=1, columnspan=3, sticky="w", pady=(3, 0))
 
         ttk.Label(card, text="Profile", style="Field.TLabel").grid(row=4, column=0, sticky="w", pady=(10, 0))
-        self.profile_entry = ttk.Entry(card, textvariable=self.profile_var, width=22)
-        self.profile_entry.grid(row=4, column=1, sticky="w", pady=(10, 0))
+        self.profile_entry = self._build_dpi_entry(card, textvariable=self.profile_var, width=22)
+        self.profile_entry.grid(
+            row=4,
+            column=1,
+            sticky="w",
+            pady=(10, 0),
+            ipadx=self._px(6),
+            ipady=self._px(5),
+        )
         ttk.Label(card, text="Tunnel ID", style="Field.TLabel").grid(row=4, column=2, sticky="e", padx=(16, 8), pady=(10, 0))
-        self.tunnel_entry = ttk.Entry(card, textvariable=self.tunnel_id_var)
-        self.tunnel_entry.grid(row=4, column=3, sticky="ew", pady=(10, 0))
+        self.tunnel_entry = self._build_dpi_entry(card, textvariable=self.tunnel_id_var)
+        self.tunnel_entry.grid(
+            row=4,
+            column=3,
+            sticky="ew",
+            pady=(10, 0),
+            ipadx=self._px(6),
+            ipady=self._px(5),
+        )
 
         ttk.Label(card, text="Runtime API Key", style="Field.TLabel").grid(row=5, column=0, sticky="w", pady=(10, 0))
         key_frame = ttk.Frame(card, style="Card.TFrame")
         key_frame.grid(row=5, column=1, columnspan=3, sticky="ew", pady=(10, 0))
         key_frame.columnconfigure(0, weight=1)
-        self.key_entry = ttk.Entry(key_frame, textvariable=self.api_key_var, show="●")
-        self.key_entry.grid(row=0, column=0, sticky="ew")
+        self.key_entry = self._build_dpi_entry(key_frame, textvariable=self.api_key_var, show="●")
+        self.key_entry.grid(
+            row=0,
+            column=0,
+            sticky="ew",
+            ipadx=self._px(6),
+            ipady=self._px(5),
+        )
         self.show_key_check = ttk.Checkbutton(
             key_frame,
             text="显示",

@@ -2,6 +2,11 @@
 
 All notable changes to FolderBridge MCP are documented here.
 
+## 0.7.4 — 2026-08-24
+
+- Fixed the four OpenAI Secure MCP Tunnel text fields (`tunnel-client`, Profile, Tunnel ID, Runtime API Key) on Windows Per-Monitor DPI changes. They no longer depend on the native Vista `ttk.Entry` element, whose runtime geometry can remain at the old monitor scale; FolderBridge now uses one explicit DPI-managed text-entry seam and recalculates font, focus border, caret width, and grid internal padding whenever monitor DPI changes.
+- Added a Tk geometry regression proving a Tunnel text field grows when runtime DPI changes from 96 to 144, in addition to the static action-surface regression.
+
 ## 0.7.3 — 2026-08-24
 
 - Updated the Extension ABI documentation, English/Chinese READMEs, Launcher appendix, and copyable LLM authoring prompt to discourage aggregate public actions such as `run-all` / `verification-suite`. Extensions should expose small fixed allowlisted operations, optionally publish a non-executing `verification-plan`, and reserve Job mode for genuinely atomic long-running work.

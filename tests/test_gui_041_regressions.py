@@ -43,9 +43,16 @@ class Gui041RegressionTests(unittest.TestCase):
         self.assertIn("managed.configure(family=family, size=pixel_size, weight=weight)", self.gui)
         self.assertIn('font=self._font("log")', self.gui)
         self.assertIn('font=self._font("primary_button")', self.gui)
-        self.assertIn('style.configure("TEntry", padding=self._px(6), font=self._font("body"))', self.gui)
         self.assertNotIn("font=(\"Segoe UI\"", self.gui)
         self.assertNotIn("font=(\"Cascadia Mono\"", self.gui)
+
+    def test_tunnel_text_entries_use_explicit_dpi_metrics_instead_of_native_ttk_entry(self) -> None:
+        tunnel_block = self.gui.split("def _build_tunnel_settings", 1)[1].split("def _build_log", 1)[0]
+        self.assertIn("def _build_dpi_entry", self.gui)
+        self.assertEqual(tunnel_block.count("self._build_dpi_entry("), 4)
+        self.assertNotIn("ttk.Entry(", tunnel_block)
+        self.assertIn("self._dpi_entries", self.gui)
+        self.assertIn("entry.grid_configure(ipadx=self._px(6), ipady=self._px(5))", self.gui)
 
     def test_compact_buttons_are_limited_to_select_all_and_clear(self) -> None:
         self.assertIn('style.configure("Compact.TButton"', self.gui)

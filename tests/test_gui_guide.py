@@ -132,6 +132,38 @@ class GuideGuiTests(unittest.TestCase):
         finally:
             root.destroy()
 
+    def test_tunnel_entry_geometry_grows_when_runtime_dpi_increases(self) -> None:
+        try:
+            root = tk.Tk()
+        except tk.TclError as exc:
+            self.skipTest(f"Tk display unavailable: {exc}")
+        root.withdraw()
+        try:
+            launcher = FolderBridgeLauncher.__new__(FolderBridgeLauncher)
+            launcher.root = root
+            launcher._fonts = {}
+            launcher._guide_text_widgets = []
+            launcher._dpi_entries = []
+            launcher._dpi = 96
+            launcher._ui_scale = 1.0
+            launcher._refresh_fonts()
+            frame = tk.Frame(root)
+            entry = launcher._build_dpi_entry(frame, textvariable=tk.StringVar(master=root, value="tunnel_test"))
+            entry.grid(ipadx=launcher._px(6), ipady=launcher._px(5))
+            root.update_idletasks()
+            height_96 = frame.winfo_reqheight()
+
+            launcher._dpi = 144
+            launcher._ui_scale = 1.5
+            launcher._refresh_fonts()
+            launcher._refresh_dpi_metrics()
+            root.update_idletasks()
+            height_144 = frame.winfo_reqheight()
+
+            self.assertGreater(height_144, height_96)
+        finally:
+            root.destroy()
+
     def test_guide_instructions_are_read_only_and_selectable(self) -> None:
         try:
             root = tk.Tk()
