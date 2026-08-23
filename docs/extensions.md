@@ -128,6 +128,14 @@ Extensions must not require installation-time edits to every workspace's `.folde
 
 FolderBridge evaluates these patterns every time the extension registry is queried or an action runs. A project can therefore gain a new build script months after the workspace was added and immediately become applicable. Plugin state belongs in `context.state_dir` by default, outside the repository.
 
+## Action granularity: avoid aggregate public actions
+
+Public actions should be small, fixed, and semantically bounded. Do not expose `run-all`, `verification-suite`, `do-everything`, or similar aggregate entry points that bundle many independent tests/checks or a multi-stage pipeline into one foreground MCP request. Large aggregate calls are harder to diagnose, produce less predictable output/timeout behavior, and can interact poorly with client-side safety or request limits even when every underlying step is individually safe.
+
+Prefer a fixed allowlist of actions whose names describe one bounded operation. If a workflow needs several of them, let the client invoke the actions sequentially and return each result independently. A read-only `verification-plan` action may return the recommended sequence as data, but it should not itself spawn subprocesses or execute the workflow. Do not expose arbitrary test-file, command, executable, URL, or shell parameters merely to reduce the number of declared actions.
+
+A genuinely atomic long-running operation may use host-owned `run_mode="job"` when the connected client can reliably query `job_status` and issue `job_cancel`. Job mode is not a substitute for decomposition: an action that is conceptually many independent checks should still be split even if it could technically run as one Job. Every action should retain explicit timeout/output bounds and return compact diagnostics.
+
 ## Authorization and hot loading
 
 `action.authorization` is either `global` or `none`. Each action may additionally declare `run_mode` (`foreground`, the default, or `job`) and an optional `timeout_seconds` override. A Job action returns quickly with a `job_id`, allowing long pipelines to run without holding one foreground MCP request open.

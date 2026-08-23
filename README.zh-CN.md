@@ -280,6 +280,8 @@ FolderBridge Extension ABI v1 用于以后增加 ComfyUI、FFmpeg、Blender、Ol
 
 需要适配具体项目时，应使用 `workspace_adapter.mode=dynamic` 与 `detect.any_of` / `detect.all_of`。FolderBridge 每次调用都会重新检测，因此插件安装时不需要向每个工作区注入 `.folderbridge.json` task，项目以后才出现相关脚本也能自动变为可用。插件持久状态优先使用 FolderBridge 提供的 profile state 目录，不要污染仓库。
 
+公开 Extension action 应保持**小而固定、语义有界**。不要暴露 `run-all`、`verification-suite`、`do-everything` 这类把几十个互相独立的测试/检查或多阶段流水线塞进一次前台 MCP 调用的聚合总入口。应拆成固定白名单、语义明确、超时和输出可预测的小 action，由客户端按顺序逐项调用；如需告诉客户端标准顺序，可额外提供只返回计划、不执行子进程的只读 `verification-plan`。真正属于一个原子语义单元的长任务，在当前客户端能可靠查询/取消 Job 时可使用 host-owned Job；但不要用 Job 把本应拆分的聚合入口藏起来。
+
 ComfyUI 是第一个 bundled extension。状态检查固定访问 `127.0.0.1:8188`；执行 workflow 需要在 Extensions 侧栏一次批准。从 FolderBridge 0.4.1 开始，Windows Launcher 还可以自己托管本地 ComfyUI 进程：只需选择一次受支持的 Portable 根目录（`python_embeded\\python.exe` + `ComfyUI\\main.py`），或源码安装根目录（`main.py` + `.venv\\Scripts\\python.exe` / `venv\\Scripts\\python.exe`），之后可用明确的 Python/main.py 参数、`shell=False` 和固定 `127.0.0.1:8188` 自动启动。如果 8188 在 FolderBridge 启动前已经在线，则标记为外部服务并直接复用，不会再启动第二份。
 
 Managed Service 的 ownership 比 Extension 权限更严格：持久配置只保存 `install_root` 和 `auto_start`，不保存 PID 或任意启动命令；只有当前 Launcher 本次运行亲自创建并保留在内存中的 `Popen` handle 才算 owned、才允许停止。FolderBridge 不会执行用户选择的 BAT/CMD，也不会因为未知程序占用了 8188 就按端口查 PID 后终止。退出时先停止 owned managed services，再停止 Tunnel/MCP；外部 ComfyUI 保持运行。

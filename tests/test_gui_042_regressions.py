@@ -3,6 +3,8 @@ from __future__ import annotations
 import unittest
 from pathlib import Path
 
+from folderbridge_mcp.gui import extension_sidebar_status
+
 
 class Gui042RegressionTests(unittest.TestCase):
     @classmethod
@@ -62,6 +64,15 @@ class Gui042RegressionTests(unittest.TestCase):
         self.assertIn("widget.grid_remove()", self.gui)
         self.assertIn("self.root.after_idle(self._fit_window_to_content)", self.gui)
 
+    def test_toggle_all_sections_batches_layout_reflow_once(self) -> None:
+        set_block = self.gui.split("def _set_section_collapsed", 1)[1].split("def _toggle_all_sections", 1)[0]
+        all_block = self.gui.split("def _toggle_all_sections", 1)[1].split("def _sync_sections_toggle_button", 1)[0]
+        self.assertIn("defer_layout: bool = False", set_block)
+        self.assertIn("if not defer_layout:", set_block)
+        self.assertEqual(set_block.count("self.root.after_idle(self._fit_window_to_content)"), 1)
+        self.assertIn("self._set_section_collapsed(key, collapse, defer_layout=True)", all_block)
+        self.assertEqual(all_block.count("self.root.after_idle(self._fit_window_to_content)"), 1)
+
     def test_comfyui_first_run_is_explicit_instead_of_silent(self) -> None:
         self.assertIn("服务：正在启动 / 检测…", self.gui)
         self.assertIn("服务：等待配置安装目录 · 自动启动尚未执行", self.gui)
@@ -75,6 +86,27 @@ class Gui042RegressionTests(unittest.TestCase):
         self.assertIn("def _initialize_managed_services(self, *, final_pass: bool = True)", self.gui)
         self.assertIn("托管服务自动启动检查：", self.gui)
         self.assertIn("Extension 当前未加载", self.gui)
+
+    def test_sidebar_toggle_does_not_rebuild_extension_cards_on_every_open(self) -> None:
+        toggle_block = self.gui.split("def _toggle_extension_sidebar", 1)[1].split("def _refresh_extension_sidebar", 1)[0]
+        self.assertNotIn("self._refresh_extension_sidebar()", toggle_block)
+        self.assertIn("self.extension_sidebar.grid()", toggle_block)
+        self.assertIn("self.extension_sidebar.grid_remove()", toggle_block)
+        self.assertEqual(toggle_block.count("self.root.after_idle(self._fit_window_to_content)"), 1)
+
+    def test_dynamic_workspace_adapter_status_is_not_misreported_as_unloaded(self) -> None:
+        item = {
+            "trusted": True,
+            "enabled": True,
+            "loaded": False,
+            "approval_stale": False,
+            "workspace_adapter": {"mode": "dynamic"},
+        }
+        self.assertEqual(extension_sidebar_status(item), "✓ 已批准 · 已启用 · 工作区匹配时加载")
+        loaded = dict(item, loaded=True)
+        self.assertEqual(extension_sidebar_status(loaded), "✓ 已批准 · 已加载")
+        ordinary = dict(item, workspace_adapter={"mode": "none"})
+        self.assertEqual(extension_sidebar_status(ordinary), "已批准 · 未加载")
 
     def test_extensions_sidebar_also_manages_skill_packs_through_core_engine(self) -> None:
         self.assertIn("from .skills import SkillEngine, skill_pack_root_path", self.gui)

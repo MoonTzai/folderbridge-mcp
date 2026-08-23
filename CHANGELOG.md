@@ -2,6 +2,18 @@
 
 All notable changes to FolderBridge MCP are documented here.
 
+## 0.7.3 — 2026-08-24
+
+- Updated the Extension ABI documentation, English/Chinese READMEs, Launcher appendix, and copyable LLM authoring prompt to discourage aggregate public actions such as `run-all` / `verification-suite`. Extensions should expose small fixed allowlisted operations, optionally publish a non-executing `verification-plan`, and reserve Job mode for genuinely atomic long-running work.
+- Made the MCP connection-guide dialog content-aware and monitor-aware. Initial and final geometry now use the current monitor work area, respect DPI-scaled minimums, clamp the dialog on-screen, and derive guide text width from the available dialog width instead of a fixed 720-pixel request.
+
+## 0.7.2 — 2026-08-24
+
+- Fixed the Launcher status for dynamic workspace Extensions: an approved/enabled adapter that only loads for matching workspaces is now shown as `已启用 · 工作区匹配时加载` instead of the misleading global `未加载` state.
+- Widened the Extensions & Skills sidebar and unified its frame, canvas, wrap, DPI-refresh, and window-fit width budgets so dense plugin/Skill metadata has more usable horizontal space.
+- Removed redundant sidebar rebuilds from simple show/hide toggles, reducing the visible jump during expansion while keeping explicit rescan and state-change refresh paths intact.
+- Batched the three main-panel `全部折叠/全部展开` layout work so all visibility changes complete before one final window reflow; individual panel toggles keep their single reflow path.
+
 ## 0.7.1 — 2026-08-23
 
 - Fixed Launcher mouse-wheel routing so blank/main-page areas scroll the page while native scroll areas such as logs, workspace lists, comboboxes, and independently scrollable canvases keep their own wheel behavior; the Extensions & Skills canvas scrolls itself.

@@ -24,9 +24,16 @@ class Gui041RegressionTests(unittest.TestCase):
         self.assertIn("if current_dpi != self._dpi:\n            self._apply_dpi(current_dpi)", self.gui)
         self.assertIn("def _refresh_dpi_metrics", self.gui)
         self.assertIn('self.workspace_tree.column("workspace_id", width=self._px(115))', self.gui)
-        self.assertIn('self.extension_sidebar.configure(width=self._px(320)', self.gui)
-        self.assertIn('self.extension_canvas.configure(width=self._px(285))', self.gui)
+        self.assertIn("EXTENSION_SIDEBAR_WIDTH = 380", self.gui)
+        self.assertIn("EXTENSION_SIDEBAR_CONTENT_WIDTH = 345", self.gui)
+        self.assertIn("EXTENSION_SIDEBAR_WRAP_WIDTH = 330", self.gui)
+        self.assertIn('self.extension_sidebar.configure(width=self._px(EXTENSION_SIDEBAR_WIDTH)', self.gui)
+        self.assertIn('self.extension_canvas.configure(width=self._px(EXTENSION_SIDEBAR_CONTENT_WIDTH))', self.gui)
         self.assertIn("self.status_dot.coords", self.gui)
+
+    def test_sidebar_fit_budget_tracks_the_wider_sidebar_constant(self) -> None:
+        self.assertIn("content_width += self._px(EXTENSION_SIDEBAR_WIDTH + 12)", self.gui)
+        self.assertIn("wraplength=self._px(EXTENSION_SIDEBAR_WRAP_WIDTH)", self.gui)
 
     def test_runtime_dpi_changes_explicitly_resize_existing_fonts(self) -> None:
         self.assertIn("import tkinter.font as tkfont", self.gui)

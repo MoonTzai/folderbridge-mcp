@@ -1,9 +1,10 @@
 import tkinter as tk
 import unittest
+from pathlib import Path
 from tkinter import ttk
 
 from folderbridge_mcp.extension_spec import EXTENSION_FORMAT_SUMMARY, EXTENSION_LLM_PROMPT
-from folderbridge_mcp.gui import FolderBridgeLauncher
+from folderbridge_mcp.gui import FolderBridgeLauncher, bounded_dialog_geometry
 
 
 class _WidgetStub:
@@ -38,6 +39,46 @@ class GuideGuiTests(unittest.TestCase):
         self.assertIn("workspace_adapter.mode=dynamic", EXTENSION_LLM_PROMPT)
         self.assertIn("folderbridge-extension.json", EXTENSION_FORMAT_SUMMARY)
         self.assertIn("独立子进程", EXTENSION_FORMAT_SUMMARY)
+
+    def test_extension_standard_discourages_large_aggregate_actions(self) -> None:
+        self.assertIn("run-all", EXTENSION_FORMAT_SUMMARY)
+        self.assertIn("verification-plan", EXTENSION_FORMAT_SUMMARY)
+        self.assertIn("聚合", EXTENSION_LLM_PROMPT)
+        root = Path(__file__).resolve().parents[1]
+        for relative in ("README.md", "README.zh-CN.md", "docs/extensions.md"):
+            text = (root / relative).read_text(encoding="utf-8")
+            self.assertIn("run-all", text, relative)
+
+    def test_bounded_dialog_geometry_caps_to_work_area_and_clamps_position(self) -> None:
+        self.assertEqual(
+            bounded_dialog_geometry(
+                (100, 50, 1100, 750),
+                (1200, 900),
+                (800, 100, 250, 500),
+                min_size=(720, 560),
+            ),
+            (180, 50, 920, 630),
+        )
+
+    def test_bounded_dialog_geometry_respects_minimum_when_space_allows(self) -> None:
+        self.assertEqual(
+            bounded_dialog_geometry(
+                (0, 0, 1600, 1000),
+                (500, 400),
+                (300, 200, 900, 700),
+                min_size=(720, 560),
+            )[2:],
+            (720, 560),
+        )
+
+    def test_connection_guide_uses_work_area_and_content_fit(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        gui = (root / "folderbridge_mcp" / "gui.py").read_text(encoding="utf-8")
+        block = gui.split("def _open_web_setup", 1)[1].split("def _guide_tab", 1)[0]
+        self.assertIn("window_work_area(self.root)", block)
+        self.assertNotIn("self.root.winfo_screenwidth()", block)
+        self.assertIn("self._fit_guide_dialog(dialog, body)", block)
+        self.assertIn("width - self._px(", block)
 
     def test_global_capability_select_all_and_clear(self) -> None:
         launcher = FolderBridgeLauncher.__new__(FolderBridgeLauncher)

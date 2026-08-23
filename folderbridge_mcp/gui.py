@@ -60,6 +60,51 @@ PYTHON_WINDOWS_URL = "https://www.python.org/downloads/windows/"
 NODE_DOWNLOAD_URL = "https://nodejs.org/en/download"
 MAX_LOG_CHARS = 180_000
 MANAGED_SERVICE_STATUS_POLL_MS = 2_000
+EXTENSION_SIDEBAR_WIDTH = 380
+EXTENSION_SIDEBAR_CONTENT_WIDTH = 345
+EXTENSION_SIDEBAR_WRAP_WIDTH = 330
+
+
+def extension_sidebar_status(item: dict[str, object]) -> str:
+    if item.get("approval_stale"):
+        return "⚠ 文件/权限已变化 · 需重新批准"
+    if item.get("loaded"):
+        return "✓ 已批准 · 已加载"
+    workspace_adapter = item.get("workspace_adapter")
+    adapter_mode = workspace_adapter.get("mode") if isinstance(workspace_adapter, dict) else None
+    if item.get("trusted") and item.get("enabled") and adapter_mode == "dynamic":
+        return "✓ 已批准 · 已启用 · 工作区匹配时加载"
+    if item.get("trusted"):
+        return "已批准 · 未加载"
+    if item.get("bundled"):
+        return "随 FolderBridge 提供 · 执行动作待批准"
+    return "未批准"
+
+
+def bounded_dialog_geometry(
+    work_area: tuple[int, int, int, int],
+    requested_size: tuple[int, int],
+    parent_rect: tuple[int, int, int, int],
+    *,
+    min_size: tuple[int, int],
+) -> tuple[int, int, int, int]:
+    left, top, right, bottom = work_area
+    work_width = max(1, right - left)
+    work_height = max(1, bottom - top)
+    max_width = max(1, round(work_width * 0.92))
+    max_height = max(1, round(work_height * 0.90))
+    requested_width, requested_height = requested_size
+    min_width, min_height = min_size
+    width = min(max(requested_width, min_width), max_width)
+    height = min(max(requested_height, min_height), max_height)
+    parent_x, parent_y, parent_width, parent_height = parent_rect
+    desired_x = parent_x + (parent_width - width) // 2
+    desired_y = parent_y + (parent_height - height) // 2
+    x = min(max(desired_x, left), max(left, right - width))
+    y = min(max(desired_y, top), max(top, bottom - height))
+    return x, y, width, height
+
+
 DPI_FONT_SPECS: dict[str, tuple[str, int, str]] = {
     "title": ("Segoe UI", 19, "bold"),
     "subtitle": ("Segoe UI", 10, "normal"),
@@ -261,14 +306,14 @@ class FolderBridgeLauncher:
         if hasattr(self, "page_canvas"):
             self.root.after_idle(lambda: self.page_canvas.configure(scrollregion=self.page_canvas.bbox("all")))
         if hasattr(self, "extension_sidebar"):
-            self.extension_sidebar.configure(width=self._px(320), padding=self._px(14))
+            self.extension_sidebar.configure(width=self._px(EXTENSION_SIDEBAR_WIDTH), padding=self._px(14))
         if hasattr(self, "extension_sidebar_hint"):
-            self.extension_sidebar_hint.configure(wraplength=self._px(285))
+            self.extension_sidebar_hint.configure(wraplength=self._px(EXTENSION_SIDEBAR_WRAP_WIDTH))
         if hasattr(self, "extension_canvas"):
-            self.extension_canvas.configure(width=self._px(285))
+            self.extension_canvas.configure(width=self._px(EXTENSION_SIDEBAR_CONTENT_WIDTH))
         for label in getattr(self, "_extension_wrapped_labels", []):
             try:
-                label.configure(wraplength=self._px(270))
+                label.configure(wraplength=self._px(EXTENSION_SIDEBAR_WRAP_WIDTH))
             except tk.TclError:
                 pass
         if hasattr(self, "workspace_tree"):
@@ -446,7 +491,7 @@ class FolderBridgeLauncher:
             return
         self._set_section_collapsed(key, not bool(section.get("collapsed")))
 
-    def _set_section_collapsed(self, key: str, collapsed: bool) -> None:
+    def _set_section_collapsed(self, key: str, collapsed: bool, *, defer_layout: bool = False) -> None:
         section = self._collapsible_sections.get(key)
         if section is None:
             return
@@ -470,15 +515,16 @@ class FolderBridgeLauncher:
             card = section.get("card")
             if isinstance(card, ttk.Frame):
                 card.rowconfigure(1, weight=0 if collapsed else 1)
-        self._sync_sections_toggle_button()
-        self.root.after_idle(self._fit_window_to_content)
+        if not defer_layout:
+            self._sync_sections_toggle_button()
+            self.root.after_idle(self._fit_window_to_content)
 
     def _toggle_all_sections(self) -> None:
         if not self._collapsible_sections:
             return
         collapse = any(not bool(section.get("collapsed")) for section in self._collapsible_sections.values())
         for key in tuple(self._collapsible_sections):
-            self._set_section_collapsed(key, collapse)
+            self._set_section_collapsed(key, collapse, defer_layout=True)
         self._sync_sections_toggle_button()
         self.root.after_idle(self._fit_window_to_content)
 
@@ -586,7 +632,7 @@ class FolderBridgeLauncher:
             content_width = max(self._px(940), self.page.winfo_reqwidth())
             content_height = max(self._px(820), self.page.winfo_reqheight() + self._px(8))
             if self._sidebar_visible and hasattr(self, "extension_sidebar"):
-                content_width += self._px(332)
+                content_width += self._px(EXTENSION_SIDEBAR_WIDTH + 12)
             width = min(content_width, max_width)
             height = min(content_height, max_height)
             current_x = int(self.root.winfo_x())
@@ -602,7 +648,12 @@ class FolderBridgeLauncher:
             return
 
     def _build_extension_sidebar(self, parent: ttk.Frame) -> ttk.Frame:
-        frame = ttk.Frame(parent, style="Card.TFrame", padding=self._px(14), width=self._px(320))
+        frame = ttk.Frame(
+            parent,
+            style="Card.TFrame",
+            padding=self._px(14),
+            width=self._px(EXTENSION_SIDEBAR_WIDTH),
+        )
         frame.grid_propagate(False)
         frame.columnconfigure(0, weight=1)
         frame.rowconfigure(2, weight=1)
@@ -618,7 +669,7 @@ class FolderBridgeLauncher:
             frame,
             text="默认折叠 · 热扫描 · Extensions 与 Skill Packs 分开授权；新增 Skill 不会新增 MCP tool。",
             style="Muted.TLabel",
-            wraplength=self._px(285),
+            wraplength=self._px(EXTENSION_SIDEBAR_WRAP_WIDTH),
         )
         self.extension_sidebar_hint.grid(row=1, column=0, sticky="w", pady=(self._px(5), self._px(9)))
 
@@ -626,7 +677,12 @@ class FolderBridgeLauncher:
         container.grid(row=2, column=0, sticky="nsew")
         container.columnconfigure(0, weight=1)
         container.rowconfigure(0, weight=1)
-        canvas = tk.Canvas(container, bg="#ffffff", highlightthickness=0, width=self._px(285))
+        canvas = tk.Canvas(
+            container,
+            bg="#ffffff",
+            highlightthickness=0,
+            width=self._px(EXTENSION_SIDEBAR_CONTENT_WIDTH),
+        )
         scrollbar = ttk.Scrollbar(container, orient="vertical", command=canvas.yview)
         canvas.configure(yscrollcommand=scrollbar.set)
         canvas.grid(row=0, column=0, sticky="nsew")
@@ -647,9 +703,8 @@ class FolderBridgeLauncher:
     def _toggle_extension_sidebar(self) -> None:
         self._sidebar_visible = not self._sidebar_visible
         if self._sidebar_visible:
-            self._refresh_extension_sidebar()
-            self._refresh_managed_service_statuses_async()
             self.extension_sidebar.grid()
+            self._refresh_managed_service_statuses_async()
             self.extension_toggle_button.configure(text="扩展与 Skills ◂")
         else:
             self.extension_sidebar.grid_remove()
@@ -673,7 +728,7 @@ class FolderBridgeLauncher:
                 self.extension_list_frame,
                 text="未发现插件。把符合 ABI v1 的插件文件夹放入插件目录后点“重新扫描”。",
                 style="Body.TLabel",
-                wraplength=self._px(270),
+                wraplength=self._px(EXTENSION_SIDEBAR_WRAP_WIDTH),
             )
             empty_label.pack(fill="x", pady=(2, 8))
             self._extension_wrapped_labels.append(empty_label)
@@ -690,17 +745,13 @@ class FolderBridgeLauncher:
                 command=lambda eid=extension_id: self._toggle_extension_enabled(eid),
             )
             check.pack(anchor="w")
-            if item.get("approval_stale"):
-                status = "⚠ 文件/权限已变化 · 需重新批准"
-            elif item.get("loaded"):
-                status = "✓ 已批准 · 已加载"
-            elif item.get("trusted"):
-                status = "已批准 · 未加载"
-            elif item.get("bundled"):
-                status = "随 FolderBridge 提供 · 执行动作待批准"
-            else:
-                status = "未批准"
-            status_label = ttk.Label(card, text=status, style="Muted.TLabel", wraplength=self._px(270))
+            status = extension_sidebar_status(item)
+            status_label = ttk.Label(
+                card,
+                text=status,
+                style="Muted.TLabel",
+                wraplength=self._px(EXTENSION_SIDEBAR_WRAP_WIDTH),
+            )
             status_label.pack(anchor="w", padx=(22, 0))
             self._extension_wrapped_labels.append(status_label)
             permissions = item.get("permissions", [])
@@ -709,7 +760,7 @@ class FolderBridgeLauncher:
                     card,
                     text="权限：" + " · ".join(str(value) for value in permissions),
                     style="Muted.TLabel",
-                    wraplength=self._px(270),
+                    wraplength=self._px(EXTENSION_SIDEBAR_WRAP_WIDTH),
                 )
                 permissions_label.pack(anchor="w", padx=(22, 0), pady=(2, 0))
                 self._extension_wrapped_labels.append(permissions_label)
@@ -736,7 +787,12 @@ class FolderBridgeLauncher:
                     config,
                     cached=cached is not None,
                 )
-                service_label = ttk.Label(card, text=service_text, style=service_style, wraplength=self._px(270))
+                service_label = ttk.Label(
+                    card,
+                    text=service_text,
+                    style=service_style,
+                    wraplength=self._px(EXTENSION_SIDEBAR_WRAP_WIDTH),
+                )
                 self.managed_service_status_labels[extension_id] = service_label
                 service_label.pack(anchor="w", padx=(22, 0), pady=(4, 0))
                 self._extension_wrapped_labels.append(service_label)
@@ -744,7 +800,7 @@ class FolderBridgeLauncher:
                     card,
                     text=f"ComfyUI：{install_root or '未选择（首次需配置）'}",
                     style="Muted.TLabel",
-                    wraplength=self._px(270),
+                    wraplength=self._px(EXTENSION_SIDEBAR_WRAP_WIDTH),
                 )
                 path_label.pack(anchor="w", padx=(22, 0), pady=(2, 0))
                 self._extension_wrapped_labels.append(path_label)
@@ -800,7 +856,7 @@ class FolderBridgeLauncher:
                 self.extension_list_frame,
                 text=f"加载失败：{error.get('path', '')}\n{error.get('error', '')}",
                 style="GuideWarn.TLabel",
-                wraplength=self._px(270),
+                wraplength=self._px(EXTENSION_SIDEBAR_WRAP_WIDTH),
             )
             error_label.pack(fill="x", pady=(3, 6))
             self._extension_wrapped_labels.append(error_label)
@@ -814,7 +870,7 @@ class FolderBridgeLauncher:
             self.extension_list_frame,
             text="Skill 是按需加载的方法文本，不执行本地代码；外部 Pack 需核对精确 hash 后批准。",
             style="Muted.TLabel",
-            wraplength=self._px(270),
+            wraplength=self._px(EXTENSION_SIDEBAR_WRAP_WIDTH),
         )
         skill_hint.pack(fill="x", pady=(0, 6))
         self._extension_wrapped_labels.append(skill_hint)
@@ -825,7 +881,7 @@ class FolderBridgeLauncher:
                 self.extension_list_frame,
                 text="未发现 Skill Pack。可把符合格式的 Pack 放入 Skill 目录后重新扫描。",
                 style="Body.TLabel",
-                wraplength=self._px(270),
+                wraplength=self._px(EXTENSION_SIDEBAR_WRAP_WIDTH),
             )
             empty.pack(fill="x", pady=(2, 8))
             self._extension_wrapped_labels.append(empty)
@@ -853,14 +909,19 @@ class FolderBridgeLauncher:
                 status = "已批准 · 已停用"
             else:
                 status = "未批准"
-            status_label = ttk.Label(card, text=status, style="Muted.TLabel", wraplength=self._px(270))
+            status_label = ttk.Label(
+                card,
+                text=status,
+                style="Muted.TLabel",
+                wraplength=self._px(EXTENSION_SIDEBAR_WRAP_WIDTH),
+            )
             status_label.pack(anchor="w", padx=(22, 0))
             self._extension_wrapped_labels.append(status_label)
             meta_label = ttk.Label(
                 card,
                 text=f"{item.get('skill_count', 0)} Skills · SHA-256 {str(item['sha256'])[:12]}…",
                 style="Muted.TLabel",
-                wraplength=self._px(270),
+                wraplength=self._px(EXTENSION_SIDEBAR_WRAP_WIDTH),
             )
             meta_label.pack(anchor="w", padx=(22, 0), pady=(2, 0))
             self._extension_wrapped_labels.append(meta_label)
@@ -882,7 +943,7 @@ class FolderBridgeLauncher:
                 self.extension_list_frame,
                 text=f"Skill Pack 加载失败：{error.get('path', '')}\n{error.get('error', '')}",
                 style="GuideWarn.TLabel",
-                wraplength=self._px(270),
+                wraplength=self._px(EXTENSION_SIDEBAR_WRAP_WIDTH),
             )
             error_label.pack(fill="x", pady=(3, 6))
             self._extension_wrapped_labels.append(error_label)
@@ -1833,14 +1894,26 @@ class FolderBridgeLauncher:
         dialog.grab_set()
         dialog.resizable(True, True)
         dialog.configure(bg="#ffffff")
+        work_left, work_top, work_right, work_bottom = window_work_area(self.root)
         width, height = fitted_window_size(
             self._dpi,
-            self.root.winfo_screenwidth(),
-            self.root.winfo_screenheight(),
-            base_width=860,
-            base_height=670,
+            max(1, work_right - work_left),
+            max(1, work_bottom - work_top),
+            base_width=900,
+            base_height=700,
         )
-        dialog.geometry(f"{width}x{height}")
+        x, y, width, height = bounded_dialog_geometry(
+            (work_left, work_top, work_right, work_bottom),
+            (width, height),
+            (
+                self.root.winfo_rootx(),
+                self.root.winfo_rooty(),
+                self.root.winfo_width(),
+                self.root.winfo_height(),
+            ),
+            min_size=(self._px(720), self._px(560)),
+        )
+        dialog.geometry(f"{width}x{height}+{x}+{y}")
         dialog.minsize(min(self._px(720), width), min(self._px(560), height))
 
         body = ttk.Frame(dialog, style="Guide.TFrame", padding=(22, 18, 22, 18))
@@ -1859,15 +1932,16 @@ class FolderBridgeLauncher:
             ),
         ).grid(row=0, column=1, padx=(12, 0))
         ttk.Button(header, text="关闭", command=dialog.destroy).grid(row=0, column=2, padx=(8, 0))
+        wrap = max(self._px(420), min(self._px(760), width - self._px(140)))
         ttk.Label(
             body,
             text="ChatGPT 网页端按 1 → 4 完成；其他支持本地 stdio 的客户端看第 5 页；Python/Node 与插件开发见附录。向导文字可拖选并用 Ctrl+C 复制。",
             style="Body.TLabel",
+            wraplength=wrap,
         ).grid(row=1, column=0, sticky="w", pady=(3, 14))
 
         notebook = ttk.Notebook(body)
         notebook.grid(row=2, column=0, sticky="nsew")
-        wrap = self._px(720)
 
         raw_client = self.tunnel_client_var.get()
         if self._is_runtime_client_path(raw_client):
@@ -2055,8 +2129,9 @@ class FolderBridgeLauncher:
                 "2. manifest 必须声明精确权限、动作 input_schema、execution 和 workspace_adapter。外部插件按完整目录 SHA-256 + permissions 批准；文件或权限变化会自动失效。",
                 "3. 需要适配项目时使用 workspace_adapter.mode=dynamic + detect.any_of/all_of。FolderBridge 每次调用都会重新检测，禁止靠安装时向每个工作区注入 .folderbridge.json task。",
                 "4. 插件代码在独立子进程中运行，环境清理、超时和输出都有边界；这能隔离崩溃，但不是完整 OS 沙箱。不可信插件请放 VM/容器。",
-                "5. 右侧 Extensions 侧栏默认折叠；把插件放入用户插件目录后点“重新扫描”，勾选时会显示 hash 与权限并请求一次批准。之后可热加载/停用，无需重建 Connector。",
-                "6. 下方“复制给 LLM 的插件开发指令”包含完整 ABI 速查，并要求 LLM 在资料不足时主动向用户索取/要求上传必要的 API 文档、脚本、workflow、示例文件或项目结构。",
+                "5. 公开 action 要保持小而固定：不要把几十个测试、多阶段流水线或 run-all / verification-suite 之类总入口塞进一次前台调用。需要编排时拆成固定语义动作，由客户端按顺序调用；可额外提供只返回顺序的 verification-plan。",
+                "6. 右侧 Extensions 侧栏默认折叠；把插件放入用户插件目录后点“重新扫描”，勾选时会显示 hash 与权限并请求一次批准。之后可热加载/停用，无需重建 Connector。",
+                "7. 下方“复制给 LLM 的插件开发指令”包含完整 ABI 速查，并要求 LLM 在资料不足时主动向用户索取/要求上传必要的 API 文档、脚本、workflow、示例文件或项目结构。",
             ),
             wrap,
             warnings_after_steps={
@@ -2078,10 +2153,29 @@ class FolderBridgeLauncher:
             command=lambda: self._copy_text(EXTENSION_LLM_PROMPT, "LLM 插件开发指令已复制。"),
         ).pack(side="left", padx=(8, 0))
 
+        self._fit_guide_dialog(dialog, body)
+
+    def _fit_guide_dialog(self, dialog: tk.Toplevel, body: ttk.Frame) -> None:
         dialog.update_idletasks()
-        x = self.root.winfo_rootx() + max(0, (self.root.winfo_width() - dialog.winfo_width()) // 2)
-        y = self.root.winfo_rooty() + max(0, (self.root.winfo_height() - dialog.winfo_height()) // 2)
-        dialog.geometry(f"{dialog.winfo_width()}x{dialog.winfo_height()}+{x}+{y}")
+        work_area = window_work_area(dialog)
+        requested_size = (
+            max(self._px(760), body.winfo_reqwidth() + self._px(8)),
+            max(self._px(600), body.winfo_reqheight() + self._px(8)),
+        )
+        parent_rect = (
+            self.root.winfo_rootx(),
+            self.root.winfo_rooty(),
+            self.root.winfo_width(),
+            self.root.winfo_height(),
+        )
+        x, y, width, height = bounded_dialog_geometry(
+            work_area,
+            requested_size,
+            parent_rect,
+            min_size=(self._px(720), self._px(560)),
+        )
+        dialog.geometry(f"{width}x{height}+{x}+{y}")
+        dialog.minsize(min(self._px(720), width), min(self._px(560), height))
 
     def _guide_tab(
         self,

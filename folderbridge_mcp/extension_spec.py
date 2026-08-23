@@ -22,6 +22,7 @@ EXTENSION_FORMAT_SUMMARY = """FolderBridge Extension ABI v1
 10. action.authorization=global 表示侧栏一次批准并启用后全局可用；authorization=none 只允许 bundled 插件的只读状态/发现动作。
 11. ABI v1 的 plugin.py 应只依赖 FolderBridge 已打包模块与 Python 标准库；不要假设用户能在单文件 EXE 内 pip 安装第三方包。额外软件能力优先通过精确的本地 HTTP API 或 process.execute:<程序名> 调用。若需要继承宿主环境变量，必须逐个声明 `environment.inherit:NAME`；`CONTROL_PLANE_API_KEY` 与 FolderBridge/control-plane 内部变量禁止继承。
 12. 插件可在结果中返回 `workspace_artifacts`（字符串路径或 `{path,label,kind}`）；FolderBridge 会重新按工作区安全策略验证这些相对路径，并返回 size/SHA-256。不要把凭据文件作为 artifact。
+13. 公开 action 应保持“小而固定”：一个 action 对应一个有界、可解释的语义单元。不要暴露 `run-all`、`verification-suite`、`do-everything` 之类把大量独立测试或多阶段流水线聚合进一次前台调用的总入口。需要编排时拆成固定白名单动作，由客户端依次调用；可提供纯数据 `verification-plan` 返回推荐顺序。每个动作都应有可预测的超时和有界输出。
 
 manifest 示例：
 {
@@ -82,9 +83,10 @@ EXTENSION_LLM_PROMPT = """你正在为 FolderBridge MCP 编写 Extension。请�
 10. action.authorization 默认使用 global。只有随 FolderBridge 打包的 bundled 插件，且动作真正只读/无危险副作用时，才可以建议 authorization=none。
 11. 若某能力会执行工作区代码（构建、打包、脚本），在 README 和 manifest 权限说明里明确写出风险，并使用动态 workspace adapter，而不是静默预置任务。
 12. ABI v1 不要新增 Python 第三方依赖。若能力依赖 FFmpeg、Blender、ADB 等外部程序，声明精确 process.execute:<basename> 并在 README 说明用户需要安装的软件；若依赖本地服务，使用固定 loopback 权限。
-13. 长任务优先声明 `run_mode=job`，避免让一次 MCP 前台调用长期占住连接；`timeout_seconds` 可设 0..86400，其中 0 代表不按超时自动终止。即使 timeout=0，也必须支持 FolderBridge 的显式 job_cancel / 退出清理。
-14. 若插件生成需要交给模型继续处理的文件，优先通过返回 `workspace_artifacts` 声明工作区相对路径，让 FolderBridge 做二次路径校验与 SHA-256/size 标注；不要直接返回绝对路径冒充可信产物。
-15. 完成后做一次自检：manifest 可解析、权限无未知值、入口文件存在、所有动作 schema 与 handle 分支一致、无路径穿越、无任意 URL/任意 command 参数、长任务使用合适的 Job/timeout 策略、输出有上限。
+13. 公开 action 保持小而固定，禁止把大量相互独立的测试、检查或多阶段流水线聚合成 `run-all`、`verification-suite`、`do-everything` 一类总入口。优先拆成按语义命名的固定白名单动作，由客户端逐项调用；如需提示标准顺序，可提供纯数据 `verification-plan`，但它自身不得启动子进程或执行流水线。不要为了减少 action 数量而牺牲可诊断性、超时边界或平台兼容性。
+14. 真正属于一个原子语义单元的长任务，且当前客户端/网关明确支持 Job 状态查询与取消时，才优先声明 `run_mode=job`；不要用 Job 包装一个本应拆分的聚合总入口。`timeout_seconds` 可设 0..86400，其中 0 代表不按超时自动终止；即使 timeout=0，也必须支持 FolderBridge 的显式取消 / 退出清理。若当前网关不能可靠取得 Job 最终状态，应继续拆成可在 foreground 内有界完成的固定动作。
+15. 若插件生成需要交给模型继续处理的文件，优先通过返回 `workspace_artifacts` 声明工作区相对路径，让 FolderBridge 做二次路径校验与 SHA-256/size 标注；不要直接返回绝对路径冒充可信产物。
+16. 完成后做一次自检：manifest 可解析、权限无未知值、入口文件存在、所有动作 schema 与 handle 分支一致、无路径穿越、无任意 URL/任意 command 参数、没有不必要的聚合 action、长任务使用合适的拆分或 Job/timeout 策略、输出有上限。
 
 FolderBridge Extension ABI v1 速查：
 
