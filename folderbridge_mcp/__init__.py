@@ -1,3 +1,3 @@
 """FolderBridge MCP: bounded local workspace tools over stdio MCP."""
 
-__version__ = "0.5.1"
+__version__ = "0.7.1"

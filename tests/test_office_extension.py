@@ -42,6 +42,10 @@ class OfficeExtensionTests(unittest.TestCase):
         self.assertEqual(record.manifest.actions["render"].authorization, "global")
         self.assertIn("process.execute:powershell.exe", record.manifest.permissions)
         self.assertNotIn("workspace.adapter", record.manifest.permissions)
+        plugin_text = (OFFICE_DIR / "plugin.py").read_text(encoding="utf-8")
+        self.assertIn("owned_process_group_kwargs", plugin_text)
+        self.assertIn("terminate_owned_process_tree", plugin_text)
+        self.assertNotIn("subprocess.run(", plugin_text)
 
     def test_docx_inspection_reads_paragraphs_tables_and_structure(self) -> None:
         plugin = load_plugin()

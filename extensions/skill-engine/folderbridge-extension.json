@@ -1,0 +1,79 @@
+{
+  "schema_version": 1,
+  "id": "skill-engine",
+  "name": "Skill Engine",
+  "version": "1.0.0",
+  "description": "Read-only gateway for FolderBridge trusted Skill Packs. Matches methodology to a task and returns exact verified Skill text without adding MCP tool names.",
+  "entrypoint": "plugin.py",
+  "permissions": [],
+  "execution": {
+    "mode": "isolated-process",
+    "timeout_seconds": 60
+  },
+  "workspace_adapter": {
+    "mode": "none",
+    "state": "none"
+  },
+  "actions": {
+    "list": {
+      "read_only": true,
+      "requires_workspace": false,
+      "authorization": "none",
+      "input_schema": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false
+      }
+    },
+    "match": {
+      "read_only": true,
+      "requires_workspace": false,
+      "authorization": "none",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "task": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 16000
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 5,
+            "default": 3
+          }
+        },
+        "required": ["task"],
+        "additionalProperties": false
+      }
+    },
+    "get": {
+      "read_only": true,
+      "requires_workspace": false,
+      "authorization": "none",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "skill_ref": {
+            "type": "string",
+            "minLength": 3,
+            "maxLength": 129
+          },
+          "expected_sha256": {
+            "type": "string",
+            "minLength": 64,
+            "maxLength": 64
+          },
+          "resource": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1024
+          }
+        },
+        "required": ["skill_ref", "expected_sha256"],
+        "additionalProperties": false
+      }
+    }
+  }
+}

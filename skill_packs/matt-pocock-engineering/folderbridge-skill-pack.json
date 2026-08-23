@@ -1,0 +1,58 @@
+{
+  "schema_version": 1,
+  "id": "folderbridge-engineering",
+  "name": "FolderBridge Engineering Methods",
+  "version": "1.0.0",
+  "description": "Six engineering methods for architecture, diagnosis, test-driven development, review, and implementation.",
+  "source": {},
+  "skills": [
+    {
+      "id": "codebase-design",
+      "name": "Codebase Design",
+      "path": "skills/codebase-design/SKILL.md",
+      "description": "Design deep modules with small interfaces at clean seams; use interface, depth, seam, adapter, leverage, and locality precisely.",
+      "routing_terms": ["codebase design", "module design", "interface design", "deep module", "seam", "adapter", "architecture design", "代码设计", "模块设计", "接口设计", "深模块", "架构设计"],
+      "resources": []
+    },
+    {
+      "id": "improve-codebase-architecture",
+      "name": "Improve Codebase Architecture",
+      "path": "skills/improve-codebase-architecture/SKILL.md",
+      "description": "Survey a changing codebase for high-leverage opportunities to deepen shallow modules rather than performing style-only refactors.",
+      "routing_terms": ["improve architecture", "architecture audit", "architecture review", "refactor architecture", "deepening opportunity", "deletion test", "架构审计", "架构优化", "架构重构", "代码架构", "深度模块"],
+      "resources": []
+    },
+    {
+      "id": "diagnosing-bugs",
+      "name": "Diagnosing Bugs",
+      "path": "skills/diagnosing-bugs/SKILL.md",
+      "description": "Diagnose hard bugs by first constructing a deterministic red feedback loop, then minimizing, ranking hypotheses, instrumenting, fixing, and locking a regression.",
+      "routing_terms": ["diagnose bug", "debug", "bug", "crash", "failing", "broken", "regression", "intermittent", "race condition", "诊断", "调试", "错误", "故障", "崩溃", "竞态", "回归"],
+      "resources": []
+    },
+    {
+      "id": "tdd",
+      "name": "Test-Driven Development",
+      "path": "skills/tdd/SKILL.md",
+      "description": "Build one observable behavior at a time with a red-green-refactor loop aimed at a public interface seam.",
+      "routing_terms": ["tdd", "test driven", "test-driven", "test first", "red green refactor", "red-green", "测试驱动", "测试先行", "红绿重构", "先写测试"],
+      "resources": []
+    },
+    {
+      "id": "code-review",
+      "name": "Code Review",
+      "path": "skills/code-review/SKILL.md",
+      "description": "Review a bounded diff independently against repository standards and the originating spec, then rank concrete findings.",
+      "routing_terms": ["code review", "review diff", "review changes", "review branch", "review implementation", "代码审查", "审代码", "审查改动", "diff审计", "实现审计"],
+      "resources": []
+    },
+    {
+      "id": "implement",
+      "name": "Implement",
+      "path": "skills/implement/SKILL.md",
+      "description": "Execute an already-settled spec through agreed seams using TDD, regular checks, a full regression suite, and a final review.",
+      "routing_terms": ["implement spec", "implement ticket", "execute plan", "build from spec", "按方案实现", "按设计执行", "执行方案", "实现规范", "开始实现"],
+      "resources": []
+    }
+  ]
+}

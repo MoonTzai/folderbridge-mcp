@@ -7,6 +7,7 @@ import time
 import webbrowser
 from pathlib import Path
 import tkinter as tk
+import tkinter.font as tkfont
 from tkinter import filedialog, messagebox, scrolledtext, ttk
 
 from .capabilities import CAPABILITY_LABELS, CAPABILITY_NAMES
@@ -16,10 +17,12 @@ from .extension_spec import EXTENSION_FORMAT_SUMMARY, EXTENSION_LLM_PROMPT
 from .dpi import (
     enable_windows_dpi_awareness,
     fitted_window_size,
+    font_pixel_size,
     scale_for_dpi,
     scaled_pixels,
     tk_scaling_for_dpi,
     window_dpi,
+    window_work_area,
 )
 from .launcher_backend import (
     LauncherError,
@@ -37,6 +40,8 @@ from .launcher_backend import (
     run_short_command,
 )
 from .managed_services import ManagedServiceError, default_managed_service_manager
+from .security import ToolError
+from .skills import SkillEngine, skill_pack_root_path
 from .setup_guide import (
     CHATGPT_INVOCATION_EXAMPLE,
     WINDOWS_X64_ASSET_PATTERN,
@@ -54,6 +59,27 @@ HELP_URL = "https://help.openai.com/en/articles/12584461-developer-mode-and-full
 PYTHON_WINDOWS_URL = "https://www.python.org/downloads/windows/"
 NODE_DOWNLOAD_URL = "https://nodejs.org/en/download"
 MAX_LOG_CHARS = 180_000
+MANAGED_SERVICE_STATUS_POLL_MS = 2_000
+DPI_FONT_SPECS: dict[str, tuple[str, int, str]] = {
+    "title": ("Segoe UI", 19, "bold"),
+    "subtitle": ("Segoe UI", 10, "normal"),
+    "card_title": ("Segoe UI", 11, "bold"),
+    "body": ("Segoe UI", 9, "normal"),
+    "field": ("Segoe UI", 9, "bold"),
+    "status": ("Segoe UI", 10, "bold"),
+    "muted": ("Segoe UI", 8, "normal"),
+    "service": ("Segoe UI", 8, "bold"),
+    "guide_title": ("Segoe UI", 14, "bold"),
+    "guide_step": ("Segoe UI", 9, "normal"),
+    "guide_warning": ("Segoe UI", 9, "bold"),
+    "tab": ("Segoe UI", 9, "bold"),
+    "button": ("Segoe UI", 9, "normal"),
+    "compact_button": ("Segoe UI", 8, "normal"),
+    "tree": ("Segoe UI", 9, "normal"),
+    "tree_heading": ("Segoe UI", 9, "bold"),
+    "log": ("Cascadia Mono", 8, "normal"),
+    "primary_button": ("Segoe UI", 11, "bold"),
+}
 
 
 class FolderBridgeLauncher:
@@ -64,15 +90,22 @@ class FolderBridgeLauncher:
         self.events: queue.Queue[tuple[str, object]] = queue.Queue(maxsize=1_000)
         self.supervisor = TunnelSupervisor(self._queue_tunnel_output)
         self.extension_registry = ExtensionRegistry()
+        self.skill_engine = SkillEngine()
         self.managed_services = default_managed_service_manager()
         self._managed_service_states: dict[str, dict[str, object]] = {}
         self._managed_service_busy: set[str] = set()
         self._managed_service_prompted: set[str] = set()
         self._managed_service_startup_logged: set[str] = set()
         self._sidebar_visible = False
+        self._collapsible_sections: dict[str, dict[str, object]] = {}
         self.extension_vars: dict[str, tk.BooleanVar] = {}
+        self.skill_vars: dict[str, tk.BooleanVar] = {}
         self.managed_service_auto_vars: dict[str, tk.BooleanVar] = {}
+        self.managed_service_status_labels: dict[str, ttk.Label] = {}
+        self._managed_service_status_pending: set[str] = set()
         self._extension_wrapped_labels: list[ttk.Label] = []
+        self._fonts: dict[str, tkfont.Font] = {}
+        self._guide_text_widgets: list[tk.Text] = []
         self._busy = False
         self._closing = False
         self._shutdown_in_progress = False
@@ -87,6 +120,10 @@ class FolderBridgeLauncher:
         self._configure_window()
         self._configure_styles()
         self._build_ui()
+        self.root.bind_all("<MouseWheel>", self._on_mousewheel, add="+")
+        self.root.bind_all("<Button-4>", self._on_mousewheel, add="+")
+        self.root.bind_all("<Button-5>", self._on_mousewheel, add="+")
+        self.root.after_idle(self._fit_window_to_content)
         self._refresh_status_cards()
         self._set_connection_state("stopped")
         self._log("启动器已就绪。默认只读，不会保存 Runtime API Key。")
@@ -98,6 +135,7 @@ class FolderBridgeLauncher:
         self.root.after(1800, lambda: self._initialize_managed_services(final_pass=True))
         self.root.after(400, self._poll_dpi)
         self.root.after(500, self._poll_process)
+        self.root.after(MANAGED_SERVICE_STATUS_POLL_MS, self._poll_managed_service_statuses)
 
     def _create_variables(self) -> None:
         self.workspace_paths = list(self.settings.workspaces)
@@ -141,12 +179,13 @@ class FolderBridgeLauncher:
             self.root.tk.call("tk", "scaling", tk_scaling_for_dpi(self._dpi))
         except tk.TclError:
             pass
-        width, height = fitted_window_size(
-            self._dpi,
-            self.root.winfo_screenwidth(),
-            self.root.winfo_screenheight(),
-        )
-        self.root.geometry(f"{width}x{height}")
+        work_left, work_top, work_right, work_bottom = window_work_area(self.root)
+        work_width = max(1, work_right - work_left)
+        work_height = max(1, work_bottom - work_top)
+        width, height = fitted_window_size(self._dpi, work_width, work_height)
+        x = work_left + max(0, (work_width - width) // 2)
+        y = work_top + max(0, (work_height - height) // 2)
+        self.root.geometry(f"{width}x{height}{x:+d}{y:+d}")
         self.root.minsize(
             min(self._px(820), width),
             min(self._px(700), height),
@@ -154,6 +193,23 @@ class FolderBridgeLauncher:
 
     def _px(self, value: int | float) -> int:
         return scaled_pixels(value, self._ui_scale)
+
+    def _font(self, name: str) -> tkfont.Font:
+        return self._fonts[name]
+
+    def _refresh_fonts(self) -> None:
+        for name, (family, point_size, weight) in DPI_FONT_SPECS.items():
+            pixel_size = font_pixel_size(point_size, self._dpi)
+            managed = self._fonts.get(name)
+            if managed is None:
+                self._fonts[name] = tkfont.Font(
+                    root=self.root,
+                    family=family,
+                    size=pixel_size,
+                    weight=weight,
+                )
+            else:
+                managed.configure(family=family, size=pixel_size, weight=weight)
 
     def _schedule_dpi_refresh(self, event: tk.Event[tk.Misc]) -> None:
         if event.widget is not self.root or self._closing:
@@ -186,16 +242,18 @@ class FolderBridgeLauncher:
         except tk.TclError:
             pass
         self._configure_styles()
+        work_left, work_top, work_right, work_bottom = window_work_area(self.root)
         width, height = fitted_window_size(
             current_dpi,
-            self.root.winfo_screenwidth(),
-            self.root.winfo_screenheight(),
+            max(1, work_right - work_left),
+            max(1, work_bottom - work_top),
         )
         self.root.minsize(
             min(self._px(820), width),
             min(self._px(700), height),
         )
         self._refresh_dpi_metrics()
+        self.root.after_idle(self._fit_window_to_content)
 
     def _refresh_dpi_metrics(self) -> None:
         if hasattr(self, "page"):
@@ -225,6 +283,20 @@ class FolderBridgeLauncher:
             self.log.configure(padx=self._px(10), pady=self._px(9))
         if hasattr(self, "start_button"):
             self.start_button.configure(padx=self._px(24), pady=self._px(9))
+        for guide_text in getattr(self, "_guide_text_widgets", []):
+            try:
+                guide_text.tag_configure("title", spacing3=self._px(12))
+                guide_text.tag_configure("step", spacing3=self._px(9))
+                guide_text.tag_configure(
+                    "warning",
+                    lmargin1=self._px(10),
+                    lmargin2=self._px(10),
+                    rmargin=self._px(10),
+                    spacing1=self._px(4),
+                    spacing3=self._px(8),
+                )
+            except tk.TclError:
+                pass
 
     def _configure_styles(self) -> None:
         style = ttk.Style(self.root)
@@ -232,28 +304,32 @@ class FolderBridgeLauncher:
             style.theme_use("vista" if os.name == "nt" else "clam")
         except tk.TclError:
             pass
+        self._refresh_fonts()
         style.configure("Page.TFrame", background="#f4f6fa")
         style.configure("Card.TFrame", background="#ffffff", relief="flat")
-        style.configure("Title.TLabel", background="#f4f6fa", foreground="#172033", font=("Segoe UI", 19, "bold"))
-        style.configure("Subtitle.TLabel", background="#f4f6fa", foreground="#62708a", font=("Segoe UI", 10))
-        style.configure("CardTitle.TLabel", background="#ffffff", foreground="#172033", font=("Segoe UI", 11, "bold"))
-        style.configure("Body.TLabel", background="#ffffff", foreground="#4d5a72", font=("Segoe UI", 9))
-        style.configure("Field.TLabel", background="#ffffff", foreground="#364157", font=("Segoe UI", 9, "bold"))
-        style.configure("Status.TLabel", background="#ffffff", foreground="#172033", font=("Segoe UI", 10, "bold"))
-        style.configure("Muted.TLabel", background="#ffffff", foreground="#7a869c", font=("Segoe UI", 8))
+        style.configure("Title.TLabel", background="#f4f6fa", foreground="#172033", font=self._font("title"))
+        style.configure("Subtitle.TLabel", background="#f4f6fa", foreground="#62708a", font=self._font("subtitle"))
+        style.configure("CardTitle.TLabel", background="#ffffff", foreground="#172033", font=self._font("card_title"))
+        style.configure("Body.TLabel", background="#ffffff", foreground="#4d5a72", font=self._font("body"))
+        style.configure("Field.TLabel", background="#ffffff", foreground="#364157", font=self._font("field"))
+        style.configure("Status.TLabel", background="#ffffff", foreground="#172033", font=self._font("status"))
+        style.configure("Muted.TLabel", background="#ffffff", foreground="#7a869c", font=self._font("muted"))
+        style.configure("ServiceOnline.TLabel", background="#ffffff", foreground="#16803c", font=self._font("service"))
+        style.configure("ServiceOffline.TLabel", background="#ffffff", foreground="#c62828", font=self._font("service"))
+        style.configure("ServicePending.TLabel", background="#ffffff", foreground="#7a869c", font=self._font("service"))
         style.configure("Guide.TFrame", background="#ffffff")
-        style.configure("GuideTitle.TLabel", background="#ffffff", foreground="#172033", font=("Segoe UI", 14, "bold"))
-        style.configure("GuideStep.TLabel", background="#ffffff", foreground="#364157", font=("Segoe UI", 9))
-        style.configure("GuideWarn.TLabel", background="#fff1f2", foreground="#b42318", font=("Segoe UI", 9, "bold"))
+        style.configure("GuideTitle.TLabel", background="#ffffff", foreground="#172033", font=self._font("guide_title"))
+        style.configure("GuideStep.TLabel", background="#ffffff", foreground="#364157", font=self._font("guide_step"))
+        style.configure("GuideWarn.TLabel", background="#fff1f2", foreground="#b42318", font=self._font("guide_warning"))
         style.configure("TNotebook", background="#ffffff", borderwidth=0)
-        style.configure("TNotebook.Tab", padding=(self._px(12), self._px(8)), font=("Segoe UI", 9, "bold"))
-        style.configure("TEntry", padding=self._px(6))
-        style.configure("TButton", padding=(self._px(10), self._px(7)), font=("Segoe UI", 9))
-        style.configure("Compact.TButton", padding=(self._px(6), self._px(2)), font=("Segoe UI", 8))
-        style.configure("TRadiobutton", background="#ffffff", font=("Segoe UI", 9))
-        style.configure("TCheckbutton", background="#ffffff", font=("Segoe UI", 9))
-        style.configure("Workspace.Treeview", font=("Segoe UI", 9), rowheight=self._px(25))
-        style.configure("Workspace.Treeview.Heading", font=("Segoe UI", 9, "bold"))
+        style.configure("TNotebook.Tab", padding=(self._px(12), self._px(8)), font=self._font("tab"))
+        style.configure("TEntry", padding=self._px(6), font=self._font("body"))
+        style.configure("TButton", padding=(self._px(10), self._px(7)), font=self._font("button"))
+        style.configure("Compact.TButton", padding=(self._px(6), self._px(2)), font=self._font("compact_button"))
+        style.configure("TRadiobutton", background="#ffffff", font=self._font("body"))
+        style.configure("TCheckbutton", background="#ffffff", font=self._font("body"))
+        style.configure("Workspace.Treeview", font=self._font("tree"), rowheight=self._px(25))
+        style.configure("Workspace.Treeview.Heading", font=self._font("tree_heading"))
 
     def _build_ui(self) -> None:
         shell = ttk.Frame(self.root, style="Page.TFrame")
@@ -271,10 +347,10 @@ class FolderBridgeLauncher:
             highlightthickness=0,
             borderwidth=0,
         )
-        page_scrollbar = ttk.Scrollbar(main, orient="vertical", command=self.page_canvas.yview)
-        self.page_canvas.configure(yscrollcommand=page_scrollbar.set)
+        self.page_scrollbar = ttk.Scrollbar(main, orient="vertical", command=self.page_canvas.yview)
+        self.page_canvas.configure(yscrollcommand=self.page_scrollbar.set)
         self.page_canvas.grid(row=0, column=0, sticky="nsew")
-        page_scrollbar.grid(row=0, column=1, sticky="ns")
+        self.page_scrollbar.grid(row=0, column=1, sticky="ns")
 
         self.page = ttk.Frame(
             self.page_canvas,
@@ -283,11 +359,7 @@ class FolderBridgeLauncher:
         )
         page = self.page
         self._page_window_id = self.page_canvas.create_window((0, 0), window=page, anchor="nw")
-        page.bind(
-            "<Configure>",
-            lambda _event: self.page_canvas.configure(scrollregion=self.page_canvas.bbox("all")),
-            add="+",
-        )
+        page.bind("<Configure>", self._on_page_content_configure, add="+")
         self.page_canvas.bind("<Configure>", self._resize_page_canvas, add="+")
         page.columnconfigure(0, weight=1)
         page.rowconfigure(4, weight=1)
@@ -303,24 +375,231 @@ class FolderBridgeLauncher:
         ).grid(row=1, column=0, sticky="w", pady=(2, 0))
         self.guide_button = ttk.Button(header, text="连接设置向导", command=self._open_web_setup)
         self.guide_button.grid(row=0, column=1, rowspan=2, sticky="e")
-        self.extension_toggle_button = ttk.Button(header, text="插件 ▸", command=self._toggle_extension_sidebar)
-        self.extension_toggle_button.grid(row=0, column=2, rowspan=2, sticky="e", padx=(8, 0))
+        self.sections_toggle_button = ttk.Button(
+            header,
+            text="全部折叠",
+            command=self._toggle_all_sections,
+        )
+        self.sections_toggle_button.grid(row=0, column=2, rowspan=2, sticky="e", padx=(8, 0))
+        self.extension_toggle_button = ttk.Button(header, text="扩展与 Skills ▸", command=self._toggle_extension_sidebar)
+        self.extension_toggle_button.grid(row=0, column=3, rowspan=2, sticky="e", padx=(8, 0))
 
         self._build_overview(page).grid(row=1, column=0, sticky="ew", pady=(0, 12))
-        self._build_local_settings(page).grid(row=2, column=0, sticky="ew", pady=(0, 12))
-        self._build_tunnel_settings(page).grid(row=3, column=0, sticky="ew", pady=(0, 12))
-        self._build_log(page).grid(row=4, column=0, sticky="nsew", pady=(0, 12))
+
+        local_card = self._build_local_settings(page)
+        local_card.grid(row=2, column=0, sticky="ew", pady=(0, 12))
+        self._register_collapsible_section("local", local_card, button_column=3)
+
+        tunnel_card = self._build_tunnel_settings(page)
+        tunnel_card.grid(row=3, column=0, sticky="ew", pady=(0, 12))
+        self._register_collapsible_section("tunnel", tunnel_card, button_column=4)
+
+        log_card = self._build_log(page)
+        log_card.grid(row=4, column=0, sticky="nsew", pady=(0, 12))
+        self._register_collapsible_section(
+            "log",
+            log_card,
+            button_parent=self.log_header_bar,
+            button_column=2,
+        )
         self._build_actions(page).grid(row=5, column=0, sticky="ew")
 
         self.extension_sidebar = self._build_extension_sidebar(shell)
         self.extension_sidebar.grid(row=0, column=1, sticky="ns", padx=(0, 12), pady=12)
         self.extension_sidebar.grid_remove()
 
+    def _register_collapsible_section(
+        self,
+        key: str,
+        card: ttk.Frame,
+        *,
+        button_column: int,
+        button_parent: ttk.Frame | None = None,
+    ) -> None:
+        content_widgets: list[tk.Misc] = []
+        for child in card.winfo_children():
+            try:
+                row = int(child.grid_info().get("row", 0))
+            except (tk.TclError, TypeError, ValueError):
+                continue
+            if row >= 1:
+                content_widgets.append(child)
+
+        parent = button_parent or card
+        button = ttk.Button(
+            parent,
+            text="收起 ▴",
+            command=lambda section_key=key: self._toggle_section(section_key),
+        )
+        button.grid(row=0, column=button_column, sticky="e", padx=(8, 0))
+        self._collapsible_sections[key] = {
+            "card": card,
+            "widgets": content_widgets,
+            "button": button,
+            "collapsed": False,
+        }
+        self._sync_sections_toggle_button()
+
+    def _toggle_section(self, key: str) -> None:
+        section = self._collapsible_sections.get(key)
+        if section is None:
+            return
+        self._set_section_collapsed(key, not bool(section.get("collapsed")))
+
+    def _set_section_collapsed(self, key: str, collapsed: bool) -> None:
+        section = self._collapsible_sections.get(key)
+        if section is None:
+            return
+        widgets = section.get("widgets", [])
+        if isinstance(widgets, list):
+            for widget in widgets:
+                if not isinstance(widget, tk.Misc):
+                    continue
+                try:
+                    if collapsed:
+                        widget.grid_remove()
+                    else:
+                        widget.grid()
+                except tk.TclError:
+                    continue
+        section["collapsed"] = bool(collapsed)
+        button = section.get("button")
+        if isinstance(button, ttk.Button):
+            button.configure(text="展开 ▾" if collapsed else "收起 ▴")
+        if key == "log":
+            card = section.get("card")
+            if isinstance(card, ttk.Frame):
+                card.rowconfigure(1, weight=0 if collapsed else 1)
+        self._sync_sections_toggle_button()
+        self.root.after_idle(self._fit_window_to_content)
+
+    def _toggle_all_sections(self) -> None:
+        if not self._collapsible_sections:
+            return
+        collapse = any(not bool(section.get("collapsed")) for section in self._collapsible_sections.values())
+        for key in tuple(self._collapsible_sections):
+            self._set_section_collapsed(key, collapse)
+        self._sync_sections_toggle_button()
+        self.root.after_idle(self._fit_window_to_content)
+
+    def _sync_sections_toggle_button(self) -> None:
+        if not hasattr(self, "sections_toggle_button") or not self._collapsible_sections:
+            return
+        all_collapsed = all(bool(section.get("collapsed")) for section in self._collapsible_sections.values())
+        self.sections_toggle_button.configure(text="全部展开" if all_collapsed else "全部折叠")
+
+    def _on_page_content_configure(self, _event: tk.Event[tk.Misc]) -> None:
+        if not hasattr(self, "page_canvas"):
+            return
+        self.page_canvas.configure(scrollregion=self.page_canvas.bbox("all"))
+        self.root.after_idle(self._update_page_scrollbar)
+
     def _resize_page_canvas(self, event: tk.Event[tk.Misc]) -> None:
         if not hasattr(self, "_page_window_id"):
             return
         self.page_canvas.itemconfigure(self._page_window_id, width=max(1, event.width))
         self.page_canvas.configure(scrollregion=self.page_canvas.bbox("all"))
+        self.root.after_idle(self._update_page_scrollbar)
+
+    @staticmethod
+    def _is_descendant_of(widget: tk.Misc, ancestor: tk.Misc) -> bool:
+        current: tk.Misc | None = widget
+        while current is not None:
+            if current is ancestor:
+                return True
+            current = current.master
+        return False
+
+    def _has_independent_wheel_scroll(self, widget: tk.Misc) -> bool:
+        current: tk.Misc | None = widget
+        native_scrollers = (tk.Text, tk.Listbox, tk.Spinbox, ttk.Treeview, ttk.Combobox, ttk.Scrollbar)
+        while current is not None and current is not self.page_canvas:
+            if isinstance(current, native_scrollers):
+                return True
+            if isinstance(current, tk.Canvas):
+                try:
+                    if str(current.cget("yscrollcommand")):
+                        return True
+                except tk.TclError:
+                    return True
+            current = current.master
+        return False
+
+    @staticmethod
+    def _mousewheel_units(event: tk.Event[tk.Misc]) -> int:
+        delta = int(getattr(event, "delta", 0) or 0)
+        if delta > 0:
+            return -3
+        if delta < 0:
+            return 3
+        button = getattr(event, "num", None)
+        if button == 4:
+            return -3
+        if button == 5:
+            return 3
+        return 0
+
+    def _on_mousewheel(self, event: tk.Event[tk.Misc]) -> str | None:
+        if self._closing:
+            return None
+        units = self._mousewheel_units(event)
+        if units == 0 or not isinstance(event.widget, tk.Misc):
+            return None
+        widget = event.widget
+        if hasattr(self, "extension_canvas") and self._is_descendant_of(widget, self.extension_canvas):
+            self.extension_canvas.yview_scroll(units, "units")
+            return "break"
+        if not hasattr(self, "page_canvas") or not self._is_descendant_of(widget, self.page_canvas):
+            return None
+        if self._has_independent_wheel_scroll(widget):
+            return None
+        self.page_canvas.yview_scroll(units, "units")
+        return "break"
+
+    def _update_page_scrollbar(self) -> None:
+        if self._closing or not hasattr(self, "page_scrollbar") or not hasattr(self, "page"):
+            return
+        try:
+            self.root.update_idletasks()
+            content_height = self.page.winfo_reqheight()
+            viewport_height = self.page_canvas.winfo_height()
+            needed = content_height > viewport_height + self._px(2)
+            if needed:
+                self.page_scrollbar.grid()
+            else:
+                self.page_canvas.yview_moveto(0.0)
+                self.page_scrollbar.grid_remove()
+        except tk.TclError:
+            return
+
+    def _fit_window_to_content(self) -> None:
+        """Fit requested content inside the current monitor work area; scroll when capped."""
+        if self._closing or not hasattr(self, "page"):
+            return
+        try:
+            self.root.update_idletasks()
+            work_left, work_top, work_right, work_bottom = window_work_area(self.root)
+            work_width = max(1, work_right - work_left)
+            work_height = max(1, work_bottom - work_top)
+            max_width = max(1, round(work_width * 0.94))
+            max_height = max(1, round(work_height * 0.90))
+            content_width = max(self._px(940), self.page.winfo_reqwidth())
+            content_height = max(self._px(820), self.page.winfo_reqheight() + self._px(8))
+            if self._sidebar_visible and hasattr(self, "extension_sidebar"):
+                content_width += self._px(332)
+            width = min(content_width, max_width)
+            height = min(content_height, max_height)
+            current_x = int(self.root.winfo_x())
+            current_y = int(self.root.winfo_y())
+            max_x = max(work_left, work_right - width)
+            max_y = max(work_top, work_bottom - height)
+            x = min(max(current_x, work_left), max_x)
+            y = min(max(current_y, work_top), max_y)
+            self.root.geometry(f"{width}x{height}{x:+d}{y:+d}")
+            self.root.minsize(min(self._px(820), width), min(self._px(700), height))
+            self.root.after_idle(self._update_page_scrollbar)
+        except tk.TclError:
+            return
 
     def _build_extension_sidebar(self, parent: ttk.Frame) -> ttk.Frame:
         frame = ttk.Frame(parent, style="Card.TFrame", padding=self._px(14), width=self._px(320))
@@ -331,12 +610,13 @@ class FolderBridgeLauncher:
         header = ttk.Frame(frame, style="Card.TFrame")
         header.grid(row=0, column=0, sticky="ew")
         header.columnconfigure(0, weight=1)
-        ttk.Label(header, text="Extensions", style="CardTitle.TLabel").grid(row=0, column=0, sticky="w")
+        ttk.Label(header, text="Extensions & Skills", style="CardTitle.TLabel").grid(row=0, column=0, sticky="w")
         ttk.Button(header, text="重新扫描", command=self._rescan_extensions).grid(row=0, column=1, padx=(6, 0))
         ttk.Button(header, text="插件目录", command=self._open_extension_folder).grid(row=0, column=2, padx=(6, 0))
+        ttk.Button(header, text="Skill 目录", command=self._open_skill_folder).grid(row=0, column=3, padx=(6, 0))
         self.extension_sidebar_hint = ttk.Label(
             frame,
-            text="默认折叠 · 热扫描 · 勾选即全局批准/加载；新插件不会新增 MCP tool。",
+            text="默认折叠 · 热扫描 · Extensions 与 Skill Packs 分开授权；新增 Skill 不会新增 MCP tool。",
             style="Muted.TLabel",
             wraplength=self._px(285),
         )
@@ -366,27 +646,15 @@ class FolderBridgeLauncher:
 
     def _toggle_extension_sidebar(self) -> None:
         self._sidebar_visible = not self._sidebar_visible
-        current_width = max(1, self.root.winfo_width())
-        current_height = max(1, self.root.winfo_height())
         if self._sidebar_visible:
             self._refresh_extension_sidebar()
             self._refresh_managed_service_statuses_async()
             self.extension_sidebar.grid()
-            self.extension_toggle_button.configure(text="插件 ◂")
-            self._sidebar_original_width = current_width
-            available = max(current_width, self.root.winfo_screenwidth() - self._px(40))
-            added = min(self._px(330), max(0, available - current_width))
-            self._sidebar_width_added = added
-            if added:
-                self.root.geometry(f"{current_width + added}x{current_height}")
+            self.extension_toggle_button.configure(text="扩展与 Skills ◂")
         else:
             self.extension_sidebar.grid_remove()
-            self.extension_toggle_button.configure(text="插件 ▸")
-            original = int(getattr(self, "_sidebar_original_width", 0))
-            if original:
-                self.root.geometry(f"{original}x{current_height}")
-            self._sidebar_width_added = 0
-            self._sidebar_original_width = 0
+            self.extension_toggle_button.configure(text="扩展与 Skills ▸")
+        self.root.after_idle(self._fit_window_to_content)
 
     def _refresh_extension_sidebar(self) -> None:
         if not hasattr(self, "extension_list_frame"):
@@ -394,7 +662,9 @@ class FolderBridgeLauncher:
         for child in self.extension_list_frame.winfo_children():
             child.destroy()
         self.extension_vars = {}
+        self.skill_vars = {}
         self.managed_service_auto_vars = {}
+        self.managed_service_status_labels = {}
         self._extension_wrapped_labels = []
         description = self.extension_registry.describe()
         extensions = description.get("extensions", [])
@@ -458,25 +728,16 @@ class FolderBridgeLauncher:
                 }
                 online = bool(service_state.get("online"))
                 owned = bool(service_state.get("owned"))
-                external = bool(service_state.get("external"))
                 busy = extension_id in self._managed_service_busy
                 install_root = str(service_state.get("install_root") or config.install_root or "")
-                auto_start = bool(service_state.get("auto_start", config.auto_start))
-                if busy and not online:
-                    service_text = "服务：正在启动 / 检测…"
-                elif cached is None:
-                    service_text = "服务：检测中…"
-                elif online and owned:
-                    service_text = "服务：在线 · FolderBridge 托管"
-                elif online and external:
-                    service_text = "服务：在线 · 外部服务（不会被 FolderBridge 终止）"
-                elif not install_root:
-                    service_text = "服务：等待配置安装目录 · 自动启动尚未执行"
-                elif not auto_start:
-                    service_text = "服务：离线 · 自动启动已关闭"
-                else:
-                    service_text = "服务：离线"
-                service_label = ttk.Label(card, text=service_text, style="Muted.TLabel", wraplength=self._px(270))
+                service_text, service_style = self._managed_service_status_presentation(
+                    extension_id,
+                    service_state,
+                    config,
+                    cached=cached is not None,
+                )
+                service_label = ttk.Label(card, text=service_text, style=service_style, wraplength=self._px(270))
+                self.managed_service_status_labels[extension_id] = service_label
                 service_label.pack(anchor="w", padx=(22, 0), pady=(4, 0))
                 self._extension_wrapped_labels.append(service_label)
                 path_label = ttk.Label(
@@ -543,7 +804,232 @@ class FolderBridgeLauncher:
             )
             error_label.pack(fill="x", pady=(3, 6))
             self._extension_wrapped_labels.append(error_label)
+        self._render_skill_pack_section()
         self.root.after_idle(lambda: self.extension_canvas.configure(scrollregion=self.extension_canvas.bbox("all")))
+
+    def _render_skill_pack_section(self) -> None:
+        ttk.Separator(self.extension_list_frame, orient="horizontal").pack(fill="x", pady=(8, 8))
+        ttk.Label(self.extension_list_frame, text="Skill Packs", style="CardTitle.TLabel").pack(anchor="w", pady=(0, 4))
+        skill_hint = ttk.Label(
+            self.extension_list_frame,
+            text="Skill 是按需加载的方法文本，不执行本地代码；外部 Pack 需核对精确 hash 后批准。",
+            style="Muted.TLabel",
+            wraplength=self._px(270),
+        )
+        skill_hint.pack(fill="x", pady=(0, 6))
+        self._extension_wrapped_labels.append(skill_hint)
+        description = self.skill_engine.describe(include_untrusted=True)
+        packs = description.get("packs", [])
+        if not packs:
+            empty = ttk.Label(
+                self.extension_list_frame,
+                text="未发现 Skill Pack。可把符合格式的 Pack 放入 Skill 目录后重新扫描。",
+                style="Body.TLabel",
+                wraplength=self._px(270),
+            )
+            empty.pack(fill="x", pady=(2, 8))
+            self._extension_wrapped_labels.append(empty)
+        for item in packs:
+            pack_id = str(item["id"])
+            card = ttk.Frame(self.extension_list_frame, style="Card.TFrame", padding=(0, 4, 0, 8))
+            card.pack(fill="x")
+            var = tk.BooleanVar(value=bool(item.get("enabled")))
+            self.skill_vars[pack_id] = var
+            ttk.Checkbutton(
+                card,
+                text=f"{item['name']}  {item['version']}",
+                variable=var,
+                command=lambda pid=pack_id, current=item: self._toggle_skill_enabled(pid, current),
+            ).pack(anchor="w")
+            if item.get("approval_stale"):
+                status = "⚠ 内容已变化 · 需重新核对 hash"
+            elif item.get("bundled") and item.get("enabled"):
+                status = "✓ 内置 · 已启用"
+            elif item.get("bundled"):
+                status = "内置 · 已停用"
+            elif item.get("trusted") and item.get("enabled"):
+                status = "✓ 已批准 · 已启用"
+            elif item.get("trusted"):
+                status = "已批准 · 已停用"
+            else:
+                status = "未批准"
+            status_label = ttk.Label(card, text=status, style="Muted.TLabel", wraplength=self._px(270))
+            status_label.pack(anchor="w", padx=(22, 0))
+            self._extension_wrapped_labels.append(status_label)
+            meta_label = ttk.Label(
+                card,
+                text=f"{item.get('skill_count', 0)} Skills · SHA-256 {str(item['sha256'])[:12]}…",
+                style="Muted.TLabel",
+                wraplength=self._px(270),
+            )
+            meta_label.pack(anchor="w", padx=(22, 0), pady=(2, 0))
+            self._extension_wrapped_labels.append(meta_label)
+            buttons = ttk.Frame(card, style="Card.TFrame")
+            buttons.pack(anchor="e", pady=(3, 0))
+            ttk.Button(
+                buttons,
+                text="详情",
+                command=lambda current=item: self._show_skill_pack_details(current),
+            ).pack(side="left")
+            if not item.get("bundled") and (item.get("trusted") or item.get("approval_stale")):
+                ttk.Button(
+                    buttons,
+                    text="撤销批准",
+                    command=lambda pid=pack_id: self._revoke_skill_pack(pid),
+                ).pack(side="left", padx=(6, 0))
+        for error in description.get("errors", []):
+            error_label = ttk.Label(
+                self.extension_list_frame,
+                text=f"Skill Pack 加载失败：{error.get('path', '')}\n{error.get('error', '')}",
+                style="GuideWarn.TLabel",
+                wraplength=self._px(270),
+            )
+            error_label.pack(fill="x", pady=(3, 6))
+            self._extension_wrapped_labels.append(error_label)
+
+    def _toggle_skill_enabled(self, pack_id: str, item: dict[str, object]) -> None:
+        var = self.skill_vars.get(pack_id)
+        if var is None:
+            return
+        try:
+            if var.get():
+                if not bool(item.get("trusted")):
+                    source = item.get("source") if isinstance(item.get("source"), dict) else {}
+                    source = source if isinstance(source, dict) else {}
+                    source_lines = [
+                        value
+                        for value in (
+                            str(source.get("repository") or ""),
+                            str(source.get("ref") or ""),
+                            str(source.get("license") or ""),
+                        )
+                        if value
+                    ]
+                    source_summary = " · ".join(source_lines) or "未声明"
+                    skills = item.get("skills", [])
+                    skill_names = "\n".join(
+                        f"• {entry.get('name', entry.get('id', ''))}"
+                        for entry in skills
+                        if isinstance(entry, dict)
+                    ) or "• 未声明 Skill"
+                    warning = (
+                        f"批准并启用 Skill Pack：{item.get('name', pack_id)} {item.get('version', '')}\n\n"
+                        f"SHA-256：{item['sha256']}\n"
+                        f"来源：{source_summary}\n\n包含：\n{skill_names}\n\n"
+                        "Skill 文本不会执行本地代码，但会影响模型的方法选择和行为。\n"
+                        "任何 Pack 文件发生变化后，本批准会自动失效。"
+                    )
+                    if not messagebox.askyesno("批准 FolderBridge Skill Pack", warning, parent=self.root):
+                        var.set(False)
+                        return
+                    self.skill_engine.approve_pack(pack_id, item["sha256"])
+                self.skill_engine.set_enabled(pack_id, True)
+                self._log(f"Skill Pack 已启用：{item.get('name', pack_id)}")
+            else:
+                self.skill_engine.set_enabled(pack_id, False)
+                self._log(f"Skill Pack 已停用：{item.get('name', pack_id)}")
+        except (ToolError, OSError, ValueError) as exc:
+            var.set(bool(item.get("enabled")))
+            self._show_error(f"无法更新 Skill Pack：{exc}")
+        finally:
+            self._refresh_extension_sidebar()
+
+    def _revoke_skill_pack(self, pack_id: str) -> None:
+        if not messagebox.askyesno(
+            "撤销 Skill Pack 批准",
+            "撤销该外部 Skill Pack 的本机批准记录并立即停用？之后再次启用时需要重新核对精确 hash。",
+            parent=self.root,
+        ):
+            return
+        try:
+            self.skill_engine.revoke_pack(pack_id)
+            self._log(f"已撤销 Skill Pack 批准：{pack_id}")
+        except (ToolError, OSError, ValueError) as exc:
+            self._show_error(f"无法撤销 Skill Pack 批准：{exc}")
+        finally:
+            self._refresh_extension_sidebar()
+
+    def _show_skill_pack_details(self, item: dict[str, object]) -> None:
+        source = item.get("source") if isinstance(item.get("source"), dict) else {}
+        source = source if isinstance(source, dict) else {}
+        skills = item.get("skills", [])
+        skill_lines = "\n".join(
+            f"• {entry.get('name', entry.get('id', ''))}"
+            for entry in skills
+            if isinstance(entry, dict)
+        ) or "• 无"
+        source_lines = [
+            value
+            for value in (
+                str(source.get("repository") or ""),
+                str(source.get("ref") or ""),
+                str(source.get("license") or ""),
+            )
+            if value
+        ]
+        messagebox.showinfo(
+            "Skill Pack 详情",
+            f"{item.get('name', '')} {item.get('version', '')}\n"
+            f"ID: {item.get('id', '')}\n"
+            f"Bundled: {item.get('bundled', False)}\n"
+            f"Trusted: {item.get('trusted', False)} · Enabled: {item.get('enabled', False)}\n"
+            f"SHA-256: {item.get('sha256', '')}\n"
+            f"来源：{' · '.join(source_lines) or '未声明'}\n\n"
+            f"Skills：\n{skill_lines}\n\n{item.get('description', '')}",
+            parent=self.root,
+        )
+
+    def _open_skill_folder(self) -> None:
+        folder = skill_pack_root_path()
+        try:
+            folder.mkdir(parents=True, exist_ok=True)
+            if os.name == "nt":
+                os.startfile(folder)  # type: ignore[attr-defined]
+            else:
+                webbrowser.open(folder.as_uri())
+            self._log(f"已打开 Skill Pack 目录：{folder}")
+        except OSError as exc:
+            self._show_error(f"无法打开 Skill Pack 目录：{exc}")
+
+    def _managed_service_status_presentation(
+        self,
+        extension_id: str,
+        service_state: dict[str, object],
+        config: object,
+        *,
+        cached: bool = True,
+    ) -> tuple[str, str]:
+        online = bool(service_state.get("online"))
+        owned = bool(service_state.get("owned"))
+        external = bool(service_state.get("external"))
+        busy = extension_id in self._managed_service_busy
+        install_root = str(service_state.get("install_root") or getattr(config, "install_root", "") or "")
+        auto_start = bool(service_state.get("auto_start", getattr(config, "auto_start", True)))
+        if busy and not online:
+            return "服务：正在启动 / 检测…", "ServicePending.TLabel"
+        if not cached:
+            return "服务：检测中…", "ServicePending.TLabel"
+        if online and owned:
+            return "服务：在线 · FolderBridge 托管", "ServiceOnline.TLabel"
+        if online and external:
+            return "服务：在线 · 外部服务（不会被 FolderBridge 终止）", "ServiceOnline.TLabel"
+        if not install_root:
+            return "服务：等待配置安装目录 · 自动启动尚未执行", "ServiceOffline.TLabel"
+        if not auto_start:
+            return "服务：离线 · 自动启动已关闭", "ServiceOffline.TLabel"
+        return "服务：离线", "ServiceOffline.TLabel"
+
+    def _update_managed_service_status_label(self, extension_id: str) -> None:
+        label = self.managed_service_status_labels.get(extension_id)
+        controller = self.managed_services.controller(extension_id)
+        state = self._managed_service_states.get(extension_id)
+        if label is None or controller is None or state is None:
+            return
+        text, style = self._managed_service_status_presentation(extension_id, state, controller.config())
+        try:
+            label.configure(text=text, style=style)
+        except tk.TclError:
+            self.managed_service_status_labels.pop(extension_id, None)
 
     def _toggle_extension_enabled(self, extension_id: str) -> None:
         var = self.extension_vars.get(extension_id)
@@ -687,6 +1173,13 @@ class FolderBridgeLauncher:
             if self.managed_services.controller(extension_id) is not None:
                 self._run_managed_service_action(extension_id, "status")
 
+    def _poll_managed_service_statuses(self) -> None:
+        if self._closing:
+            return
+        if self._sidebar_visible:
+            self._refresh_managed_service_statuses_async()
+        self.root.after(MANAGED_SERVICE_STATUS_POLL_MS, self._poll_managed_service_statuses)
+
     def _ensure_managed_service_async(self, extension_id: str) -> None:
         if self.managed_services.controller(extension_id) is not None:
             self._run_managed_service_action(extension_id, "ensure")
@@ -699,10 +1192,18 @@ class FolderBridgeLauncher:
 
     def _run_managed_service_action(self, extension_id: str, action: str) -> None:
         controller = self.managed_services.controller(extension_id)
-        if controller is None or extension_id in self._managed_service_busy or self._closing:
+        if controller is None or self._closing:
             return
-        self._managed_service_busy.add(extension_id)
-        self._refresh_extension_sidebar()
+        if extension_id in self._managed_service_busy:
+            return
+        is_probe = action == "status"
+        if is_probe:
+            if extension_id in self._managed_service_status_pending:
+                return
+            self._managed_service_status_pending.add(extension_id)
+        else:
+            self._managed_service_busy.add(extension_id)
+            self._refresh_extension_sidebar()
 
         def work() -> None:
             try:
@@ -716,13 +1217,13 @@ class FolderBridgeLauncher:
                     state = controller.stop()
                 else:
                     raise ValueError(f"unknown managed service action: {action}")
-                self._queue_event("managed-service-state", (extension_id, state))
+                self._queue_event("managed-service-state", (extension_id, action, state))
                 if action == "ensure" and state.get("reason") == "path-required":
                     self._queue_event("managed-service-path-required", extension_id)
             except (ManagedServiceError, OSError, ValueError) as exc:
                 self._queue_event("managed-service-error", (extension_id, str(exc)))
             finally:
-                self._queue_event("managed-service-idle", extension_id)
+                self._queue_event("managed-service-probe-idle" if is_probe else "managed-service-idle", extension_id)
 
         threading.Thread(
             target=work,
@@ -795,7 +1296,7 @@ class FolderBridgeLauncher:
         def work() -> None:
             try:
                 state = controller.stop()
-                self._queue_event("managed-service-state", (extension_id, state))
+                self._queue_event("managed-service-state", (extension_id, "stop", state))
                 record = self.extension_registry.get(extension_id)
                 if revoke:
                     self.extension_registry.trust_store.revoke(extension_id)
@@ -993,6 +1494,7 @@ class FolderBridgeLauncher:
         bar = ttk.Frame(card, style="Card.TFrame")
         bar.grid(row=0, column=0, sticky="ew", pady=(0, 8))
         bar.columnconfigure(0, weight=1)
+        self.log_header_bar = bar
         ttk.Label(bar, text="运行日志", style="CardTitle.TLabel").grid(row=0, column=0, sticky="w")
         ttk.Button(bar, text="清空", command=self._clear_log).grid(row=0, column=1, sticky="e")
         self.log = scrolledtext.ScrolledText(
@@ -1003,7 +1505,7 @@ class FolderBridgeLauncher:
             background="#101827",
             foreground="#d8e2f0",
             insertbackground="#ffffff",
-            font=("Cascadia Mono", 8),
+            font=self._font("log"),
             padx=self._px(10),
             pady=self._px(9),
             state="disabled",
@@ -1034,7 +1536,7 @@ class FolderBridgeLauncher:
             disabledforeground="#dbe6ff",
             relief="flat",
             cursor="hand2",
-            font=("Segoe UI", 11, "bold"),
+            font=self._font("primary_button"),
             padx=self._px(24),
             pady=self._px(9),
         )
@@ -1617,20 +2119,20 @@ class FolderBridgeLauncher:
         guide_text.tag_configure(
             "title",
             foreground="#172033",
-            font=("Segoe UI", 11, "bold"),
+            font=self._font("card_title"),
             spacing3=self._px(12),
         )
         guide_text.tag_configure(
             "step",
             foreground="#364157",
-            font=("Segoe UI", 9),
+            font=self._font("guide_step"),
             spacing3=self._px(9),
         )
         guide_text.tag_configure(
             "warning",
             background="#fff1f2",
             foreground="#b42318",
-            font=("Segoe UI", 9, "bold"),
+            font=self._font("guide_warning"),
             lmargin1=self._px(10),
             lmargin2=self._px(10),
             rmargin=self._px(10),
@@ -1647,6 +2149,7 @@ class FolderBridgeLauncher:
         guide_text.bind("<Control-a>", self._select_all_guide_text)
         guide_text.bind("<Control-A>", self._select_all_guide_text)
         guide_text.pack(fill="both", expand=True)
+        self._guide_text_widgets.append(guide_text)
         tab.guide_text = guide_text  # type: ignore[attr-defined]
         return tab
 
@@ -1756,9 +2259,11 @@ class FolderBridgeLauncher:
             elif kind == "busy":
                 self._set_busy(bool(payload))
             elif kind == "managed-service-state":
-                extension_id, raw_state = payload  # type: ignore[misc]
+                extension_id, service_action, raw_state = payload  # type: ignore[misc]
+                extension_id = str(extension_id)
+                previous = self._managed_service_states.get(extension_id)
                 state = dict(raw_state)
-                self._managed_service_states[str(extension_id)] = state
+                self._managed_service_states[extension_id] = state
                 warning = str(state.get("warning") or "")
                 if warning:
                     self._log(warning)
@@ -1766,10 +2271,17 @@ class FolderBridgeLauncher:
                     self._log(f"托管服务已启动：{extension_id}")
                 elif state.get("stopped"):
                     self._log(f"托管服务已停止：{extension_id}")
-                self._refresh_extension_sidebar()
+                status_shape = ("online", "owned", "external", "install_root", "auto_start")
+                state_changed = previous is None or any(previous.get(key) != state.get(key) for key in status_shape)
+                if service_action == "status" and not state_changed:
+                    self._update_managed_service_status_label(extension_id)
+                else:
+                    self._refresh_extension_sidebar()
             elif kind == "managed-service-idle":
                 self._managed_service_busy.discard(str(payload))
                 self._refresh_extension_sidebar()
+            elif kind == "managed-service-probe-idle":
+                self._managed_service_status_pending.discard(str(payload))
             elif kind == "managed-service-path-required":
                 extension_id = str(payload)
                 self._log("ComfyUI 尚未配置安装目录；自动启动会等待首次选择。请在右侧 Extensions 中选择 Portable 或源码安装根目录。")

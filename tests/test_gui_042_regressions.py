@@ -18,6 +18,50 @@ class Gui042RegressionTests(unittest.TestCase):
         self.assertIn("def _resize_page_canvas", self.gui)
         self.assertIn('self.page_canvas.configure(scrollregion=self.page_canvas.bbox("all"))', self.gui)
 
+    def test_launcher_grows_to_requested_content_before_falling_back_to_scroll(self) -> None:
+        self.assertIn("self.root.after_idle(self._fit_window_to_content)", self.gui)
+        self.assertIn("def _fit_window_to_content", self.gui)
+        self.assertIn("self.page.winfo_reqheight()", self.gui)
+        self.assertIn("window_work_area(self.root)", self.gui)
+        self.assertNotIn("screen_height * 0.94", self.gui)
+        self.assertIn("def _update_page_scrollbar", self.gui)
+        self.assertIn("self.page_scrollbar.grid_remove()", self.gui)
+        self.assertIn("content_height > viewport_height", self.gui)
+
+    def test_main_page_mousewheel_scrolls_blank_area_without_hijacking_nested_scrollers(self) -> None:
+        self.assertIn('self.root.bind_all("<MouseWheel>", self._on_mousewheel, add="+")', self.gui)
+        self.assertIn("def _on_mousewheel", self.gui)
+        self.assertIn("def _has_independent_wheel_scroll", self.gui)
+        self.assertIn("ttk.Treeview", self.gui)
+        self.assertIn("ttk.Combobox", self.gui)
+        self.assertIn("tk.Text", self.gui)
+        self.assertIn("yscrollcommand", self.gui)
+        self.assertIn("self.page_canvas.yview_scroll", self.gui)
+        self.assertIn("self.extension_canvas.yview_scroll", self.gui)
+
+    def test_window_fit_uses_monitor_work_area_and_clamps_position(self) -> None:
+        self.assertIn("from .dpi import (", self.gui)
+        self.assertIn("window_work_area", self.gui)
+        fit_block = self.gui.split("def _fit_window_to_content", 1)[1].split("def _build_extension_sidebar", 1)[0]
+        self.assertIn("work_left, work_top, work_right, work_bottom", fit_block)
+        self.assertIn("max_height", fit_block)
+        self.assertIn("self.root.winfo_y()", fit_block)
+        self.assertIn("self.root.geometry", fit_block)
+
+    def test_main_settings_cards_can_collapse_individually_or_together(self) -> None:
+        self.assertIn("self._collapsible_sections", self.gui)
+        self.assertIn("def _register_collapsible_section", self.gui)
+        self.assertIn("def _toggle_section", self.gui)
+        self.assertIn("def _toggle_all_sections", self.gui)
+        self.assertIn('text="全部折叠"', self.gui)
+        self.assertIn('text="收起 ▴"', self.gui)
+        self.assertIn('button.configure(text="展开 ▾" if collapsed else "收起 ▴")', self.gui)
+        self.assertIn('self._register_collapsible_section("local"', self.gui)
+        self.assertIn('self._register_collapsible_section("tunnel"', self.gui)
+        self.assertIn('"log",\n            log_card,', self.gui)
+        self.assertIn("widget.grid_remove()", self.gui)
+        self.assertIn("self.root.after_idle(self._fit_window_to_content)", self.gui)
+
     def test_comfyui_first_run_is_explicit_instead_of_silent(self) -> None:
         self.assertIn("服务：正在启动 / 检测…", self.gui)
         self.assertIn("服务：等待配置安装目录 · 自动启动尚未执行", self.gui)
@@ -31,6 +75,22 @@ class Gui042RegressionTests(unittest.TestCase):
         self.assertIn("def _initialize_managed_services(self, *, final_pass: bool = True)", self.gui)
         self.assertIn("托管服务自动启动检查：", self.gui)
         self.assertIn("Extension 当前未加载", self.gui)
+
+    def test_extensions_sidebar_also_manages_skill_packs_through_core_engine(self) -> None:
+        self.assertIn("from .skills import SkillEngine, skill_pack_root_path", self.gui)
+        self.assertIn("self.skill_engine = SkillEngine()", self.gui)
+        self.assertIn('text="Extensions & Skills"', self.gui)
+        self.assertIn('text="Skill 目录"', self.gui)
+        self.assertIn("self.skill_engine.describe(include_untrusted=True)", self.gui)
+        self.assertIn("self.skill_engine.approve_pack(pack_id, item[\"sha256\"])", self.gui)
+        self.assertIn("self.skill_engine.set_enabled(pack_id, True)", self.gui)
+        self.assertIn("self.skill_engine.set_enabled(pack_id, False)", self.gui)
+        self.assertIn("self.skill_engine.revoke_pack(pack_id)", self.gui)
+        self.assertIn("Skill 文本不会执行本地代码", self.gui)
+        self.assertIn("但会影响模型的方法选择和行为", self.gui)
+        approval_block = self.gui.split("def _toggle_skill_enabled", 1)[1].split("def _revoke_skill_pack", 1)[0]
+        self.assertIn('item.get("source")', approval_block)
+        self.assertIn("来源：", approval_block)
 
     def test_setup_guide_distinguishes_exe_runtime_from_optional_toolchains(self) -> None:
         self.assertIn("只使用 FolderBridge.exe：无需另外安装 Python 或 Node.js", self.gui)

@@ -5,7 +5,6 @@ import json
 import os
 import re
 import shutil
-import signal
 import stat
 import subprocess
 import sys
@@ -18,6 +17,8 @@ from typing import BinaryIO, Callable, Iterable
 from . import __version__
 from .capabilities import CAPABILITY_NAMES, normalize_capability_names
 from .config import ConfigError, MAX_WORKSPACES, canonical_workspaces, config_is_trusted, load_config
+from .process_control import owned_process_group_kwargs, terminate_owned_process_tree
+from .user_paths import user_config_root
 
 
 LAUNCHER_SETTINGS_VERSION = 3
@@ -226,13 +227,7 @@ class LauncherSettingsStore:
 
 
 def launcher_settings_path() -> Path:
-    if sys.platform == "win32" and os.environ.get("LOCALAPPDATA"):
-        base = Path(os.environ["LOCALAPPDATA"])
-    elif os.environ.get("XDG_CONFIG_HOME"):
-        base = Path(os.environ["XDG_CONFIG_HOME"])
-    else:
-        base = Path.home() / ".config"
-    return base / "folderbridge-mcp" / "launcher.json"
+    return user_config_root() / "launcher.json"
 
 
 def checkout_launcher_path() -> Path:
@@ -387,9 +382,8 @@ def control_plane_environment(api_key: str) -> dict[str, str]:
 
 def redact_text(text: str, secrets: tuple[str, ...] = ()) -> str:
     redacted = text
-    for secret in secrets:
-        if secret:
-            redacted = redacted.replace(secret, "<已隐藏>")
+    for secret in sorted({secret for secret in secrets if secret}, key=len, reverse=True):
+        redacted = redacted.replace(secret, "<已隐藏>")
     for pattern in SECRET_PATTERNS:
         if pattern.groups:
             redacted = pattern.sub(lambda match: match.group(1) + "<已隐藏>", redacted)
@@ -446,7 +440,6 @@ def run_short_command(
     env: dict[str, str],
     timeout_seconds: int = 30,
 ) -> CommandResult:
-    creation_flags = _creation_flags()
     try:
         process = subprocess.Popen(
             argv,
@@ -456,8 +449,7 @@ def run_short_command(
             stderr=subprocess.STDOUT,
             shell=False,
             close_fds=True,
-            creationflags=creation_flags,
-            start_new_session=sys.platform != "win32",
+            **owned_process_group_kwargs(hide_window=True),
         )
     except OSError as exc:
         raise LauncherError(f"无法启动 {Path(argv[0]).name}: {exc}") from exc
@@ -469,7 +461,7 @@ def run_short_command(
         exit_code = process.wait(timeout=timeout_seconds)
     except subprocess.TimeoutExpired:
         timed_out = True
-        _terminate_process_tree(process)
+        terminate_owned_process_tree(process, hide_window=True)
         try:
             exit_code = process.wait(timeout=5)
         except subprocess.TimeoutExpired:
@@ -520,8 +512,7 @@ class TunnelSupervisor:
                     stderr=subprocess.STDOUT,
                     shell=False,
                     close_fds=True,
-                    creationflags=_creation_flags(),
-                    start_new_session=sys.platform != "win32",
+                    **owned_process_group_kwargs(hide_window=True),
                 )
             except OSError as exc:
                 raise LauncherError(f"无法启动 tunnel-client: {exc}") from exc
@@ -539,7 +530,7 @@ class TunnelSupervisor:
             # still alive. On Windows this lets taskkill /T reliably include
             # the MCP subprocesses spawned by tunnel-client instead of leaving
             # an orphan after terminating only the parent first.
-            _terminate_process_tree(process)
+            terminate_owned_process_tree(process, hide_window=True)
             try:
                 process.wait(timeout=8)
             except subprocess.TimeoutExpired:
@@ -560,39 +551,6 @@ class TunnelSupervisor:
             if not chunk:
                 return
             self._output_callback(chunk.decode("utf-8", errors="replace"))
-
-
-def _creation_flags() -> int:
-    if sys.platform != "win32":
-        return 0
-    return getattr(subprocess, "CREATE_NO_WINDOW", 0) | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
-
-
-def _terminate_process_tree(process: subprocess.Popen[bytes]) -> None:
-    if process.poll() is not None:
-        return
-    if sys.platform == "win32":
-        taskkill = Path(os.environ.get("SystemRoot", r"C:\Windows")) / "System32" / "taskkill.exe"
-        try:
-            subprocess.run(
-                [str(taskkill), "/PID", str(process.pid), "/T", "/F"],
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                timeout=10,
-                check=False,
-                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-            )
-            return
-        except (OSError, subprocess.TimeoutExpired):
-            pass
-    else:
-        try:
-            os.killpg(process.pid, signal.SIGKILL)
-            return
-        except OSError:
-            pass
-    process.kill()
 
 
 def _posix_join(argv: list[str]) -> str:

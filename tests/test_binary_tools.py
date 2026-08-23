@@ -8,7 +8,9 @@ import unittest
 import zipfile
 import zlib
 from pathlib import Path
+from unittest import mock
 
+import folderbridge_mcp.binary_tools as binary_tools_module
 from folderbridge_mcp.binary_tools import file_info, inspect_pptx, open_image
 from folderbridge_mcp.security import ToolError, Workspace
 
@@ -86,12 +88,29 @@ class BinaryToolTests(unittest.TestCase):
         self.assertEqual(result["smartart_data_xml"], 1)
         self.assertEqual(result["smartart_frames"], 1)
         self.assertEqual(result["successful_diagram_mappings"], 1)
+        expected_xml_bytes = len(slide) + len(rels) + len(data)
+        self.assertEqual(result["xml_uncompressed_bytes"], expected_xml_bytes)
+        self.assertEqual(result["xml_limit_bytes"], binary_tools_module.MAX_PPTX_XML_TOTAL_BYTES)
+        self.assertAlmostEqual(
+            result["xml_limit_usage_ratio"],
+            expected_xml_bytes / binary_tools_module.MAX_PPTX_XML_TOTAL_BYTES,
+        )
         self.assertEqual(result["orphan_data_parts"], [])
         self.assertIn("Hello slide", result["pages"][0]["slide_text"])
         smartart = result["pages"][0]["smartart_frames"][0]["smartart"]
         self.assertEqual([point["text"] for point in smartart["points"]], ["Node A", "Node B"])
         self.assertEqual(smartart["connections"][0]["attributes"]["srcId"], "A")
         self.assertEqual(smartart["connections"][0]["attributes"]["destId"], "B")
+
+    def test_pptx_rejects_aggregate_xml_expansion_before_parsing(self) -> None:
+        path = self.root / "compressed-bomb.pptx"
+        slide = b'''<p:sld xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><p:cSld><p:spTree><p:sp><p:txBody><a:p><a:r><a:t>bounded</a:t></a:r></a:p></p:txBody></p:sp></p:spTree></p:cSld></p:sld>'''
+        with zipfile.ZipFile(path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+            archive.writestr("ppt/slides/slide1.xml", slide)
+        with mock.patch.object(binary_tools_module, "MAX_PPTX_XML_TOTAL_BYTES", 100, create=True):
+            with self.assertRaises(ToolError) as raised:
+                inspect_pptx(self.workspace, "compressed-bomb.pptx", page_start=1, page_end=1)
+        self.assertEqual(raised.exception.code, "PPTX_XML_TOO_LARGE")
 
     def test_image_open_direct_and_zip(self) -> None:
         image = _png(7, 5)

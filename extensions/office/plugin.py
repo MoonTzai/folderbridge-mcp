@@ -15,6 +15,8 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 from xml.etree import ElementTree as ET
 
+from folderbridge_mcp.process_control import owned_process_group_kwargs, terminate_owned_process_tree
+
 
 MAX_OFFICE_BYTES = 512 * 1024 * 1024
 MAX_ZIP_MEMBERS = 20_000
@@ -619,18 +621,30 @@ def _render(params: dict[str, Any], context: dict[str, Any], root: Path) -> dict
         argv += ["-SheetsJson", json.dumps(sheets, ensure_ascii=False, separators=(",", ":"))]
 
     try:
-        completed = subprocess.run(
-            argv,
-            cwd=script.parent,
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            shell=False,
-            timeout=570,
-            check=False,
-        )
-    except subprocess.TimeoutExpired as exc:
-        raise RuntimeError("Microsoft Office rendering exceeded 570 seconds") from exc
+        try:
+            process = subprocess.Popen(
+                argv,
+                cwd=script.parent,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                shell=False,
+                close_fds=True,
+                **owned_process_group_kwargs(hide_window=True),
+            )
+        except OSError as exc:
+            raise RuntimeError(f"could not start Microsoft Office renderer: {exc}") from exc
+        try:
+            stdout_bytes, stderr_bytes = process.communicate(timeout=570)
+        except subprocess.TimeoutExpired as exc:
+            terminate_owned_process_tree(process, hide_window=True)
+            try:
+                stdout_bytes, stderr_bytes = process.communicate(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                stdout_bytes, stderr_bytes = process.communicate(timeout=5)
+            raise RuntimeError("Microsoft Office rendering exceeded 570 seconds") from exc
+        completed = subprocess.CompletedProcess(argv, process.returncode, stdout_bytes, stderr_bytes)
     finally:
         shutil.rmtree(temp_dir, ignore_errors=True)
     stdout = completed.stdout.decode("utf-8-sig", errors="replace").strip()

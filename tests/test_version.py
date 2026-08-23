@@ -13,6 +13,7 @@ class VersionTests(unittest.TestCase):
         with (PROJECT_ROOT / "pyproject.toml").open("rb") as stream:
             project_version = tomllib.load(stream)["project"]["version"]
 
+        self.assertEqual(project_version, "0.7.1")
         self.assertEqual(__version__, project_version)
         self.assertIn(
             f"StringStruct('FileVersion', '{project_version}')",

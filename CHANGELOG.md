@@ -2,6 +2,69 @@
 
 All notable changes to FolderBridge MCP are documented here.
 
+## 0.7.1 — 2026-08-23
+
+- Fixed Launcher mouse-wheel routing so blank/main-page areas scroll the page while native scroll areas such as logs, workspace lists, comboboxes, and independently scrollable canvases keep their own wheel behavior; the Extensions & Skills canvas scrolls itself.
+- Launcher sizing now uses the current Windows monitor work area (`rcWork`) instead of full-screen bounds. Startup is centered inside that work area, and content-driven resize after panel expand/collapse is capped at 90% of the available height and repositioned inside the monitor, with the existing page scrollbar handling overflow.
+
+## 0.7.0 — 2026-08-23
+
+- Added a general local Skill Engine for trusted methodology text. Skills are discovered from bounded manifests, matched deterministically, and loaded on demand; Skill markdown is never executed as local code.
+- Added the bundled read-only `skill-engine` Extension with `list`, `match`, and `get` actions behind the existing stable `extension` MCP gateway, so installing additional Skill Packs does not add MCP tool names or require per-Skill connector schemas.
+- Added initialization-time Skill routing guidance and a bounded routing index. FolderBridge can make relevant Skills discoverable to the model, but reports the behavior honestly as model-routed rather than claiming it can force invocation.
+- Added exact-hash trust for external Skill Packs. Unapproved or stale Packs are hidden from the model-facing view; approval uses the hash displayed by the Launcher, and `get` re-hashes the exact bytes it returns so `match`/`get` changes fail closed.
+- Added the bundled `folderbridge-engineering` Pack with six focused engineering methods: codebase design, architecture improvement, bug diagnosis, test-driven development, code review, and implementation.
+- Expanded the Launcher sidebar to **Extensions & Skills**, with separate Skill Pack enable/disable, external exact-hash approval, revoke controls, details, and a user Skill Pack directory. The warning explicitly distinguishes prompt/methodology influence from executable plugin code.
+- Added `skills --json` diagnostics with deterministic UTF-8 output on Windows, and expanded `extensions --self-test` so packaged smoke tests exercise both the ComfyUI worker and the Skill Engine worker.
+- Windows packaging now includes `skill_packs`, verifies discovery of the bundled `skill-engine` Extension and engineering Pack, and runs worker smoke tests before generating the EXE checksum.
+- Unified the per-user FolderBridge configuration-root calculation so the launcher, MCP host, and cleaned Extension workers resolve the same Skill/Extension state location.
+- Added PPTX inspection observability for aggregate XML use: normal results now expose `xml_uncompressed_bytes`, `xml_limit_bytes`, and `xml_limit_usage_ratio` in addition to the existing 256 MiB pre-parse guard.
+
+## 0.6.4 — 2026-08-23
+
+- Closed the Extension exact-hash execution race end to end. Workers now create a private temporary execution snapshot, verify it against the host-pinned SHA-256, and import/run only from that verified snapshot; relative plugin file access is rooted there as well.
+- Made Extension trust-store read/modify/write operations process-locally atomic so concurrent approval and enable/disable operations do not overwrite one another.
+- Enforced strict JSON at Extension manifest, request, response, and serialization boundaries; non-standard `NaN` and `Infinity` values are rejected.
+- Fixed overlapping secret redaction by replacing longer values first, and fixed JSON-schema enum handling so booleans are distinct from numeric values.
+- Fixed a managed ComfyUI lifecycle race by keeping a stable local process handle throughout one startup operation.
+- Consolidated remaining first-party subprocess paths: core Git inspection, bundled Git Publisher Git/GCM calls, and bundled Office PowerShell rendering now use bounded owned-process semantics with child-tree timeout cleanup.
+- Git safety inspection now fails closed if its bounded output is truncated instead of treating a partial result as complete.
+- Added a 256 MiB aggregate uncompressed XML/relationship budget to core PPTX inspection before XML parsing.
+- Restored explicit `server_info` observability that Extension jobs are process-local and do not survive a FolderBridge server restart, with regression coverage for these failure modes.
+
+## 0.6.3 — 2026-08-23
+
+- Fixed cross-monitor DPI font resizing on Windows. FolderBridge now manages explicit DPI-aware named fonts and recalculates their pixel sizes whenever `GetDpiForWindow` changes, instead of relying on Tk's undefined runtime behavior for resizing existing widgets after `tk scaling` changes.
+- Applied the managed font set to ttk styles, entries, Treeview text/headings, the runtime log, the primary start/stop button, and setup-guide text tags; guide spacing/margins are refreshed with the same DPI transition.
+- Added regression coverage for deterministic 96→144→96 font sizing and for removing fixed tuple fonts from the live GUI path.
+
+## 0.6.2 — 2026-08-23
+
+- Performed a deep-module architecture audit focused on module depth, interfaces, seams, locality, and deletion leverage rather than splitting files by size alone.
+- Added a single `process_control` module for FolderBridge-owned subprocess groups and tree termination. Extension workers/jobs, Tunnel commands, managed ComfyUI, approved tasks, and bounded Git inspection now share the same Windows/POSIX ownership seam instead of maintaining separate `taskkill` / process-group implementations.
+- Bounded Extension Job lifecycle resources: at most 16 jobs may be starting/running concurrently, and only the newest 128 finished job records are retained in the current FolderBridge process.
+- Added runtime observability to `server_info`: the running FolderBridge version and Job resource policy are now reported directly, making stale EXE versus client-cached MCP tool schema easier to diagnose after upgrades.
+- Refined live ComfyUI status polling so the Extensions sidebar does not rebuild every two seconds when nothing changed. Background probes use a separate pending state, unchanged results update only the status label, and structural changes still trigger a full card refresh.
+- Expanded regression coverage around the new process-control seam, Job concurrency bounds, runtime version reporting, and live-service UI behavior.
+
+## 0.6.1 — 2026-08-23
+
+- Added true collapsible main-page sections for Local Workspaces/Permissions, OpenAI Secure MCP Tunnel, and Runtime Log, each with its own expand/collapse control plus a global Expand all / Collapse all button.
+- Collapsing or expanding a section re-runs the existing content-fit logic so the Launcher recomputes its ideal height and only falls back to scrolling when the display cannot fit the visible sections.
+- The managed ComfyUI service card now refreshes its actual status every 2 seconds while the Extensions sidebar is open. Online states are shown in green, offline/unconfigured states in red, and transient detection/startup states in a neutral color.
+- Re-verified the 0.6.0 long-job implementation after restart. The running backend exposes the new job-aware security policy and source schema, but an already-loaded ChatGPT connector can keep its older cached `extension` tool enum until the connector/conversation tool schema is reloaded.
+
+## 0.6.0 — 2026-08-23
+
+- Extended Extension ABI v1 with host-owned long-running jobs. Actions may declare `run_mode=job`; `extension(action="run")` returns a `job_id`, while `job_status` and `job_cancel` inspect or terminate the owned worker process tree without adding MCP tool names.
+- Extension timeouts now support `0` (no automatic timeout termination) through 86,400 seconds (24 hours). Per-action timeout overrides take precedence over the extension default; zero still allows explicit cancel and FolderBridge shutdown cleanup.
+- Added exact environment inheritance permissions such as `environment.inherit:OPENAI_API_KEY`; only explicitly declared variables cross the cleaned worker boundary. `CONTROL_PLANE_API_KEY` and other FolderBridge/control-plane variables are reserved and can never be inherited by an extension. Values inherited through key/token/secret/password/auth-like variable names are recursively redacted from worker results, logs, and surfaced errors.
+- Added `network.outbound:https` as an explicit authorization-contract permission for integrations that must call external HTTPS APIs. As with other Extension permissions, this is approval metadata rather than a kernel network sandbox.
+- Added host validation for plugin-declared `workspace_artifacts`: returned workspace-relative files are re-resolved through FolderBridge path policy and returned with byte size and SHA-256 metadata.
+- Extension timeout/cancel paths now terminate the complete FolderBridge-owned worker process tree instead of only the Python worker shell, so child runtimes such as Node.js do not remain orphaned.
+- Added `.api-config.json` / `api-config.json` to credential-like workspace names hidden from normal MCP file tools, preventing Judge-style API configuration files from being surfaced as ordinary project text.
+- The Windows launcher now grows to the page's actual requested content size after layout, capped at 94% of the display. The main vertical scrollbar is hidden when the complete page fits and appears only when content exceeds the available viewport; DPI changes and Extension sidebar toggles re-run the same fit logic.
+
 ## 0.5.1 — 2026-08-23
 
 - Added the bundled **Git Publisher** extension behind the stable `extension` gateway, with explicit `github.web-auth`, `git.commit-selected-files`, and `git.push-current-branch` permissions.

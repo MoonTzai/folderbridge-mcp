@@ -98,6 +98,15 @@ class McpWorkflowTests(unittest.TestCase):
         catalog = self.call(11, "tools/list", meta)
         self.assertEqual(catalog["result"]["cacheScope"], "private")
 
+    def test_runtime_instructions_advertise_skill_routing_without_embedding_skill_body(self) -> None:
+        runtime = ToolRuntime(self.workspace, load_config(self.workspace))
+        instructions = runtime.instructions
+        self.assertIn("skill-engine", instructions)
+        self.assertIn("match", instructions)
+        self.assertIn("folderbridge-engineering/diagnosing-bugs", instructions)
+        self.assertNotIn("the first deliverable is a tight feedback loop", instructions)
+        self.assertLessEqual(len(instructions), 5000)
+
     def test_tool_notifications_cannot_silently_write(self) -> None:
         server = McpServer(ToolRuntime(self.workspace, load_config(self.workspace)))
         notification = {
@@ -123,6 +132,13 @@ class McpWorkflowTests(unittest.TestCase):
 
         info = runtime.call("server_info", {})["structuredContent"]
         self.assertEqual(info["workspace_count"], 2)
+        self.assertRegex(info["version"], r"^\d+\.\d+\.\d+$")
+        self.assertGreaterEqual(info["extension_jobs"]["max_running"], 1)
+        self.assertTrue(info["extension_jobs"]["process_local"])
+        self.assertFalse(info["extension_jobs"]["survives_server_restart"])
+        self.assertEqual(info["skill_engine"]["gateway"], "extension/skill-engine")
+        self.assertEqual(info["skill_engine"]["automatic_invocation"], "model-routed-not-forced")
+        self.assertIn("folderbridge-engineering", {item["id"] for item in info["skill_engine"]["packs"]})
         ids = {item["name"]: item["workspace_id"] for item in info["workspaces"]}
 
         missing = runtime.call("workspace", {"action": "list"})
@@ -142,6 +158,18 @@ class McpWorkflowTests(unittest.TestCase):
 
         workspace_tool = next(tool for tool in runtime.list_tools() if tool["name"] == "workspace")
         self.assertIn("workspace_id", workspace_tool["inputSchema"]["required"])
+
+    def test_skills_cli_reports_bundled_pack_as_json(self) -> None:
+        completed = subprocess.run(
+            [sys.executable, str(LAUNCHER), "skills", "--json"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+            timeout=20,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr.decode("utf-8", errors="replace"))
+        payload = json.loads(completed.stdout)
+        self.assertIn("folderbridge-engineering", {item["id"] for item in payload["packs"]})
 
     def test_cli_preserves_repeated_workspace_arguments(self) -> None:
         parsed = build_parser().parse_args(

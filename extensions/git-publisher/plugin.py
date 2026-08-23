@@ -10,6 +10,8 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 from urllib.parse import urlsplit
 
+from folderbridge_mcp.process_control import owned_process_group_kwargs, terminate_owned_process_tree
+
 
 MAX_OUTPUT = 32_000
 MAX_COMMIT_FILE_BYTES = 64 * 1024 * 1024
@@ -88,7 +90,7 @@ def _run_git(
         argv += ["-c", "credential.helper=", "-c", "credential.helper=manager"]
     argv += [*args]
     try:
-        completed = subprocess.run(
+        process = subprocess.Popen(
             argv,
             cwd=root,
             env=env,
@@ -96,13 +98,22 @@ def _run_git(
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             shell=False,
-            timeout=timeout,
-            check=False,
+            close_fds=True,
+            **owned_process_group_kwargs(hide_window=True),
         )
-    except subprocess.TimeoutExpired as exc:
-        raise RuntimeError(f"git operation exceeded {timeout} seconds") from exc
     except OSError as exc:
         raise RuntimeError(f"could not execute git: {exc}") from exc
+    try:
+        stdout, stderr = process.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired as exc:
+        terminate_owned_process_tree(process, hide_window=True)
+        try:
+            stdout, stderr = process.communicate(timeout=5)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            stdout, stderr = process.communicate(timeout=5)
+        raise RuntimeError(f"git operation exceeded {timeout} seconds") from exc
+    completed = subprocess.CompletedProcess(argv, process.returncode, stdout, stderr)
     if check and completed.returncode != 0:
         stderr = _redact(completed.stderr.decode("utf-8", errors="replace").strip())
         stdout = _redact(completed.stdout.decode("utf-8", errors="replace").strip())
@@ -406,38 +417,15 @@ def _push(root: Path) -> dict[str, Any]:
     gcm = _gcm_status(root)
     if not gcm.get("available"):
         raise RuntimeError("Git Credential Manager is required for Publisher push authentication")
-    env = os.environ.copy()
-    env["GIT_PAGER"] = "cat"
-    env["GIT_OPTIONAL_LOCKS"] = "0"
-    env["GIT_TERMINAL_PROMPT"] = "0"
-    env["GCM_INTERACTIVE"] = "Never"
-    git = _git_executable()
     branch = repo["branch"]
-    argv = [
-        git,
+    completed = _run_git(
+        root,
         "-c", "core.fsmonitor=false",
         "-c", "core.hooksPath=NUL",
-        "-c", "credential.helper=",
-        "-c", "credential.helper=manager",
         "push", "--porcelain", "--no-verify", "origin", f"HEAD:refs/heads/{branch}",
-    ]
-    try:
-        completed = subprocess.run(
-            argv,
-            cwd=root,
-            env=env,
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            shell=False,
-            timeout=300,
-            check=False,
-        )
-    except subprocess.TimeoutExpired as exc:
-        raise RuntimeError("GitHub push exceeded 300 seconds") from exc
-    if completed.returncode != 0:
-        detail = _redact((completed.stderr + completed.stdout).decode("utf-8", errors="replace").strip())
-        raise RuntimeError(detail or f"git push failed with exit code {completed.returncode}")
+        timeout=300,
+        gcm_only=True,
+    )
     return {
         **repo,
         "pushed": True,

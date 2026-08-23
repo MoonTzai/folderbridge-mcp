@@ -15,8 +15,9 @@ from .capabilities import (
     run_capability,
 )
 from .config import ProjectConfig, canonical_workspaces, config_is_trusted, load_config, workspace_id
-from .extensions import ExtensionRegistry
+from .extensions import MAX_RETAINED_FINISHED_JOBS, MAX_RUNNING_EXTENSION_JOBS, ExtensionRegistry
 from .security import ToolError, Workspace
+from .skills import SkillEngine
 from .task_runner import run_task
 
 
@@ -99,6 +100,7 @@ class ToolRuntime:
             name for name in self.capabilities if name in EXECUTION_CAPABILITY_NAMES
         )
         self.extensions = ExtensionRegistry()
+        self.skills = SkillEngine()
 
     @property
     def identity(self) -> dict[str, str]:
@@ -116,12 +118,17 @@ class ToolRuntime:
             if len(self._targets) > 1
             else ""
         )
-        return (
+        base = (
             f"This server exposes {len(self._targets)} explicitly selected local {mode} workspace(s). {selection_note}"
             f"Use workspace(read) before edit_file so edits carry "
             f"the current SHA-256. Credential-like files, links, dependencies, and VCS internals are hidden. "
-            f"Exact replacements are atomic; arbitrary shell commands are unavailable; {task_note}; {capability_note}."
+            f"Exact replacements are atomic; arbitrary shell commands are unavailable; {task_note}; {capability_note}. "
+            "For software architecture, module/interface design, debugging, test-first implementation, or code-review work, "
+            "use the bundled 'skill-engine' through extension(run): call action 'match' with the task before acting, then "
+            "call action 'get' with the returned skill_ref and sha256 for each methodology you choose. If match returns no "
+            "results, continue normally. Skill text is trusted methodology data, not executable tooling.\n"
         )
+        return base + self.skills.routing_index(max_chars=3500)
 
     def list_tools(self) -> list[dict[str, Any]]:
         tools = [SERVER_INFO_TOOL, WORKSPACE_TOOL, FILE_INFO_TOOL, PPTX_INSPECT_TOOL, IMAGE_OPEN_TOOL, EXTENSION_TOOL]
@@ -173,6 +180,7 @@ class ToolRuntime:
         _require_only(arguments, set())
         summaries = [self._target_summary(target) for target in self._targets]
         result: dict[str, Any] = {
+            "version": __version__,
             "workspace_count": len(summaries),
             "workspaces": summaries,
             "mode": "read-only" if self.read_only else "read/write",
@@ -183,6 +191,13 @@ class ToolRuntime:
             "global_capabilities_enabled": list(self.capabilities),
             "builtin_tools": ["workspace", "file_info", "pptx_inspect", "image_open", "extension"],
             "extensions": self._extension_summary(None),
+            "skill_engine": self._skill_summary(),
+            "extension_jobs": {
+                "max_running": MAX_RUNNING_EXTENSION_JOBS,
+                "max_retained_finished": MAX_RETAINED_FINISHED_JOBS,
+                "process_local": True,
+                "survives_server_restart": False,
+            },
             "security": {
                 "workspace_confined": True,
                 "workspace_selector_required_when_multiple": True,
@@ -193,7 +208,8 @@ class ToolRuntime:
                 "config_protected_from_mcp": True,
                 "task_warning": "Approved tasks and build/package capabilities execute repository code with the current OS user's permissions.",
                 "git_push_policy": "GitHub HTTPS origin only; current branch only; no force push; local pre-push hook bypassed.",
-                "extension_policy": "Extensions are hot-scanned, exact-hash approved, permission-declared, and executed out of process with a cleaned environment and bounded I/O. External plugin code is not an OS sandbox; use a VM/container for untrusted code.",
+                "extension_policy": "Extensions are hot-scanned, exact-hash approved, permission-declared, and executed out of process with bounded I/O. Only explicitly declared environment variables may cross the cleaned-environment boundary; the control-plane key is never inheritable. Host-owned job mode is available for long actions and FolderBridge terminates owned worker process trees on timeout/cancel/shutdown. External plugin code is not an OS sandbox; use a VM/container for untrusted code.",
+                "skill_policy": "Skill Packs are bounded read-only methodology text. Bundled packs are release-trusted; external packs remain model-invisible until exact-hash local approval. Skill text is never executed, but it can influence model behavior.",
             },
         }
         if len(summaries) == 1:
@@ -239,6 +255,28 @@ class ToolRuntime:
                 }
                 for item in description["extensions"]
             ],
+            "errors": description["errors"],
+        }
+
+    def _skill_summary(self) -> dict[str, Any]:
+        description = self.skills.describe()
+        return {
+            "gateway": "extension/skill-engine",
+            "automatic_invocation": "model-routed-not-forced",
+            "packs": [
+                {
+                    "id": item["id"],
+                    "name": item["name"],
+                    "version": item["version"],
+                    "bundled": item["bundled"],
+                    "trusted": item["trusted"],
+                    "enabled": item["enabled"],
+                    "skill_count": item["skill_count"],
+                    "source": item["source"],
+                }
+                for item in description["packs"]
+            ],
+            "error_count": description["error_count"],
             "errors": description["errors"],
         }
 
@@ -347,15 +385,29 @@ class ToolRuntime:
         )
 
     def _extension(self, arguments: dict[str, Any]) -> dict[str, Any]:
-        _require_only(arguments, {"workspace_id", "action", "extension_id", "extension_action", "params"})
+        _require_only(arguments, {"workspace_id", "action", "extension_id", "extension_action", "params", "job_id"})
         operation = arguments.get("action")
-        if operation not in {"list", "info", "run"}:
-            raise ToolError("INVALID_ARGUMENT", "action must be list, info, or run")
+        if operation not in {"list", "info", "run", "job_status", "job_cancel"}:
+            raise ToolError("INVALID_ARGUMENT", "action must be list, info, run, job_status, or job_cancel")
         raw_workspace_id = arguments.get("workspace_id")
         target = self._select_target(raw_workspace_id) if raw_workspace_id is not None else None
 
         if operation == "list":
             return self.extensions.describe(target.root if target is not None else None)
+
+        if operation in {"job_status", "job_cancel"}:
+            job_id = arguments.get("job_id")
+            if not isinstance(job_id, str) or not job_id:
+                raise ToolError("INVALID_ARGUMENT", "job_id is required for job_status/job_cancel")
+            if target is None and len(self._targets) == 1:
+                target = self._targets[0]
+            workspace = target.workspace if target is not None else None
+            result = (
+                self.extensions.job_status(job_id, workspace=workspace)
+                if operation == "job_status"
+                else self.extensions.job_cancel(job_id, workspace=workspace)
+            )
+            return self._scope_result(result, target) if target is not None else result
 
         extension_id = arguments.get("extension_id")
         if not isinstance(extension_id, str) or not extension_id:
@@ -589,7 +641,8 @@ EXTENSION_TOOL = {
     "title": "Use FolderBridge extensions",
     "description": (
         "Stable extension gateway. action=list discovers installed/hot-reloaded extensions and their action schemas; "
-        "action=info inspects one extension; action=run invokes one declared extension action. "
+        "action=info inspects one extension; action=run invokes one declared extension action. Job-mode actions return a host-owned job_id; "
+        "use action=job_status to inspect completion/results and action=job_cancel to terminate the owned worker process tree. "
         "Installing more extensions does not add MCP tool names. External extension code requires exact-hash local approval; "
         "globally authorized actions must also be enabled in the FolderBridge extension sidebar. "
         "Dynamic workspace adapters are re-evaluated at call time, so later project changes do not require workspace task injection."
@@ -597,11 +650,12 @@ EXTENSION_TOOL = {
     "inputSchema": {
         "type": "object",
         "properties": {
-            "workspace_id": {"type": "string", "description": "Optional for list/info; required by run actions whose manifest requires a workspace when multiple workspaces are configured."},
-            "action": {"type": "string", "enum": ["list", "info", "run"]},
+            "workspace_id": {"type": "string", "description": "Optional for list/info; required by workspace-bound run/job operations when multiple workspaces are configured."},
+            "action": {"type": "string", "enum": ["list", "info", "run", "job_status", "job_cancel"]},
             "extension_id": {"type": "string", "description": "Required for info/run."},
             "extension_action": {"type": "string", "description": "Required for run; choose an action declared by extension info/list."},
             "params": {"type": "object", "description": "Action parameters validated against the extension's declared input_schema."},
+            "job_id": {"type": "string", "description": "Required for job_status/job_cancel; returned by a run_mode=job action."},
         },
         "required": ["action"],
         "additionalProperties": False,

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import atexit
 import hashlib
 import json
 import os
@@ -9,12 +10,16 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
+import uuid
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any, Iterable
 
 from .config import workspace_id
+from .process_control import owned_process_group_kwargs, terminate_owned_process_tree
 from .security import ToolError, Workspace, clean_environment
+from .user_paths import INTERNAL_CONFIG_ROOT_ENV, user_config_root
 
 
 EXTENSION_SCHEMA_VERSION = 1
@@ -28,11 +33,34 @@ MAX_WORKER_RESPONSE_BYTES = 32 * 1024 * 1024
 MAX_WORKER_LOG_BYTES = 256 * 1024
 MAX_ACTIONS = 64
 MAX_ADAPTER_PATTERNS = 64
+MAX_FOREGROUND_TIMEOUT_SECONDS = 24 * 60 * 60
+MAX_JOB_TIMEOUT_SECONDS = 24 * 60 * 60
+MAX_RUNNING_EXTENSION_JOBS = 16
+MAX_RETAINED_FINISHED_JOBS = 128
+MAX_INHERITED_ENV_VALUE_BYTES = 64 * 1024
+MAX_WORKSPACE_ARTIFACTS = 64
 EXTENSION_ID_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
 ACTION_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 EXECUTABLE_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+-]{0,127}(?:\.exe|\.cmd|\.bat|\.com)?$", re.IGNORECASE)
 LOOPBACK_PERMISSION_RE = re.compile(r"^network\.loopback:(?:127\.0\.0\.1|localhost):([1-9][0-9]{0,4})$")
 PROCESS_PERMISSION_RE = re.compile(r"^process\.execute:([A-Za-z0-9][A-Za-z0-9._+-]{0,127}(?:\.exe|\.cmd|\.bat|\.com)?)$", re.IGNORECASE)
+ENVIRONMENT_PERMISSION_RE = re.compile(r"^environment\.inherit:([A-Z][A-Z0-9_]{0,127})$")
+RESERVED_EXTENSION_ENV_NAMES = {
+    "CONTROL_PLANE_API_KEY",
+    "PATH",
+    "PYTHONPATH",
+    "PYTHONHOME",
+    "PYINSTALLER_RESET_ENVIRONMENT",
+    "COMSPEC",
+    "SYSTEMROOT",
+    "WINDIR",
+    "TEMP",
+    "TMP",
+    "PATHEXT",
+    "USERPROFILE",
+    "HOMEDRIVE",
+    "HOMEPATH",
+}
 EXACT_PERMISSIONS = {
     "workspace.read",
     "workspace.write",
@@ -41,7 +69,12 @@ EXACT_PERMISSIONS = {
     "git.commit-selected-files",
     "git.push-current-branch",
     "github.web-auth",
+    "network.outbound:https",
 }
+
+
+def _reject_json_constant(value: str) -> None:
+    raise ValueError(f"non-standard JSON constant: {value}")
 
 
 @dataclass(frozen=True)
@@ -51,6 +84,8 @@ class ExtensionAction:
     requires_workspace: bool
     authorization: str
     input_schema: dict[str, Any]
+    run_mode: str
+    timeout_seconds: int | None
 
 
 @dataclass(frozen=True)
@@ -77,18 +112,24 @@ class ExtensionRecord:
 class ExtensionTrustStore:
     def __init__(self, path: Path | None = None) -> None:
         self.path = path or extension_trust_path()
+        # Keep each read-modify-write transaction atomic inside this process.
+        # RLock allows set_enabled() to reuse status() without leaking locking
+        # responsibilities to GUI or MCP callers.
+        self._lock = threading.RLock()
 
     def _load(self) -> dict[str, dict[str, Any]]:
         try:
             if self.path.is_symlink() or _is_reparse_point(self.path):
                 return {}
-            data = self.path.read_bytes()
+            with self.path.open("rb") as handle:
+                data = handle.read(MAX_MANIFEST_BYTES + 1)
             if len(data) > MAX_MANIFEST_BYTES:
                 return {}
-            parsed = json.loads(data)
-        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+            parsed = json.loads(data, parse_constant=_reject_json_constant)
+        except (OSError, UnicodeDecodeError, ValueError):
             return {}
-        if not isinstance(parsed, dict) or parsed.get("version") != TRUST_STORE_VERSION:
+        version = parsed.get("version") if isinstance(parsed, dict) else None
+        if not isinstance(version, int) or isinstance(version, bool) or version != TRUST_STORE_VERSION:
             return {}
         extensions = parsed.get("extensions")
         if not isinstance(extensions, dict):
@@ -121,6 +162,7 @@ class ExtensionTrustStore:
             ensure_ascii=False,
             sort_keys=True,
             indent=2,
+            allow_nan=False,
         ).encode("utf-8") + b"\n"
         self.path.parent.mkdir(parents=True, exist_ok=True)
         temporary: str | None = None
@@ -148,45 +190,49 @@ class ExtensionTrustStore:
                     pass
 
     def status(self, record: ExtensionRecord) -> dict[str, bool]:
-        saved = self._load().get(record.manifest.extension_id)
-        trusted = bool(
-            saved
-            and saved.get("sha256") == record.sha256
-            and saved.get("permissions") == list(record.manifest.permissions)
-        )
-        return {
-            "trusted": trusted,
-            "enabled": bool(trusted and saved and saved.get("enabled")),
-            "approval_stale": bool(saved and not trusted),
-        }
+        with self._lock:
+            saved = self._load().get(record.manifest.extension_id)
+            trusted = bool(
+                saved
+                and saved.get("sha256") == record.sha256
+                and saved.get("permissions") == list(record.manifest.permissions)
+            )
+            return {
+                "trusted": trusted,
+                "enabled": bool(trusted and saved and saved.get("enabled")),
+                "approval_stale": bool(saved and not trusted),
+            }
 
     def approve(self, record: ExtensionRecord, *, enabled: bool = True) -> None:
-        records = self._load()
-        records[record.manifest.extension_id] = {
-            "sha256": record.sha256,
-            "permissions": list(record.manifest.permissions),
-            "enabled": bool(enabled),
-        }
-        self._save(records)
+        with self._lock:
+            records = self._load()
+            records[record.manifest.extension_id] = {
+                "sha256": record.sha256,
+                "permissions": list(record.manifest.permissions),
+                "enabled": bool(enabled),
+            }
+            self._save(records)
 
     def set_enabled(self, record: ExtensionRecord, enabled: bool) -> None:
-        status = self.status(record)
-        if enabled and not status["trusted"]:
-            raise ValueError("Extension must be approved before it can be enabled")
-        records = self._load()
-        saved = records.get(record.manifest.extension_id)
-        if saved is None:
-            if enabled:
+        with self._lock:
+            status = self.status(record)
+            if enabled and not status["trusted"]:
                 raise ValueError("Extension must be approved before it can be enabled")
-            return
-        saved["enabled"] = bool(enabled)
-        records[record.manifest.extension_id] = saved
-        self._save(records)
+            records = self._load()
+            saved = records.get(record.manifest.extension_id)
+            if saved is None:
+                if enabled:
+                    raise ValueError("Extension must be approved before it can be enabled")
+                return
+            saved["enabled"] = bool(enabled)
+            records[record.manifest.extension_id] = saved
+            self._save(records)
 
     def revoke(self, extension_id: str) -> None:
-        records = self._load()
-        records.pop(extension_id, None)
-        self._save(records)
+        with self._lock:
+            records = self._load()
+            records.pop(extension_id, None)
+            self._save(records)
 
 
 class ExtensionRegistry:
@@ -202,6 +248,7 @@ class ExtensionRegistry:
         self.user_root = user_root or extension_root_path()
         self.bundled_root = bundled_root or bundled_extension_root()
         self.trust_store = trust_store or ExtensionTrustStore()
+        self.jobs = ExtensionJobManager()
 
     def scan(self) -> tuple[dict[str, ExtensionRecord], list[dict[str, str]]]:
         records: dict[str, ExtensionRecord] = {}
@@ -255,6 +302,8 @@ class ExtensionRegistry:
                             "requires_workspace": action.requires_workspace,
                             "authorization": action.authorization,
                             "input_schema": action.input_schema,
+                            "run_mode": action.run_mode,
+                            "timeout_seconds": _action_timeout(record, action),
                         }
                         for action in record.manifest.actions.values()
                     ],
@@ -314,7 +363,15 @@ class ExtensionRegistry:
                 extension_id=extension_id,
             )
         validate_json_schema(params, action.input_schema, path="params")
+        if action.run_mode == "job":
+            return self.jobs.start(record, action, params, workspace=workspace, read_only=read_only)
         return _run_worker(record, action, params, workspace=workspace, read_only=read_only)
+
+    def job_status(self, job_id: str, *, workspace: Workspace | None) -> dict[str, Any]:
+        return self.jobs.status(job_id, workspace=workspace)
+
+    def job_cancel(self, job_id: str, *, workspace: Workspace | None) -> dict[str, Any]:
+        return self.jobs.cancel(job_id, workspace=workspace)
 
 
 def extension_root_path() -> Path:
@@ -336,6 +393,65 @@ def bundled_extension_root() -> Path:
     return Path(__file__).resolve().parents[1] / "extensions"
 
 
+def snapshot_extension(source: Path, destination: Path) -> Path:
+    """Copy only hash-covered Extension files into a private execution snapshot."""
+
+    if source.is_symlink() or _is_reparse_point(source):
+        raise ValueError("extension directory may not be a link or reparse point")
+    root = source.resolve(strict=True)
+    if destination.exists():
+        raise ValueError("extension snapshot destination must not already exist")
+    destination.mkdir(parents=True)
+    count = 0
+    total = 0
+    ignored_parts = {"__pycache__", ".git", ".svn"}
+    for directory, dirs, files in os.walk(root, followlinks=False):
+        directory_path = Path(directory)
+        if directory_path != root and (directory_path.is_symlink() or _is_reparse_point(directory_path)):
+            raise ValueError("extension trees may not contain links or reparse points")
+        relative_dir = directory_path.relative_to(root)
+        kept_dirs: list[str] = []
+        for name in sorted(dirs):
+            child = directory_path / name
+            relative = child.relative_to(root)
+            if any(part in ignored_parts for part in relative.parts):
+                continue
+            if child.is_symlink() or _is_reparse_point(child):
+                raise ValueError("extension trees may not contain links or reparse points")
+            if not child.is_dir():
+                raise ValueError("extension tree contains a non-directory directory entry")
+            destination.joinpath(*relative.parts).mkdir(parents=True, exist_ok=True)
+            kept_dirs.append(name)
+        dirs[:] = kept_dirs
+        for name in sorted(files):
+            child = directory_path / name
+            relative = child.relative_to(root)
+            if any(part in ignored_parts for part in relative.parts) or child.suffix.lower() in {".pyc", ".pyo"}:
+                continue
+            if child.is_symlink() or _is_reparse_point(child) or not child.is_file():
+                raise ValueError("extension trees may contain only regular files")
+            count += 1
+            if count > MAX_EXTENSION_FILES:
+                raise ValueError(f"extension exceeds {MAX_EXTENSION_FILES} files")
+            try:
+                before = child.stat()
+                if before.st_size > MAX_EXTENSION_BYTES - total:
+                    raise ValueError(f"extension exceeds {MAX_EXTENSION_BYTES} bytes")
+                data = child.read_bytes()
+                after = child.stat()
+            except OSError as exc:
+                raise ValueError(f"could not read extension file while snapshotting: {relative.as_posix()}") from exc
+            before_identity = (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns)
+            after_identity = (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns)
+            if len(data) != before.st_size or before_identity != after_identity:
+                raise ValueError(f"extension file changed while snapshotting: {relative.as_posix()}")
+            total += len(data)
+            target = destination.joinpath(*relative.parts)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(data)
+    return destination
+
+
 def load_extension(path: Path, *, bundled: bool) -> ExtensionRecord:
     if path.is_symlink() or _is_reparse_point(path):
         raise ValueError("extension directory may not be a link or reparse point")
@@ -343,17 +459,16 @@ def load_extension(path: Path, *, bundled: bool) -> ExtensionRecord:
     manifest_path = root / MANIFEST_NAME
     if not manifest_path.is_file() or manifest_path.is_symlink() or _is_reparse_point(manifest_path):
         raise ValueError(f"missing regular {MANIFEST_NAME}")
-    data = manifest_path.read_bytes()
+    digest, data = _hash_extension(root)
     if len(data) > MAX_MANIFEST_BYTES:
         raise ValueError("extension manifest is too large")
     try:
-        raw = json.loads(data)
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise ValueError("extension manifest must be UTF-8 JSON") from exc
+        raw = json.loads(data, parse_constant=_reject_json_constant)
+    except (UnicodeDecodeError, ValueError) as exc:
+        raise ValueError("extension manifest must be strict UTF-8 JSON") from exc
     manifest = _parse_manifest(raw, root)
     if not bundled and any(action.authorization == "none" for action in manifest.actions.values()):
         raise ValueError("external extensions may not declare authorization=none")
-    digest = _hash_extension(root)
     return ExtensionRecord(root, manifest, digest, bundled)
 
 
@@ -375,8 +490,9 @@ def _parse_manifest(raw: Any, root: Path) -> ExtensionManifest:
     unknown = sorted(set(raw).difference(allowed))
     if unknown:
         raise ValueError(f"unknown manifest fields: {', '.join(unknown)}")
-    if raw.get("schema_version") != EXTENSION_SCHEMA_VERSION:
-        raise ValueError(f"schema_version must be {EXTENSION_SCHEMA_VERSION}")
+    schema_version = raw.get("schema_version")
+    if not isinstance(schema_version, int) or isinstance(schema_version, bool) or schema_version != EXTENSION_SCHEMA_VERSION:
+        raise ValueError(f"schema_version must be integer {EXTENSION_SCHEMA_VERSION}")
     extension_id = raw.get("id")
     name = raw.get("name")
     version = raw.get("version")
@@ -411,8 +527,8 @@ def _parse_manifest(raw: Any, root: Path) -> ExtensionManifest:
     if raw_execution.get("mode", "isolated-process") != "isolated-process":
         raise ValueError("extension schema v1 supports only execution.mode=isolated-process")
     timeout = raw_execution.get("timeout_seconds", 180)
-    if not isinstance(timeout, int) or isinstance(timeout, bool) or not 1 <= timeout <= 600:
-        raise ValueError("execution.timeout_seconds must be 1..600")
+    if not isinstance(timeout, int) or isinstance(timeout, bool) or not 0 <= timeout <= MAX_JOB_TIMEOUT_SECONDS:
+        raise ValueError(f"execution.timeout_seconds must be 0..{MAX_JOB_TIMEOUT_SECONDS}; 0 disables automatic timeout termination")
 
     adapter = _parse_workspace_adapter(raw.get("workspace_adapter", {"mode": "none"}))
     if adapter.get("mode") == "dynamic" and "workspace.adapter" not in permissions:
@@ -429,12 +545,14 @@ def _parse_manifest(raw: Any, root: Path) -> ExtensionManifest:
             raise ValueError(f"invalid action name: {action_name!r}")
         if not isinstance(spec, dict):
             raise ValueError(f"action {action_name} must be an object")
-        if set(spec).difference({"read_only", "requires_workspace", "authorization", "input_schema"}):
+        if set(spec).difference({"read_only", "requires_workspace", "authorization", "input_schema", "run_mode", "timeout_seconds"}):
             raise ValueError(f"action {action_name} has unknown fields")
         read_only = spec.get("read_only")
         requires_workspace = spec.get("requires_workspace", True)
         authorization = spec.get("authorization", "global")
         schema = spec.get("input_schema", {"type": "object", "properties": {}, "additionalProperties": False})
+        run_mode = spec.get("run_mode", "foreground")
+        action_timeout = spec.get("timeout_seconds")
         if not isinstance(read_only, bool) or not isinstance(requires_workspace, bool):
             raise ValueError(f"action {action_name} read_only/requires_workspace must be boolean")
         if authorization not in {"none", "global"}:
@@ -443,12 +561,20 @@ def _parse_manifest(raw: Any, root: Path) -> ExtensionManifest:
             raise ValueError(f"action {action_name} may use authorization=none only when read_only=true")
         if not isinstance(schema, dict) or schema.get("type") != "object":
             raise ValueError(f"action {action_name} input_schema must be an object schema")
+        if run_mode not in {"foreground", "job"}:
+            raise ValueError(f"action {action_name} run_mode must be foreground or job")
+        if action_timeout is not None:
+            max_timeout = MAX_JOB_TIMEOUT_SECONDS if run_mode == "job" else MAX_FOREGROUND_TIMEOUT_SECONDS
+            if not isinstance(action_timeout, int) or isinstance(action_timeout, bool) or not 0 <= action_timeout <= max_timeout:
+                raise ValueError(f"action {action_name} timeout_seconds must be 0..{max_timeout} for run_mode={run_mode}; 0 disables automatic timeout termination")
         actions[action_name] = ExtensionAction(
             action_name,
             read_only,
             requires_workspace,
             authorization,
             schema,
+            run_mode,
+            action_timeout,
         )
     return ExtensionManifest(
         extension_id=extension_id,
@@ -501,6 +627,12 @@ def _validate_permission(permission: str) -> None:
     match = PROCESS_PERMISSION_RE.fullmatch(permission)
     if match and EXECUTABLE_NAME_RE.fullmatch(match.group(1)):
         return
+    match = ENVIRONMENT_PERMISSION_RE.fullmatch(permission)
+    if match:
+        name = match.group(1)
+        if name in RESERVED_EXTENSION_ENV_NAMES or name.startswith("FOLDERBRIDGE_") or name.startswith("CONTROL_PLANE_"):
+            raise ValueError(f"reserved environment variable may not be inherited by extensions: {name}")
+        return
     raise ValueError(f"unknown or overbroad extension permission: {permission}")
 
 
@@ -541,6 +673,25 @@ def _glob_has_safe_match(root: Path, pattern: str) -> bool:
     return False
 
 
+def _json_values_equal(left: Any, right: Any) -> bool:
+    """Compare JSON values without Python's bool/int equality shortcut."""
+
+    if isinstance(left, bool) or isinstance(right, bool):
+        return isinstance(left, bool) and isinstance(right, bool) and left is right
+    if isinstance(left, (int, float)) and isinstance(right, (int, float)):
+        return left == right
+    if isinstance(left, list) and isinstance(right, list):
+        return len(left) == len(right) and all(
+            _json_values_equal(left_item, right_item)
+            for left_item, right_item in zip(left, right)
+        )
+    if isinstance(left, dict) and isinstance(right, dict):
+        return left.keys() == right.keys() and all(
+            _json_values_equal(left[key], right[key]) for key in left
+        )
+    return type(left) is type(right) and left == right
+
+
 def validate_json_schema(value: Any, schema: dict[str, Any], *, path: str) -> None:
     allowed_schema_keys = {
         "type", "properties", "required", "additionalProperties", "items", "enum",
@@ -552,7 +703,7 @@ def validate_json_schema(value: Any, schema: dict[str, Any], *, path: str) -> No
         raise ToolError("EXTENSION_SCHEMA_UNSUPPORTED", f"Unsupported input schema keys at {path}: {', '.join(unknown)}")
     if "enum" in schema:
         enum = schema["enum"]
-        if not isinstance(enum, list) or value not in enum:
+        if not isinstance(enum, list) or not any(_json_values_equal(value, item) for item in enum):
             raise ToolError("INVALID_ARGUMENT", f"{path} must be one of the declared enum values")
     expected = schema.get("type")
     if expected == "object":
@@ -621,14 +772,20 @@ def validate_json_schema(value: Any, schema: dict[str, Any], *, path: str) -> No
         raise ToolError("INVALID_ARGUMENT", f"{path} is above maximum")
 
 
-def _run_worker(
+def _action_timeout(record: ExtensionRecord, action: ExtensionAction) -> int:
+    return action.timeout_seconds if action.timeout_seconds is not None else record.manifest.execution_timeout_seconds
+
+
+def _wait_timeout(timeout_seconds: int) -> int | None:
+    return None if timeout_seconds == 0 else timeout_seconds
+
+
+def _worker_context_and_environment(
     record: ExtensionRecord,
-    action: ExtensionAction,
-    params: dict[str, Any],
     *,
     workspace: Workspace | None,
     read_only: bool,
-) -> dict[str, Any]:
+) -> tuple[dict[str, Any], dict[str, str]]:
     workspace_root = workspace.root if workspace is not None else None
     state_dir: str | None = None
     if record.manifest.workspace_adapter.get("state") == "profile":
@@ -639,6 +796,31 @@ def _run_worker(
         except OSError as exc:
             raise ToolError("EXTENSION_STATE_FAILED", f"Could not prepare extension state directory: {exc}") from exc
         state_dir = str(state_path)
+
+    env_root = workspace_root or record.path
+    env = clean_environment(env_root)
+    env[INTERNAL_CONFIG_ROOT_ENV] = str(user_config_root())
+    inherited_names: list[str] = []
+    for permission in record.manifest.permissions:
+        match = ENVIRONMENT_PERMISSION_RE.fullmatch(permission)
+        if not match:
+            continue
+        name = match.group(1)
+        if name not in os.environ:
+            continue
+        value = os.environ[name]
+        if len(value.encode("utf-8", errors="strict")) > MAX_INHERITED_ENV_VALUE_BYTES:
+            raise ToolError(
+                "EXTENSION_ENV_TOO_LARGE",
+                f"Environment variable {name} exceeds the extension inheritance limit.",
+                environment_name=name,
+            )
+        env[name] = value
+        inherited_names.append(name)
+    env["PYTHONUTF8"] = "1"
+    if getattr(sys, "frozen", False):
+        env["PYINSTALLER_RESET_ENVIRONMENT"] = "1"
+
     context = {
         "extension_id": record.manifest.extension_id,
         "extension_version": record.manifest.version,
@@ -647,30 +829,90 @@ def _run_worker(
         "workspace_read_only": bool(read_only),
         "state_dir": state_dir,
         "workspace_adapter": record.manifest.workspace_adapter,
+        "inherited_environment": inherited_names,
     }
-    request = json.dumps(
-        {"action": action.name, "params": params, "context": context},
-        ensure_ascii=False,
-        separators=(",", ":"),
-    ).encode("utf-8")
+    return context, env
+
+
+def _inherited_secret_values(context: dict[str, Any], env: dict[str, str]) -> tuple[str, ...]:
+    names = context.get("inherited_environment") or []
+    secret_name = re.compile(r"(?:KEY|TOKEN|SECRET|PASSWORD|PASSWD|AUTH)", re.IGNORECASE)
+    return tuple(
+        env[name]
+        for name in names
+        if isinstance(name, str) and name in env and env[name] and secret_name.search(name)
+    )
+
+
+def _redact_secrets(text: str, secrets: tuple[str, ...]) -> str:
+    redacted = text
+    # Replace longer values first so one secret that prefixes another cannot
+    # partially redact the longer value and leak its suffix.
+    for secret in sorted({secret for secret in secrets if secret}, key=len, reverse=True):
+        redacted = redacted.replace(secret, "<redacted>")
+    return redacted
+
+
+def _sanitize_secret_values(value: Any, secrets: tuple[str, ...]) -> Any:
+    if isinstance(value, str):
+        return _redact_secrets(value, secrets)
+    if isinstance(value, list):
+        return [_sanitize_secret_values(item, secrets) for item in value]
+    if isinstance(value, dict):
+        return {
+            (_redact_secrets(key, secrets) if isinstance(key, str) else key): _sanitize_secret_values(item, secrets)
+            for key, item in value.items()
+        }
+    return value
+
+
+def _worker_request(
+    record: ExtensionRecord,
+    action: ExtensionAction,
+    params: dict[str, Any],
+    *,
+    workspace: Workspace | None,
+    read_only: bool,
+) -> tuple[bytes, dict[str, str], tuple[str, ...]]:
+    context, env = _worker_context_and_environment(record, workspace=workspace, read_only=read_only)
+    try:
+        request = json.dumps(
+            {
+                "action": action.name,
+                "params": params,
+                "context": context,
+                "extension_sha256": record.sha256,
+            },
+            ensure_ascii=False,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode("utf-8")
+    except (TypeError, ValueError) as exc:
+        raise ToolError("INVALID_ARGUMENT", "Extension request must contain only strict JSON values.") from exc
     if len(request) > MAX_WORKER_REQUEST_BYTES:
         raise ToolError("EXTENSION_REQUEST_TOO_LARGE", "Extension request is too large.")
-    argv = _worker_argv(record)
-    env_root = workspace_root or record.path
-    env = clean_environment(env_root)
-    env["PYTHONUTF8"] = "1"
-    if getattr(sys, "frozen", False):
-        env["PYINSTALLER_RESET_ENVIRONMENT"] = "1"
-    process = subprocess.Popen(
-        argv,
-        cwd=record.path,
-        env=env,
-        stdin=subprocess.PIPE,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        shell=False,
-        close_fds=True,
-    )
+    return request, env, _inherited_secret_values(context, env)
+
+
+def _start_worker_process(record: ExtensionRecord, request: bytes, env: dict[str, str]) -> tuple[subprocess.Popen[bytes], _BoundedCapture, _BoundedCapture]:
+    kwargs: dict[str, Any] = {
+        # The worker itself starts from a neutral directory. After it creates
+        # and verifies its private Extension snapshot it temporarily chdirs
+        # into that snapshot, so relative plugin file access cannot fall back
+        # to the mutable source directory or keep it locked on Windows.
+        "cwd": tempfile.gettempdir(),
+        "env": env,
+        "stdin": subprocess.PIPE,
+        "stdout": subprocess.PIPE,
+        "stderr": subprocess.PIPE,
+        "shell": False,
+        "close_fds": True,
+    }
+    kwargs.update(owned_process_group_kwargs())
+    try:
+        process = subprocess.Popen(_worker_argv(record), **kwargs)
+    except OSError as exc:
+        raise ToolError("EXTENSION_START_FAILED", f"Could not start extension worker: {exc}") from exc
     assert process.stdin is not None and process.stdout is not None and process.stderr is not None
     stdout = _BoundedCapture(process.stdout, MAX_WORKER_RESPONSE_BYTES)
     stderr = _BoundedCapture(process.stderr, MAX_WORKER_LOG_BYTES)
@@ -679,33 +921,104 @@ def _run_worker(
     try:
         process.stdin.write(request)
         process.stdin.close()
+    except OSError as exc:
+        terminate_owned_process_tree(process)
         try:
-            exit_code = process.wait(timeout=record.manifest.execution_timeout_seconds)
+            process.wait(timeout=5)
         except subprocess.TimeoutExpired:
             process.kill()
-            process.wait(timeout=5)
-            raise ToolError(
-                "EXTENSION_TIMEOUT",
-                f"Extension exceeded {record.manifest.execution_timeout_seconds} seconds.",
-                extension_id=record.manifest.extension_id,
-                action=action.name,
-            )
-    finally:
+            try:
+                process.wait(timeout=1)
+            except subprocess.TimeoutExpired:
+                pass
         try:
             process.stdin.close()
         except OSError:
             pass
+        stdout.join(timeout=1)
+        stderr.join(timeout=1)
+        try:
+            process.stdout.close()
+        except OSError:
+            pass
+        try:
+            process.stderr.close()
+        except OSError:
+            pass
+        raise ToolError("EXTENSION_PROTOCOL_ERROR", f"Could not send request to extension worker: {exc}") from exc
+    return process, stdout, stderr
+
+
+def _close_worker_streams(process: subprocess.Popen[bytes], stdout: _BoundedCapture, stderr: _BoundedCapture) -> str:
     stdout.join(timeout=5)
     stderr.join(timeout=5)
-    process.stdout.close()
-    process.stderr.close()
+    if process.stdout is not None:
+        process.stdout.close()
+    if process.stderr is not None:
+        process.stderr.close()
     if stdout.truncated:
         raise ToolError("EXTENSION_RESPONSE_TOO_LARGE", "Extension response exceeded the protocol limit.")
-    stderr_text = bytes(stderr.data).decode("utf-8", errors="replace").strip()
+    return bytes(stderr.data).decode("utf-8", errors="replace").strip()
+
+
+def _workspace_artifact_metadata(workspace: Workspace, raw: Any) -> dict[str, Any]:
+    if isinstance(raw, str):
+        path_value = raw
+        label = None
+        kind = None
+    elif isinstance(raw, dict):
+        unknown = sorted(set(raw).difference({"path", "label", "kind"}))
+        if unknown:
+            raise ToolError("EXTENSION_ARTIFACT_INVALID", f"Unknown workspace_artifacts fields: {', '.join(unknown)}")
+        path_value = raw.get("path")
+        label = raw.get("label")
+        kind = raw.get("kind")
+        if label is not None and (not isinstance(label, str) or len(label) > 200):
+            raise ToolError("EXTENSION_ARTIFACT_INVALID", "workspace_artifacts label must be a string <= 200 characters")
+        if kind is not None and (not isinstance(kind, str) or len(kind) > 80):
+            raise ToolError("EXTENSION_ARTIFACT_INVALID", "workspace_artifacts kind must be a string <= 80 characters")
+    else:
+        raise ToolError("EXTENSION_ARTIFACT_INVALID", "workspace_artifacts entries must be strings or objects")
+    if not isinstance(path_value, str) or not path_value:
+        raise ToolError("EXTENSION_ARTIFACT_INVALID", "workspace_artifacts path is required")
+    path = workspace.resolve(path_value)
+    if not path.is_file():
+        raise ToolError("EXTENSION_ARTIFACT_NOT_FOUND", "Declared workspace artifact does not exist.", path=path_value)
+    digest = hashlib.sha256()
     try:
-        envelope = json.loads(bytes(stdout.data))
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise ToolError("EXTENSION_PROTOCOL_ERROR", "Extension worker returned invalid JSON.", stderr=stderr_text[:4000]) from exc
+        with path.open("rb") as handle:
+            while True:
+                chunk = handle.read(1024 * 1024)
+                if not chunk:
+                    break
+                digest.update(chunk)
+        size = path.stat().st_size
+    except OSError as exc:
+        raise ToolError("EXTENSION_ARTIFACT_READ_FAILED", f"Could not inspect workspace artifact: {exc}", path=path_value) from exc
+    result: dict[str, Any] = {
+        "path": path.relative_to(workspace.root).as_posix(),
+        "size": size,
+        "sha256": digest.hexdigest(),
+    }
+    if label is not None:
+        result["label"] = label
+    if kind is not None:
+        result["kind"] = kind
+    return result
+
+
+def _finalize_worker_result(
+    record: ExtensionRecord,
+    action: ExtensionAction,
+    envelope: Any,
+    *,
+    exit_code: int,
+    stderr_text: str,
+    workspace: Workspace | None,
+    secrets: tuple[str, ...] = (),
+) -> dict[str, Any]:
+    envelope = _sanitize_secret_values(envelope, secrets)
+    stderr_text = _redact_secrets(stderr_text, secrets)
     if not isinstance(envelope, dict):
         raise ToolError("EXTENSION_PROTOCOL_ERROR", "Extension worker response must be an object.")
     if not envelope.get("ok"):
@@ -727,11 +1040,274 @@ def _run_worker(
     if not isinstance(result, dict):
         raise ToolError("EXTENSION_PROTOCOL_ERROR", "Extension result must be an object.")
     result = dict(result)
+    artifacts = result.get("workspace_artifacts")
+    if artifacts is not None:
+        if workspace is None:
+            raise ToolError("EXTENSION_ARTIFACT_INVALID", "workspace_artifacts requires a selected workspace")
+        if not isinstance(artifacts, list) or len(artifacts) > MAX_WORKSPACE_ARTIFACTS:
+            raise ToolError("EXTENSION_ARTIFACT_INVALID", f"workspace_artifacts must be a list of <= {MAX_WORKSPACE_ARTIFACTS} entries")
+        result["workspace_artifacts"] = [_workspace_artifact_metadata(workspace, item) for item in artifacts]
     result.setdefault("extension_id", record.manifest.extension_id)
     result.setdefault("extension_action", action.name)
     if stderr_text:
         result.setdefault("extension_log", stderr_text[:4000])
     return result
+
+
+def _decode_worker_result(
+    record: ExtensionRecord,
+    action: ExtensionAction,
+    stdout: _BoundedCapture,
+    stderr_text: str,
+    *,
+    exit_code: int,
+    workspace: Workspace | None,
+    secrets: tuple[str, ...] = (),
+) -> dict[str, Any]:
+    safe_stderr = _redact_secrets(stderr_text, secrets)
+    try:
+        envelope = json.loads(bytes(stdout.data), parse_constant=_reject_json_constant)
+    except (UnicodeDecodeError, ValueError) as exc:
+        raise ToolError("EXTENSION_PROTOCOL_ERROR", "Extension worker returned invalid JSON.", stderr=safe_stderr[:4000]) from exc
+    return _finalize_worker_result(record, action, envelope, exit_code=exit_code, stderr_text=stderr_text, workspace=workspace, secrets=secrets)
+
+
+def _run_worker(
+    record: ExtensionRecord,
+    action: ExtensionAction,
+    params: dict[str, Any],
+    *,
+    workspace: Workspace | None,
+    read_only: bool,
+) -> dict[str, Any]:
+    request, env, secrets = _worker_request(record, action, params, workspace=workspace, read_only=read_only)
+    process, stdout, stderr = _start_worker_process(record, request, env)
+    timeout = _action_timeout(record, action)
+    try:
+        try:
+            exit_code = process.wait(timeout=_wait_timeout(timeout))
+        except subprocess.TimeoutExpired:
+            terminate_owned_process_tree(process)
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                pass
+            raise ToolError(
+                "EXTENSION_TIMEOUT",
+                f"Extension exceeded {timeout} seconds.",
+                extension_id=record.manifest.extension_id,
+                action=action.name,
+            )
+    finally:
+        if process.stdin is not None:
+            try:
+                process.stdin.close()
+            except OSError:
+                pass
+    stderr_text = _close_worker_streams(process, stdout, stderr)
+    return _decode_worker_result(record, action, stdout, stderr_text, exit_code=exit_code, workspace=workspace, secrets=secrets)
+
+
+@dataclass
+class _ExtensionJob:
+    job_id: str
+    extension_id: str
+    action_name: str
+    workspace_root: str | None
+    timeout_seconds: int
+    process: subprocess.Popen[bytes]
+    stdout: _BoundedCapture
+    stderr: _BoundedCapture
+    started_at: float
+    secrets: tuple[str, ...]
+    status: str = "running"
+    finished_at: float | None = None
+    exit_code: int | None = None
+    result: dict[str, Any] | None = None
+    error: dict[str, Any] | None = None
+    cancel_requested: bool = False
+
+
+class ExtensionJobManager:
+    """Owns long-running extension workers so plugins never need detached subprocesses."""
+
+    def __init__(self) -> None:
+        self._jobs: dict[str, _ExtensionJob] = {}
+        self._starting_jobs = 0
+        self._lock = threading.Lock()
+        atexit.register(self.close)
+
+    def _prune_finished_locked(self) -> None:
+        finished = sorted(
+            (job for job in self._jobs.values() if job.status != "running"),
+            key=lambda job: job.finished_at or job.started_at,
+        )
+        excess = len(finished) - MAX_RETAINED_FINISHED_JOBS
+        for job in finished[: max(0, excess)]:
+            self._jobs.pop(job.job_id, None)
+
+    def start(
+        self,
+        record: ExtensionRecord,
+        action: ExtensionAction,
+        params: dict[str, Any],
+        *,
+        workspace: Workspace | None,
+        read_only: bool,
+    ) -> dict[str, Any]:
+        with self._lock:
+            self._prune_finished_locked()
+            running = sum(job.status == "running" for job in self._jobs.values())
+            if running + self._starting_jobs >= MAX_RUNNING_EXTENSION_JOBS:
+                raise ToolError(
+                    "EXTENSION_JOB_LIMIT",
+                    f"At most {MAX_RUNNING_EXTENSION_JOBS} extension jobs may run concurrently.",
+                    limit=MAX_RUNNING_EXTENSION_JOBS,
+                )
+            self._starting_jobs += 1
+        try:
+            request, env, secrets = _worker_request(record, action, params, workspace=workspace, read_only=read_only)
+            process, stdout, stderr = _start_worker_process(record, request, env)
+            job = _ExtensionJob(
+                job_id=uuid.uuid4().hex,
+                extension_id=record.manifest.extension_id,
+                action_name=action.name,
+                workspace_root=str(workspace.root) if workspace is not None else None,
+                timeout_seconds=_action_timeout(record, action),
+                process=process,
+                stdout=stdout,
+                stderr=stderr,
+                started_at=time.time(),
+                secrets=secrets,
+            )
+        except Exception:
+            with self._lock:
+                self._starting_jobs -= 1
+            raise
+        with self._lock:
+            self._starting_jobs -= 1
+            self._jobs[job.job_id] = job
+        monitor = threading.Thread(
+            target=self._monitor,
+            args=(job, record, action, workspace),
+            name=f"folderbridge-extension-job-{job.job_id[:8]}",
+            daemon=True,
+        )
+        monitor.start()
+        return {
+            "job_id": job.job_id,
+            "status": "running",
+            "extension_id": record.manifest.extension_id,
+            "extension_action": action.name,
+            "timeout_seconds": job.timeout_seconds,
+        }
+
+    def _monitor(
+        self,
+        job: _ExtensionJob,
+        record: ExtensionRecord,
+        action: ExtensionAction,
+        workspace: Workspace | None,
+    ) -> None:
+        timed_out = False
+        try:
+            try:
+                exit_code = job.process.wait(timeout=_wait_timeout(job.timeout_seconds))
+            except subprocess.TimeoutExpired:
+                timed_out = True
+                terminate_owned_process_tree(job.process)
+                try:
+                    exit_code = job.process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    exit_code = job.process.poll() if job.process.poll() is not None else -1
+            stderr_text = _close_worker_streams(job.process, job.stdout, job.stderr)
+            with self._lock:
+                cancel_requested = job.cancel_requested
+            if cancel_requested:
+                status = "cancelled"
+                result = None
+                error = None
+            elif timed_out:
+                status = "timed_out"
+                result = None
+                error = {
+                    "code": "EXTENSION_JOB_TIMEOUT",
+                    "message": f"Extension job exceeded {job.timeout_seconds} seconds.",
+                }
+            else:
+                try:
+                    result = _decode_worker_result(record, action, job.stdout, stderr_text, exit_code=exit_code, workspace=workspace, secrets=job.secrets)
+                    status = "succeeded"
+                    error = None
+                except ToolError as exc:
+                    status = "failed"
+                    result = None
+                    error = {"code": exc.code, "message": str(exc), "details": exc.details}
+        except Exception as exc:
+            exit_code = job.process.poll()
+            status = "failed"
+            result = None
+            error = {
+                "code": "EXTENSION_JOB_INTERNAL_ERROR",
+                "message": _redact_secrets(f"{type(exc).__name__}: {exc}", job.secrets),
+            }
+        with self._lock:
+            job.status = status
+            job.exit_code = exit_code
+            job.result = result
+            job.error = error
+            job.finished_at = time.time()
+            self._prune_finished_locked()
+
+    def _get(self, job_id: str, *, workspace: Workspace | None) -> _ExtensionJob:
+        if not isinstance(job_id, str) or not re.fullmatch(r"[0-9a-f]{32}", job_id):
+            raise ToolError("INVALID_ARGUMENT", "job_id must be a FolderBridge extension job id")
+        with self._lock:
+            job = self._jobs.get(job_id)
+        if job is None:
+            raise ToolError("EXTENSION_JOB_NOT_FOUND", "Extension job is not known to this FolderBridge process.", job_id=job_id)
+        if job.workspace_root is not None:
+            if workspace is None:
+                raise ToolError("WORKSPACE_REQUIRED", "This extension job belongs to a workspace; pass workspace_id.")
+            if str(workspace.root) != job.workspace_root:
+                raise ToolError("EXTENSION_JOB_WORKSPACE_MISMATCH", "Extension job belongs to a different workspace.", job_id=job_id)
+        return job
+
+    def status(self, job_id: str, *, workspace: Workspace | None) -> dict[str, Any]:
+        job = self._get(job_id, workspace=workspace)
+        with self._lock:
+            payload: dict[str, Any] = {
+                "job_id": job.job_id,
+                "status": job.status,
+                "extension_id": job.extension_id,
+                "extension_action": job.action_name,
+                "timeout_seconds": job.timeout_seconds,
+                "started_at": job.started_at,
+                "finished_at": job.finished_at,
+                "exit_code": job.exit_code,
+            }
+            if job.result is not None:
+                payload["result"] = job.result
+            if job.error is not None:
+                payload["error"] = job.error
+            return payload
+
+    def cancel(self, job_id: str, *, workspace: Workspace | None) -> dict[str, Any]:
+        job = self._get(job_id, workspace=workspace)
+        with self._lock:
+            if job.status != "running":
+                return {"job_id": job.job_id, "status": job.status, "already_finished": True}
+            job.cancel_requested = True
+        terminate_owned_process_tree(job.process)
+        return {"job_id": job.job_id, "status": "cancelling"}
+
+    def close(self) -> None:
+        with self._lock:
+            running = [job for job in self._jobs.values() if job.status == "running"]
+            for job in running:
+                job.cancel_requested = True
+        for job in running:
+            terminate_owned_process_tree(job.process)
 
 
 def _worker_argv(record: ExtensionRecord) -> list[str]:
@@ -783,10 +1359,11 @@ def _safe_relative_file(root: Path, raw: Any) -> Path:
     return path
 
 
-def _hash_extension(root: Path) -> str:
+def _hash_extension(root: Path) -> tuple[str, bytes]:
     digest = hashlib.sha256()
     count = 0
     total = 0
+    manifest_data: bytes | None = None
     for path in sorted(root.rglob("*"), key=lambda item: item.as_posix().lower()):
         if any(part in {"__pycache__", ".git", ".svn"} for part in path.relative_to(root).parts):
             continue
@@ -799,7 +1376,20 @@ def _hash_extension(root: Path) -> str:
         count += 1
         if count > MAX_EXTENSION_FILES:
             raise ValueError(f"extension exceeds {MAX_EXTENSION_FILES} files")
-        data = path.read_bytes()
+        try:
+            before = path.stat()
+            if before.st_size > MAX_EXTENSION_BYTES - total:
+                raise ValueError(f"extension exceeds {MAX_EXTENSION_BYTES} bytes")
+            data = path.read_bytes()
+            after = path.stat()
+        except OSError as exc:
+            raise ValueError(f"could not read extension file while hashing: {path.relative_to(root).as_posix()}") from exc
+        before_identity = (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns)
+        after_identity = (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns)
+        if len(data) != before.st_size or before_identity != after_identity:
+            raise ValueError(f"extension file changed while hashing: {path.relative_to(root).as_posix()}")
+        if path.relative_to(root).as_posix() == MANIFEST_NAME:
+            manifest_data = data
         total += len(data)
         if total > MAX_EXTENSION_BYTES:
             raise ValueError(f"extension exceeds {MAX_EXTENSION_BYTES} bytes")
@@ -808,15 +1398,13 @@ def _hash_extension(root: Path) -> str:
         digest.update(relative)
         digest.update(len(data).to_bytes(8, "big"))
         digest.update(data)
-    return digest.hexdigest()
+    if manifest_data is None:
+        raise ValueError(f"missing regular {MANIFEST_NAME}")
+    return digest.hexdigest(), manifest_data
 
 
 def _config_base() -> Path:
-    if sys.platform == "win32" and os.environ.get("LOCALAPPDATA"):
-        return Path(os.environ["LOCALAPPDATA"]) / "folderbridge-mcp"
-    if os.environ.get("XDG_CONFIG_HOME"):
-        return Path(os.environ["XDG_CONFIG_HOME"]) / "folderbridge-mcp"
-    return Path.home() / ".config" / "folderbridge-mcp"
+    return user_config_root()
 
 
 def _is_reparse_point(path: Path) -> bool:

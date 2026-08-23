@@ -18,6 +18,7 @@ MAX_BINARY_FILE_BYTES = 2 * 1024 * 1024 * 1024
 MAX_PPTX_BYTES = 512 * 1024 * 1024
 MAX_ZIP_MEMBERS = 20_000
 MAX_XML_MEMBER_BYTES = 16 * 1024 * 1024
+MAX_PPTX_XML_TOTAL_BYTES = 256 * 1024 * 1024
 MAX_SMARTART_ITEMS = 5_000
 MAX_PPTX_PAGE_SPAN = 100
 MAX_IMAGE_BYTES = 8 * 1024 * 1024
@@ -84,6 +85,18 @@ def inspect_pptx(
         infos = archive.infolist()
         if len(infos) > MAX_ZIP_MEMBERS:
             raise ToolError("ZIP_TOO_MANY_MEMBERS", f"Archive exceeds {MAX_ZIP_MEMBERS} members.", path=raw)
+        xml_total = sum(
+            info.file_size
+            for info in infos
+            if info.filename.lower().endswith((".xml", ".rels"))
+        )
+        if xml_total > MAX_PPTX_XML_TOTAL_BYTES:
+            raise ToolError(
+                "PPTX_XML_TOO_LARGE",
+                f"PPTX XML relationships/content exceed {MAX_PPTX_XML_TOTAL_BYTES} uncompressed bytes.",
+                path=raw,
+                uncompressed_xml_bytes=xml_total,
+            )
         names = {info.filename for info in infos}
         slide_numbers = sorted(
             int(match.group(1))
@@ -213,6 +226,9 @@ def inspect_pptx(
             "slide_numbers": slide_numbers,
             "smartart_data_xml": len(data_parts),
             "smartart_frames": len(all_frames),
+            "xml_uncompressed_bytes": xml_total,
+            "xml_limit_bytes": MAX_PPTX_XML_TOTAL_BYTES,
+            "xml_limit_usage_ratio": xml_total / MAX_PPTX_XML_TOTAL_BYTES,
             "successful_diagram_mappings": sum(1 for item in all_frames if item.get("mapping_ok")),
             "unique_mapped_data_parts": len(mapped_set),
             "orphan_data_parts": orphan_parts,

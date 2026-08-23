@@ -65,6 +65,32 @@ class GuideGuiTests(unittest.TestCase):
         self.assertEqual(launcher.apply_button.state, "disabled")
         self.assertEqual(launcher.start_button.state, "normal")
 
+    def test_managed_fonts_resize_in_place_across_monitor_dpi_changes(self) -> None:
+        try:
+            root = tk.Tk()
+        except tk.TclError as exc:
+            self.skipTest(f"Tk display unavailable: {exc}")
+        root.withdraw()
+        try:
+            launcher = FolderBridgeLauncher.__new__(FolderBridgeLauncher)
+            launcher.root = root
+            launcher._fonts = {}
+            launcher._dpi = 96
+            launcher._refresh_fonts()
+            body = launcher._font("body")
+            self.assertEqual(int(body.cget("size")), -12)
+
+            launcher._dpi = 144
+            launcher._refresh_fonts()
+            self.assertIs(launcher._font("body"), body)
+            self.assertEqual(int(body.cget("size")), -18)
+
+            launcher._dpi = 96
+            launcher._refresh_fonts()
+            self.assertEqual(int(body.cget("size")), -12)
+        finally:
+            root.destroy()
+
     def test_guide_instructions_are_read_only_and_selectable(self) -> None:
         try:
             root = tk.Tk()
@@ -73,7 +99,12 @@ class GuideGuiTests(unittest.TestCase):
         root.withdraw()
         try:
             launcher = FolderBridgeLauncher.__new__(FolderBridgeLauncher)
+            launcher.root = root
+            launcher._dpi = 96
             launcher._ui_scale = 1.0
+            launcher._fonts = {}
+            launcher._guide_text_widgets = []
+            launcher._refresh_fonts()
             notebook = ttk.Notebook(root)
             tab = launcher._guide_tab(
                 notebook,
@@ -108,7 +139,12 @@ class GuideGuiTests(unittest.TestCase):
         root.withdraw()
         try:
             launcher = FolderBridgeLauncher.__new__(FolderBridgeLauncher)
+            launcher.root = root
+            launcher._dpi = 96
             launcher._ui_scale = 1.0
+            launcher._fonts = {}
+            launcher._guide_text_widgets = []
+            launcher._refresh_fonts()
             notebook = ttk.Notebook(root)
             with self.assertRaisesRegex(ValueError, "步骤号不存在"):
                 launcher._guide_tab(

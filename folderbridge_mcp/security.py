@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any, Iterator
 
 from .config import CONFIG_NAME
+from .process_control import owned_process_group_kwargs, terminate_owned_process_tree
 
 
 MAX_READ_BYTES = 256 * 1024
@@ -41,12 +42,14 @@ IGNORED_DIRS = {
     "vendor",
 }
 SENSITIVE_NAMES = {
+    ".api-config.json",
     ".env",
     ".netrc",
     ".npmrc",
     ".pypirc",
     "credentials",
     "credentials.json",
+    "api-config.json",
     "id_dsa",
     "id_ecdsa",
     "id_ed25519",
@@ -396,6 +399,7 @@ def _run_bounded_process(
         stderr=subprocess.PIPE,
         shell=False,
         close_fds=True,
+        **owned_process_group_kwargs(hide_window=True),
     )
     assert process.stdout is not None and process.stderr is not None
     stdout = _PipeCapture(process.stdout, output_limit)
@@ -407,8 +411,12 @@ def _run_bounded_process(
         exit_code = process.wait(timeout=timeout)
     except subprocess.TimeoutExpired:
         timed_out = True
-        process.kill()
-        exit_code = process.wait(timeout=5)
+        terminate_owned_process_tree(process, hide_window=True)
+        try:
+            exit_code = process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            exit_code = process.wait(timeout=5)
     stdout.join(timeout=5)
     stderr.join(timeout=5)
     process.stdout.close()

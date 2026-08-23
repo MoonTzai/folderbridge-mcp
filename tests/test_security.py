@@ -31,6 +31,7 @@ class WorkspaceSecurityTests(unittest.TestCase):
 
     def test_hides_sensitive_and_ignored_paths(self) -> None:
         (self.root / ".env").write_text("TOKEN=secret", encoding="utf-8")
+        (self.root / ".api-config.json").write_text('{"apiKey":"secret"}', encoding="utf-8")
         (self.root / "src").mkdir()
         (self.root / "src" / "app.py").write_text("print('ok')\n", encoding="utf-8")
         (self.root / "node_modules").mkdir()
@@ -39,6 +40,8 @@ class WorkspaceSecurityTests(unittest.TestCase):
         self.assertEqual(listing["files"], ["src/app.py"])
         with self.assertRaisesRegex(ToolError, "Credential-like"):
             self.workspace.read_text(".env")
+        with self.assertRaisesRegex(ToolError, "Credential-like"):
+            self.workspace.read_text(".api-config.json")
 
     def test_rejects_symlinks_when_supported(self) -> None:
         outside = Path(self.temporary.name) / "outside.txt"

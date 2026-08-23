@@ -52,6 +52,10 @@ class GitPublisherManifestTests(unittest.TestCase):
         for action in record.manifest.actions.values():
             properties = action.input_schema.get("properties", {})
             self.assertTrue({"token", "password", "pat"}.isdisjoint({str(key).lower() for key in properties}))
+        plugin_text = (EXT_DIR / "plugin.py").read_text(encoding="utf-8")
+        self.assertIn("owned_process_group_kwargs", plugin_text)
+        self.assertIn("terminate_owned_process_tree", plugin_text)
+        self.assertNotIn("subprocess.run(", plugin_text)
 
     def test_origin_validator_rejects_embedded_credentials_and_non_github(self) -> None:
         plugin = load_plugin()

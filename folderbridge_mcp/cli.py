@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import shlex
 import shutil
@@ -78,6 +79,9 @@ def build_parser() -> argparse.ArgumentParser:
     extensions.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     extensions.add_argument("--self-test", action="store_true", help="Run the bundled extension worker smoke test.")
 
+    skills = subparsers.add_parser("skills", help="List FolderBridge Skill Packs and routing metadata.")
+    skills.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+
     subparsers.add_parser("gui", help="Open the local graphical launcher.")
     worker = subparsers.add_parser("extension-worker", help=argparse.SUPPRESS)
     worker.add_argument("--extension-path", required=True, help=argparse.SUPPRESS)
@@ -108,15 +112,29 @@ def main(argv: list[str] | None = None) -> int:
         from .extension_worker import worker_main
 
         return worker_main(args.extension_path, bundled=args.bundled)
-    if args.command == "extensions":
-        import json
+    if args.command == "skills":
+        from .skills import SkillEngine
 
+        description = SkillEngine().describe(include_untrusted=True)
+        if args.json:
+            _write_json_utf8(description)
+        else:
+            for item in description["packs"]:
+                state = "enabled" if item["enabled"] else "trusted" if item["trusted"] else "not-approved"
+                print(f"{item['id']} {item['version']} [{state}] {item['name']} ({item['skill_count']} skills)")
+            for error in description["errors"]:
+                print(f"error: {error['path']}: {error['error']}", file=sys.stderr)
+        return 0
+    if args.command == "extensions":
         from .extensions import ExtensionRegistry
 
         registry = ExtensionRegistry()
         if args.self_test:
-            result = registry.run("comfyui", "status", {}, workspace=None, read_only=True)
-            print(json.dumps(result, ensure_ascii=False, sort_keys=True))
+            result = {
+                "comfyui": registry.run("comfyui", "status", {}, workspace=None, read_only=True),
+                "skill_engine": registry.run("skill-engine", "list", {}, workspace=None, read_only=True),
+            }
+            _write_json_utf8(result)
             return 0
         description = registry.describe()
         if args.json:
@@ -229,6 +247,12 @@ def _client_config(
     access_mode = "read_only" if read_only else "read_write"
     print(render_client_config(workspaces, access_mode, allow_tasks, output_format, capabilities))
     return 0
+
+
+def _write_json_utf8(payload: object) -> None:
+    data = json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8") + b"\n"
+    sys.stdout.buffer.write(data)
+    sys.stdout.buffer.flush()
 
 
 def _print_tasks(config: object) -> None:

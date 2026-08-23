@@ -11,6 +11,7 @@ from typing import Any, Callable, Iterable
 
 from .comfyui import COMFYUI_HOST, COMFYUI_PORT, comfyui_status
 from .extensions import extension_state_root
+from .process_control import owned_process_group_kwargs, terminate_owned_process_tree
 
 
 SERVICE_CONFIG_VERSION = 1
@@ -138,7 +139,9 @@ class ComfyUIServiceController:
         self.config_path = config_path or comfyui_service_config_path()
         self._status_probe = status_probe or (lambda: comfyui_status(port=COMFYUI_PORT))
         self._popen_factory = popen_factory or subprocess.Popen
-        self._terminate_process = terminate_process or _terminate_owned_process_tree
+        self._terminate_process = terminate_process or (
+            lambda process: terminate_owned_process_tree(process, force=os.name == "nt")
+        )
         self._sleep = sleeper
         self._monotonic = monotonic
         self._process: Any | None = None
@@ -165,8 +168,9 @@ class ComfyUIServiceController:
         return updated
 
     def status(self) -> dict[str, Any]:
-        process_alive = self._process is not None and self._process.poll() is None
-        if self._process is not None and not process_alive:
+        process = self._process
+        process_alive = process is not None and process.poll() is None
+        if process is not None and not process_alive and self._process is process:
             self._process = None
         probe = self._status_probe()
         online = bool(probe.get("online"))
@@ -187,7 +191,8 @@ class ComfyUIServiceController:
         initial = self.status()
         if initial["online"]:
             return {**initial, "started": False, "reason": "already-online"}
-        if self._process is not None and self._process.poll() is None:
+        current_process = self._process
+        if current_process is not None and current_process.poll() is None:
             return {**initial, "started": False, "reason": "already-starting"}
 
         config = self.config()
@@ -207,19 +212,18 @@ class ComfyUIServiceController:
             "close_fds": True,
             "env": environment,
         }
-        if os.name == "nt":
-            kwargs["creationflags"] = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
-        else:
-            kwargs["start_new_session"] = True
+        kwargs.update(owned_process_group_kwargs())
         with log_path.open("ab", buffering=0) as log_handle:
             kwargs["stdout"] = log_handle
-            self._process = self._popen_factory(install.argv(), **kwargs)
+            process = self._popen_factory(install.argv(), **kwargs)
+            self._process = process
 
         deadline = self._monotonic() + max(0.1, float(ready_timeout_seconds))
         while self._monotonic() < deadline:
-            if self._process.poll() is not None:
-                code = self._process.returncode
-                self._process = None
+            if process.poll() is not None:
+                code = process.returncode
+                if self._process is process:
+                    self._process = None
                 raise ManagedServiceError(
                     f"ComfyUI 启动进程提前退出（退出码 {code}）。启动日志：{log_path}"
                 )
@@ -257,7 +261,8 @@ class ComfyUIServiceController:
         except subprocess.TimeoutExpired:
             process.kill()
             process.wait(timeout=5)
-        self._process = None
+        if self._process is process:
+            self._process = None
 
         deadline = self._monotonic() + max(0.0, float(wait_port_seconds))
         state = self.status()
@@ -300,25 +305,3 @@ class ManagedServiceManager:
 def default_managed_service_manager() -> ManagedServiceManager:
     return ManagedServiceManager((ComfyUIServiceController(),))
 
-
-def _terminate_owned_process_tree(process: Any) -> None:
-    if process.poll() is not None:
-        return
-    if os.name == "nt":
-        taskkill = Path(os.environ.get("SystemRoot", r"C:\\Windows")) / "System32" / "taskkill.exe"
-        completed = subprocess.run(
-            [str(taskkill), "/PID", str(process.pid), "/T", "/F"],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            check=False,
-            shell=False,
-            timeout=8,
-        )
-        if completed.returncode == 0:
-            return
-        process.terminate()
-        return
-    try:
-        os.killpg(os.getpgid(process.pid), 15)
-    except (AttributeError, OSError, ProcessLookupError):
-        process.terminate()

@@ -254,26 +254,16 @@ def _reject_unsafe_local_git_config(root: Path) -> None:
 
 def _git_text(root: Path, *args: str) -> str:
     git = resolve_task_executable("git", root)
-    env = clean_environment(root)
-    env["GIT_TERMINAL_PROMPT"] = "0"
-    try:
-        completed = subprocess.run(
-            [git, *args],
-            cwd=root,
-            env=env,
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            shell=False,
-            timeout=15,
-            check=False,
-        )
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        raise ToolError("GIT_FAILED", f"Could not inspect Git repository: {exc}") from exc
-    if completed.returncode != 0:
-        message = completed.stderr.decode("utf-8", errors="replace").strip()
+    result = run_task(root, Task("capability-git-inspect", (git, *args), 15))
+    if bool(result.get("timed_out")):
+        raise ToolError("GIT_FAILED", f"git {' '.join(args)} exceeded 15 seconds")
+    if bool(result.get("truncated")):
+        raise ToolError("GIT_FAILED", "Git inspection output exceeded the bounded capture limit; refusing a partial result.")
+    exit_code = result.get("exit_code")
+    if exit_code != 0:
+        message = str(result.get("stderr") or "").strip()
         raise ToolError("GIT_FAILED", message[:2000] or f"git {' '.join(args)} failed")
-    return completed.stdout.decode("utf-8", errors="replace").strip()
+    return str(result.get("stdout") or "").strip()
 
 
 def _package_json_scripts(root: Path) -> dict[str, str]:

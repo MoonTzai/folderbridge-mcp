@@ -264,13 +264,13 @@ class LauncherBackendTests(unittest.TestCase):
         process = FakeProcess()
         supervisor._process = process  # type: ignore[assignment]
 
-        def terminate(fake):
+        def terminate(fake, **_kwargs):
             fake.returncode = -9
 
-        with mock.patch("folderbridge_mcp.launcher_backend._terminate_process_tree", side_effect=terminate) as terminate_tree:
+        with mock.patch("folderbridge_mcp.launcher_backend.terminate_owned_process_tree", side_effect=terminate) as terminate_tree:
             code = supervisor.stop()
 
-        terminate_tree.assert_called_once_with(process)
+        terminate_tree.assert_called_once_with(process, hide_window=True)
         self.assertEqual(code, -9)
         self.assertFalse(supervisor.running())
 
@@ -304,6 +304,11 @@ class LauncherBackendTests(unittest.TestCase):
         self.assertNotIn(secret, redacted)
         self.assertNotIn("abcdef", redacted)
         self.assertNotIn(prefixed_key, redacted)
+
+    def test_redaction_prefers_longest_overlapping_explicit_secret(self) -> None:
+        redacted = redact_text("value=abcdef and abc", ("abc", "abcdef"))
+        self.assertEqual(redacted, "value=<已隐藏> and <已隐藏>")
+        self.assertNotIn("def", redacted)
 
     def test_short_command_captures_output_without_a_shell(self) -> None:
         result = run_short_command(

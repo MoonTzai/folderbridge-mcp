@@ -5,9 +5,12 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
+import folderbridge_mcp.capabilities as capabilities_module
 from folderbridge_mcp.capabilities import normalize_capability_names
 from folderbridge_mcp.config import load_config
+from folderbridge_mcp.security import ToolError
 from folderbridge_mcp.tools import ToolRuntime
 
 
@@ -89,6 +92,22 @@ class CapabilityTests(unittest.TestCase):
 
         self.assertTrue(result["isError"])
         self.assertEqual(result["structuredContent"]["error"]["code"], "UNSAFE_GIT_CONFIG")
+
+    def test_git_inspection_fails_closed_when_bounded_runner_truncates_output(self) -> None:
+        with mock.patch.object(
+            capabilities_module,
+            "run_task",
+            return_value={
+                "exit_code": 0,
+                "timed_out": False,
+                "stdout": "partial",
+                "stderr": "",
+                "truncated": True,
+            },
+        ):
+            with self.assertRaises(ToolError) as raised:
+                capabilities_module._git_text(self.root, "--version")
+        self.assertEqual(raised.exception.code, "GIT_FAILED")
 
     def test_capability_names_are_canonical_and_reject_unknown_values(self) -> None:
         self.assertEqual(

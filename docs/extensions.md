@@ -1,6 +1,6 @@
 # FolderBridge Extension ABI v1
 
-FolderBridge 0.5.1 uses one stable MCP gateway, `extension`, for local integrations. Installing an extension changes the extension registry, not the MCP tool catalog. Clients can call `extension(action="list")`, inspect the returned action schemas, then call `extension(action="run", extension_id=..., extension_action=..., params=...)`.
+FolderBridge 0.7.0 uses one stable MCP gateway, `extension`, for local integrations. Installing an extension changes the extension registry, not the MCP tool catalog. Clients can call `extension(action="list")`, inspect the returned action schemas, then call `extension(action="run", extension_id=..., extension_action=..., params=...)`. Actions declared with `run_mode="job"` return a host-owned `job_id`; use `extension(action="job_status", job_id=...)` or `extension(action="job_cancel", job_id=...)` without registering extra MCP tools. Each FolderBridge process admits at most 16 concurrently starting/running Extension jobs and retains only the newest 128 finished job records.
 
 ## Directory layout
 
@@ -11,7 +11,13 @@ FolderBridge 0.5.1 uses one stable MCP gateway, `extension`, for local integrati
   ... optional sibling modules/data ...
 ```
 
-User extensions live under the per-user FolderBridge configuration directory, normally `%LOCALAPPDATA%\folderbridge-mcp\extensions` on Windows. The Windows launcher opens this directory from the default-collapsed **Extensions** sidebar.
+User extensions live under the per-user FolderBridge configuration directory, normally `%LOCALAPPDATA%\folderbridge-mcp\extensions` on Windows. The Windows launcher opens this directory from the default-collapsed **Extensions & Skills** sidebar.
+
+## Skill Engine is a separate trust model
+
+FolderBridge 0.7.0 also ships a local Skill Engine, exposed through the bundled read-only `skill-engine` Extension. Skill Packs contain methodology text rather than executable plugin code, so they do not use Extension permissions or the Extension code-approval ABI. External Skill Packs have their own exact-tree-hash approval and enable/disable state; unapproved or stale Pack metadata is not exposed to the model-facing `list`, `match`, `get`, or routing index. The `skill-engine` adapter itself stays thin and delegates parsing, trust, matching, and byte verification to the core Skill Engine.
+
+The Launcher manages these two systems in the same sidebar for convenience, but their security semantics remain separate: Extensions may execute approved Python in workers, while Skill markdown is only returned as bounded UTF-8 methodology content and is never executed by the Skill Engine.
 
 ## Manifest
 
@@ -70,11 +76,13 @@ ABI v1 accepts precise permission contracts only:
 - `git.push-current-branch`
 - `github.web-auth`
 - `network.loopback:127.0.0.1:<port>` or `network.loopback:localhost:<port>`
+- `network.outbound:https`
 - `process.execute:<basename>`
+- `environment.inherit:<UPPERCASE_NAME>`
 
-There is no wildcard shell or wildcard network permission. A dynamic workspace adapter requires `workspace.adapter`; profile state requires `extension.state`.
+There is no wildcard shell or wildcard network permission. `network.outbound:https` is an explicit authorization-contract declaration for plugins that need external HTTPS APIs; Extension permissions are not a kernel network sandbox. `environment.inherit:<UPPERCASE_NAME>` copies only that exact variable into the otherwise cleaned worker environment. `CONTROL_PLANE_API_KEY`, FolderBridge/control-plane variables, PATH/runtime bootstrap variables, and other reserved names cannot be inherited. Values inherited through variable names containing key/token/secret/password/passwd/auth are treated as secrets and recursively redacted from worker results, worker logs, surfaced stderr, and errors. A dynamic workspace adapter requires `workspace.adapter`; profile state requires `extension.state`.
 
-The permission list is part of the approval identity. External extensions are approved against the SHA-256 of the complete extension tree plus the exact permissions. If any file or permission changes, the old approval becomes stale and execution is blocked until the user approves the new hash.
+The permission list is part of the approval identity. External extensions are approved against the SHA-256 of the complete extension tree plus the exact permissions. If any file or permission changes, the old approval becomes stale and execution is blocked until the user approves the new hash. At execution time the worker copies the hash-covered tree into a private temporary snapshot, verifies that snapshot against the host-pinned hash, and imports/runs only from the verified snapshot so the checked bytes and executed bytes stay aligned.
 
 Permission declarations are an authorization contract, not an operating-system sandbox. Python code approved by the user still runs with that user's OS permissions. Use a VM/container for untrusted plugin code.
 
@@ -99,7 +107,7 @@ def handle(action, params, context):
 - `state_dir` or `null`
 - `workspace_adapter`
 
-The return value must be a JSON object. As with built-in tools, a result may contain `_content` with MCP content items; this is how the bundled ComfyUI extension returns images.
+The return value must be a strict JSON object. Non-standard numeric constants such as `NaN` and `Infinity` are rejected at manifest, request, response, and worker serialization boundaries. As with built-in tools, a result may contain `_content` with MCP content items; this is how the bundled ComfyUI extension returns images. A result may also contain `workspace_artifacts`, either workspace-relative strings or `{path,label,kind}` objects. FolderBridge re-resolves each declared artifact through workspace path policy and replaces it with trusted relative-path, byte-size, and SHA-256 metadata before exposing the result.
 
 ABI v1 plugins should rely on FolderBridge-packaged modules and the Python standard library. A one-file EXE is not a general pip environment. Integrations that need external software should normally call a fixed local HTTP API or declare `process.execute:<basename>` and invoke that installed program.
 
@@ -122,7 +130,7 @@ FolderBridge evaluates these patterns every time the extension registry is queri
 
 ## Authorization and hot loading
 
-`action.authorization` is either `global` or `none`.
+`action.authorization` is either `global` or `none`. Each action may additionally declare `run_mode` (`foreground`, the default, or `job`) and an optional `timeout_seconds` override. A Job action returns quickly with a `job_id`, allowing long pipelines to run without holding one foreground MCP request open.
 
 - `global`: the user must approve the exact extension hash/permissions and enable it once in the Extensions sidebar.
 - `none`: reserved for read-only actions of extensions bundled with FolderBridge, such as the ComfyUI `status` probe. External plugin code is never executed without hash approval.
@@ -133,14 +141,16 @@ The registry is scanned on demand. Adding, editing, approving, disabling, or rem
 
 Plugins run in a separate FolderBridge worker process with:
 
-- cleaned environment variables;
-- no Runtime API key passed to plugin code;
-- fixed working directory;
-- manifest timeout up to 600 seconds;
+- a cleaned environment; only exact `environment.inherit:NAME` declarations are copied from the host;
+- no Tunnel/control-plane Runtime API key passed to plugin code, and that variable is explicitly non-inheritable;
+- a private verified execution snapshot used as both import root and working directory;
+- default foreground execution plus optional host-owned `run_mode="job"` for long tasks;
+- per-action or extension-default `timeout_seconds` from 0 through 86,400 seconds (24 hours), where `0` disables automatic timeout termination;
+- complete owned process-tree termination on non-zero timeout, explicit `job_cancel`, or FolderBridge shutdown;
 - bounded request, response, stdout, and stderr;
 - PyInstaller environment reset when running from the one-file Windows EXE.
 
-This boundary prevents plugin prints/crashes from corrupting MCP stdio and limits accidental runaway output. It does not provide kernel-level filesystem/network isolation.
+Even with `timeout_seconds=0`, an explicit cancel or FolderBridge shutdown still cleans up the owned worker tree. Job records are owned by the running FolderBridge MCP process rather than persisted as detached background daemons. This boundary prevents plugin prints/crashes from corrupting MCP stdio and limits accidental runaway output. It does not provide kernel-level filesystem/network isolation.
 
 ## Bundled Microsoft Office Native extension
 

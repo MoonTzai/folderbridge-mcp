@@ -28,6 +28,18 @@ class Gui041RegressionTests(unittest.TestCase):
         self.assertIn('self.extension_canvas.configure(width=self._px(285))', self.gui)
         self.assertIn("self.status_dot.coords", self.gui)
 
+    def test_runtime_dpi_changes_explicitly_resize_existing_fonts(self) -> None:
+        self.assertIn("import tkinter.font as tkfont", self.gui)
+        self.assertIn("DPI_FONT_SPECS", self.gui)
+        self.assertIn("def _refresh_fonts", self.gui)
+        self.assertIn("font_pixel_size(point_size, self._dpi)", self.gui)
+        self.assertIn("managed.configure(family=family, size=pixel_size, weight=weight)", self.gui)
+        self.assertIn('font=self._font("log")', self.gui)
+        self.assertIn('font=self._font("primary_button")', self.gui)
+        self.assertIn('style.configure("TEntry", padding=self._px(6), font=self._font("body"))', self.gui)
+        self.assertNotIn("font=(\"Segoe UI\"", self.gui)
+        self.assertNotIn("font=(\"Cascadia Mono\"", self.gui)
+
     def test_compact_buttons_are_limited_to_select_all_and_clear(self) -> None:
         self.assertIn('style.configure("Compact.TButton"', self.gui)
         self.assertEqual(self.gui.count('style="Compact.TButton"'), 2)
@@ -35,6 +47,19 @@ class Gui041RegressionTests(unittest.TestCase):
         self.assertIn('text="清空",\n            style="Compact.TButton"', self.gui)
         self.assertNotIn('text="应用配置", style="Compact.TButton"', self.gui)
         self.assertNotIn('text="诊断", style="Compact.TButton"', self.gui)
+
+    def test_managed_service_status_is_polled_and_color_coded(self) -> None:
+        self.assertIn("MANAGED_SERVICE_STATUS_POLL_MS = 2_000", self.gui)
+        self.assertIn("def _poll_managed_service_statuses", self.gui)
+        self.assertIn("if self._sidebar_visible:\n            self._refresh_managed_service_statuses_async()", self.gui)
+        self.assertIn('style.configure("ServiceOnline.TLabel"', self.gui)
+        self.assertIn('foreground="#16803c"', self.gui)
+        self.assertIn('style.configure("ServiceOffline.TLabel"', self.gui)
+        self.assertIn('foreground="#c62828"', self.gui)
+        self.assertIn('return "服务：在线 · FolderBridge 托管", "ServiceOnline.TLabel"', self.gui)
+        self.assertIn('return "服务：离线", "ServiceOffline.TLabel"', self.gui)
+        self.assertIn("self._managed_service_status_pending", self.gui)
+        self.assertIn("self._update_managed_service_status_label", self.gui)
 
     def test_shutdown_is_worker_orchestrated_and_destroy_is_main_thread_event(self) -> None:
         self.assertIn('name="folderbridge-shutdown"', self.gui)

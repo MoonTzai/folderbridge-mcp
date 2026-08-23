@@ -40,6 +40,7 @@ try {
         --version-file (Join-Path $projectRoot "packaging\windows_version_info.txt") `
         --manifest (Join-Path $projectRoot "packaging\windows_dpi_manifest.xml") `
         --add-data ((Join-Path $projectRoot "extensions") + ";extensions") `
+        --add-data ((Join-Path $projectRoot "skill_packs") + ";skill_packs") `
         --hidden-import folderbridge_mcp.comfyui `
         --hidden-import folderbridge_mcp.extension_worker `
         --distpath $releaseDir `
@@ -56,11 +57,29 @@ try {
         throw "Built executable smoke test failed."
     }
     $extensionSmoke = (& $executable extensions --json 2>&1 | Out-String).Trim()
-    if ($LASTEXITCODE -ne 0 -or $extensionSmoke -notmatch '"id"\s*:\s*"comfyui"' -or $extensionSmoke -notmatch '"id"\s*:\s*"office"' -or $extensionSmoke -notmatch '"id"\s*:\s*"git-publisher"') {
-        throw "Built executable extension smoke test failed: bundled ComfyUI, Microsoft Office, and Git Publisher extensions must all be discovered."
+    if ($LASTEXITCODE -ne 0 -or $extensionSmoke -notmatch '"id"\s*:\s*"comfyui"' -or $extensionSmoke -notmatch '"id"\s*:\s*"office"' -or $extensionSmoke -notmatch '"id"\s*:\s*"git-publisher"' -or $extensionSmoke -notmatch '"id"\s*:\s*"skill-engine"') {
+        throw "Built executable extension smoke test failed: all bundled extensions must be discovered."
+    }
+    $skillSmoke = (& $executable skills --json 2>&1 | Out-String).Trim()
+    $requiredSkillPatterns = @(
+        '"id"\s*:\s*"folderbridge-engineering"',
+        '"id"\s*:\s*"codebase-design"',
+        '"id"\s*:\s*"improve-codebase-architecture"',
+        '"id"\s*:\s*"diagnosing-bugs"',
+        '"id"\s*:\s*"tdd"',
+        '"id"\s*:\s*"code-review"',
+        '"id"\s*:\s*"implement"'
+    )
+    if ($LASTEXITCODE -ne 0) {
+        throw "Built executable Skill Pack smoke test failed."
+    }
+    foreach ($pattern in $requiredSkillPatterns) {
+        if ($skillSmoke -notmatch $pattern) {
+            throw "Built executable Skill Pack smoke test failed: missing expected engineering Pack/Skill metadata."
+        }
     }
     $workerSmoke = (& $executable extensions --self-test 2>&1 | Out-String).Trim()
-    if ($LASTEXITCODE -ne 0 -or $workerSmoke -notmatch '"extension_id"\s*:\s*"comfyui"') {
+    if ($LASTEXITCODE -ne 0 -or $workerSmoke -notmatch '"extension_id"\s*:\s*"comfyui"' -or $workerSmoke -notmatch '"skill_engine"\s*:' -or $workerSmoke -notmatch '"id"\s*:\s*"folderbridge-engineering"') {
         throw "Built executable extension worker smoke test failed."
     }
     $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $executable).Hash.ToLowerInvariant()

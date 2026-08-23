@@ -17,8 +17,29 @@ FolderBridge MCP 是一个零第三方依赖的 Python MCP 服务器和桌面启
 > [!IMPORTANT]
 > 项目目前处于早期公开测试阶段。它可以缩小攻击面，但不是操作系统级沙箱。只应开放你信任的文件夹和代码仓库。
 
-## 0.5.1 重点更新
+## 0.7.0 重点更新
 
+- **新增本地 Skill Engine，且不扩张 MCP tool 目录：** 可信的方法类 Skill 可按需发现、匹配和加载；统一通过 bundled `skill-engine` Extension 走现有稳定 `extension` 网关，新增 Skill Pack 不会新增 MCP tool 名称。
+- **模型路由，不虚假宣称强制调用：** MCP 初始化指令只注入有界 routing index，在架构、调试、TDD、代码审查和实现任务中提示模型先 `match`、再 `get` 合适的方法；`server_info` 明确标记为 model-routed，而不是保证每次必调。
+- **外部 Skill Pack 使用 exact-hash 信任：** 未批准或已 stale 的 Pack 对模型侧不可见；Launcher 批准时必须携带刚显示的精确 hash，Pack 任一文件变化都会使批准失效；`get` 还会重新核验最终返回正文的确切字节，避免 Skill 在 `match` 后悄悄变化。
+- **内置工程方法 Pack：** `folderbridge-engineering` 提供代码设计、架构优化、故障诊断、测试驱动开发、代码审查和按方案实现六类方法。Skill 只是方法文本，不会作为本地代码执行。
+- **Launcher 统一为 Extensions & Skills：** 右侧栏分别管理 Extension 与 Skill Pack，可打开用户 Skill 目录、启停 Pack、核对外部 Pack hash、撤销批准和查看详情，并明确提示“不会执行本地代码，但会影响模型的方法选择和行为”。
+- **打包链真实验证 Skill：** `skills --json` 在 Windows 管道中固定输出 UTF-8；`extensions --self-test` 会实际启动 ComfyUI 与 Skill Engine worker；Windows build 会把 `skill_packs` 打进单文件 EXE，并在生成 checksum 前验证 bundled Skill 与 worker 链路。
+- **PPTX XML 实际占用可观测：** `pptx_inspect` 在保留 256 MiB XML/relationship 解析前上限的同时，正常结果新增实际未压缩字节数、限制值与占用比例，便于判断真实课件离上限还有多远。
+- **统一用户状态目录：** Launcher、MCP host 与清理环境后的 Extension worker 现在共用一套 FolderBridge 用户配置根目录解析规则，避免 Extension/Skill 状态因环境变量视图不同而分裂。
+- **Extension 改为校验后私有快照执行：** exact-hash 批准现在真正绑定到最终执行字节。worker 会先把 hash 覆盖的 Extension 文件复制到私有临时快照，对快照重新核验宿主钉住的 SHA-256，再只从该快照 import/运行；插件相对路径读取也统一落在快照中，不再回到可变原目录。
+- **补齐并发与协议边界：** Extension trust store 的读改写在单进程内串行化；manifest、worker 请求和响应改为 strict JSON，拒绝非标准 `NaN`/`Infinity`；重叠密钥按长值优先脱敏；JSON Schema 中 boolean 不再因为 Python 的相等规则被当作数值 enum。
+- **第一方外部进程统一纳入 owned-process 语义：** 核心 Git 检查、bundled Git Publisher 的 Git/GCM、Office PowerShell 渲染都具备进程树超时清理；Git 安全检查一旦输出被截断会直接失败，不把不完整结果当作完整检查。
+- **补充资源与生命周期保护：** ComfyUI 启动流程持有稳定的本地 process handle，避免与 shutdown 竞态；核心 PPTX 检查在 XML 解析前增加 256 MiB 的 XML/relationship 总未压缩体积上限。
+- **修复跨屏 DPI 字体缩放：** Windows Per-Monitor V2 环境下，FolderBridge 在窗口移动到不同缩放比例的显示器时，会根据新的 `GetDpiForWindow` 结果明确重算 named font 的像素尺寸。ttk 标签/按钮/输入框/Treeview、运行日志、主启动/停止按钮以及连接向导正文都会随当前屏幕重新缩放，不再依赖 Tk 对已有控件运行时 `tk scaling` 更新的未定义行为。
+- **新增长任务 Extension Job：** action 可声明 `run_mode=job`，`extension(action="run")` 会立即返回 FolderBridge 托管的 `job_id`，随后继续用同一个 `extension` 网关查询状态或取消；不新增 MCP tool 名称。超时可配置到 24 小时，`0` 表示关闭自动超时终止。每个 FolderBridge 进程最多同时处于 starting/running 的 Job 为 16 个，并只保留最近 128 条已结束 Job 记录。
+- **明确环境变量/密钥边界：** Extension 仍从清理后的环境启动，只有 manifest 精确声明的 `environment.inherit:变量名` 才会被复制进去；`CONTROL_PLANE_API_KEY` 与 FolderBridge/control-plane 内部变量永远禁止继承。通过 key/token/secret/password/auth 类变量名继承的值，会在插件返回结果、日志和对外错误中递归脱敏，避免把 API Key 带回模型侧。
+- **新增外部 HTTPS 权限声明：** 需要调用公网 API 的插件可声明 `network.outbound:https`，让用户在精确 hash 批准时明确看到公网依赖。该权限与其它 Extension permission 一样属于授权契约，不是内核级网络沙箱。
+- **宿主校验工作区产物：** 插件可返回 `workspace_artifacts`；FolderBridge 会重新按工作区路径策略解析，并附加 size/SHA-256 后才把结果暴露给模型。
+- **统一的深层进程所有权模块：** Extension worker/Job、Tunnel 命令、FolderBridge 托管的 ComfyUI、获批自定义任务以及受限 Git 检查现在共用同一套 Windows/POSIX 进程组实现。前台超时、Job 超时、显式取消和 FolderBridge 退出都会终止完整的 FolderBridge-owned 进程树，避免不同模块各自维护 `taskkill` / process-group 细节。
+- **窗口按真实内容自适应并支持折叠：** Tk 完成布局后，启动器会按页面实际请求尺寸扩大窗口，最多占显示器 94%；“本地工作区与权限”“OpenAI Secure MCP Tunnel”“运行日志”三个区域都可单独展开/收起，顶部还提供“全部展开 / 全部折叠”。内容全部放得下时主滚动条自动隐藏，只有可见内容超出可用高度才显示；DPI 改变、区域折叠或打开/关闭 Extensions 侧栏都会重新计算。
+- **托管服务状态实时刷新：** Extensions 侧栏打开时，每 2 秒重新检测一次 ComfyUI 托管状态；在线显示绿色，离线/未配置显示红色，检测中/启动中使用中性色。状态未变化时只更新原有状态标签，不再每 2 秒重建整个侧栏。
+- **Judge 类 API 配置文件默认隐藏：** `.api-config.json` / `api-config.json` 已归入凭据类路径，普通 MCP 文件工具不会把它们当项目文本暴露出来。
 - **新增浏览器授权的 GitHub 发布链：** bundled `git-publisher` Extension 可通过 Git Credential Manager 打开 GitHub 官方网页授权，OAuth 凭据保留在 Windows Credential Manager；插件只提交显式文件白名单，并且只把当前分支推到既有 GitHub HTTPS origin。模型侧不暴露 token/PAT/password 输入字段。
 - **Git 发布仍保持强边界：** 拒绝已有 staged 内容、密钥/凭据类文件、会变换内容的 Git attributes 和危险的仓库本地 Git 设置；绝不执行 `git add .`，不接受任意 remote/ref，受控 commit 禁用 hooks/签名，push 永不 force。
 - **补齐 Microsoft Office 原生视觉链：** bundled `office` Extension 可对 `.pptx`、`.docx`、`.xlsx` 调用本机已安装的 Microsoft Office 做原生渲染。PowerPoint 直接逐页导出 PNG；Word/Excel 先走各自原生固定版式引擎，再由 Windows 原生 PDF renderer 转成逐页 PNG。

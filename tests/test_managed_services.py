@@ -188,6 +188,38 @@ class ManagedServiceTests(unittest.TestCase):
             controller.start(ready_timeout_seconds=1)
         self.assertTrue((self.config_path.parent / "launcher-comfyui.log").is_file())
 
+    def test_start_survives_process_reference_cleared_during_poll(self) -> None:
+        root = self._portable()
+        save_comfyui_service_config(ComfyUIServiceConfig(str(root), True), self.config_path)
+        holder: dict[str, ComfyUIServiceController] = {}
+
+        class RacingProcess(FakeProcess):
+            def __init__(self) -> None:
+                super().__init__()
+                self._cleared = False
+
+            def poll(self):
+                if not self._cleared and "controller" in holder:
+                    controller = holder["controller"]
+                    if controller.process is self:
+                        self._cleared = True
+                        self.returncode = 0
+                        controller._process = None
+                return self.returncode
+
+        process = RacingProcess()
+        controller = ComfyUIServiceController(
+            config_path=self.config_path,
+            status_probe=lambda: {"online": False},
+            popen_factory=lambda *args, **kwargs: process,
+        )
+        holder["controller"] = controller
+
+        with self.assertRaises(ManagedServiceError) as raised:
+            controller.start(ready_timeout_seconds=1)
+        self.assertIn("退出码 0", str(raised.exception))
+        self.assertIsNone(controller.process)
+
     def test_owned_stop_uses_saved_process_handle(self) -> None:
         process = FakeProcess()
         terminated = []
@@ -249,14 +281,17 @@ class ManagedServiceTests(unittest.TestCase):
         self.assertEqual([result["service_id"] for result in results], ["beta", "alpha"])
 
     def test_default_termination_never_discovers_pid_by_port(self) -> None:
-        source = Path(__file__).resolve().parents[1] / "folderbridge_mcp" / "managed_services.py"
-        text = source.read_text(encoding="utf-8").lower()
-        self.assertNotIn("netstat", text)
-        self.assertNotIn("get-nettcpconnection", text)
-        self.assertNotIn("localport", text)
-        self.assertIn("systemroot", text)
-        self.assertIn("system32", text)
-        self.assertIn("taskkill.exe", text)
+        package = Path(__file__).resolve().parents[1] / "folderbridge_mcp"
+        managed_text = (package / "managed_services.py").read_text(encoding="utf-8").lower()
+        process_text = (package / "process_control.py").read_text(encoding="utf-8").lower()
+        combined = managed_text + "\n" + process_text
+        self.assertNotIn("netstat", combined)
+        self.assertNotIn("get-nettcpconnection", combined)
+        self.assertNotIn("localport", combined)
+        self.assertIn("terminate_owned_process_tree", managed_text)
+        self.assertIn("systemroot", process_text)
+        self.assertIn("system32", process_text)
+        self.assertIn("taskkill.exe", process_text)
 
 
 if __name__ == "__main__":
