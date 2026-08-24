@@ -19,7 +19,7 @@ EXPECTED_ENGINEERING_SKILLS = {
     "code-review",
     "implement",
 }
-EXPECTED_EXTENSION_VERSIONS = {"git-publisher": "1.2.0", "office": "1.1.0"}
+EXPECTED_EXTENSION_VERSIONS = {"git-publisher": "1.2.1", "office": "1.1.0"}
 
 
 def _project_version() -> str:

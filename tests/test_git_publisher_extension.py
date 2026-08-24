@@ -39,7 +39,7 @@ class GitPublisherManifestTests(unittest.TestCase):
     def test_manifest_is_explicit_and_does_not_accept_tokens(self) -> None:
         record = load_extension(EXT_DIR, bundled=True)
         self.assertEqual(record.manifest.extension_id, "git-publisher")
-        self.assertEqual(record.manifest.version, "1.2.0")
+        self.assertEqual(record.manifest.version, "1.2.1")
         self.assertEqual(set(record.manifest.actions), {"status", "connect", "commit", "push", "release"})
         self.assertTrue(record.manifest.actions["status"].read_only)
         self.assertEqual(record.manifest.actions["status"].authorization, "none")
@@ -67,6 +67,10 @@ class GitPublisherManifestTests(unittest.TestCase):
         self.assertIn("owned_process_group_kwargs", plugin_text)
         self.assertIn("terminate_owned_process_tree", plugin_text)
         self.assertNotIn("subprocess.run(", plugin_text)
+        self.assertIn('"credential", "fill"', plugin_text)
+        self.assertIn('env["GH_TOKEN"] = token', plugin_text)
+        self.assertNotIn('_run_gh(root, "auth", "status"', plugin_text)
+        self.assertNotIn("tomllib", plugin_text)
         self.assertNotIn("tomllib", plugin_text)
 
     def test_release_version_and_assets_are_project_locked(self) -> None:

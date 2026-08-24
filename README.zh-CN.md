@@ -355,7 +355,7 @@ python -m venv .build-venv
 
 ### 发布 GitHub Release
 
-仓库 `main` 的 push 与 GitHub Release 明确分离。Git Publisher 1.2.0 新增一个零参数的 `release` 动作：版本只允许从 `pyproject.toml` 读取稳定的 `x.y.z`，只允许在 `main`、tracked 工作树干净且 `origin/main` 已与当前 HEAD 一致时发布；标签固定为 `v<version>`，资产固定为 `release/windows-x64/FolderBridge.exe` 与 `FolderBridge.exe.sha256`。Git 操作继续使用 Git Credential Manager，GitHub Release 创建／上传使用本机 `gh.exe`；模型不能传入任意仓库、tag、version、asset 路径、token 或 `gh` 参数。
+仓库 `main` 的 push 与 GitHub Release 明确分离。Git Publisher 1.2.1 提供一个零参数的 `release` 动作：版本只允许从 `pyproject.toml` 读取稳定的 `x.y.z`，只允许在 `main`、tracked 工作树干净且 `origin/main` 已与当前 HEAD 一致时发布；标签固定为 `v<version>`，资产固定为 `release/windows-x64/FolderBridge.exe` 与 `FolderBridge.exe.sha256`。Release 认证直接复用已经通过浏览器授权的 Git Credential Manager 账号：隔离 worker 从 GCM 取得凭据，只在本次操作期间通过子进程环境交给 `gh.exe`，因此不再要求额外执行 `gh auth login`。模型不能传入任意仓库、tag、version、asset 路径、token 或 `gh` 参数，凭据也不会由 FolderBridge 持久化或通过 MCP 返回。
 
 仓库端 `.github/workflows/release-windows.yml` 仍保留为第二条发布路径：当最终 commit 标题严格为 `Release FolderBridge <version>` 时，它会独立重新读取版本、执行完整 Windows 测试、构建并验证 EXE，然后创建或修复对应 Release。已有 tag 只有在确实指向同一个 release commit 时才会被接受；已有 Release 可以重新上传两个固定资产并重新标记为 Latest。
 

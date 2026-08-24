@@ -2,6 +2,12 @@
 
 All notable changes to FolderBridge MCP are documented here.
 
+## 0.8.6 — 2026-08-25
+
+- Fixed Git Publisher Release authentication when Git Credential Manager is already connected but GitHub CLI has no separate `gh auth login` session. Git Publisher 1.2.1 now retrieves the existing GitHub credential from GCM inside the isolated worker and passes it to `gh.exe` only through the child-process `GH_TOKEN` environment for the duration of the Release operation.
+- The credential is never accepted as an MCP parameter, written to FolderBridge settings/remotes/logs, placed on the `gh` command line, or returned to the model. Release publishing therefore uses the same browser-authorized GCM account as commit/push without requiring a second GitHub login.
+- Added regression coverage requiring the GCM `credential fill` bridge, forbidding the old `gh auth status` dependency, and preserving the zero-parameter project-locked Release surface.
+
 ## 0.8.5 — 2026-08-25
 
 - Fixed the English connection-guide close button: the action label `关闭` now renders as `Close` instead of the state word `disabled`. Auto-start/service state messages continue to use `disabled` where appropriate.

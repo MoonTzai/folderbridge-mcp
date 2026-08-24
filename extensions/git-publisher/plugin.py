@@ -144,9 +144,59 @@ def _text(completed: subprocess.CompletedProcess[bytes]) -> str:
     return _redact(completed.stdout.decode("utf-8", errors="replace").strip())
 
 
-def _run_gh(root: Path, *args: str, timeout: int = 300, check: bool = True) -> subprocess.CompletedProcess[bytes]:
+def _github_token_from_gcm(root: Path) -> str:
+    git = _git_executable()
+    env = os.environ.copy()
+    env["GIT_TERMINAL_PROMPT"] = "0"
+    argv = [git, "-c", "credential.helper=", "-c", "credential.helper=manager", "credential", "fill"]
+    try:
+        process = subprocess.Popen(
+            argv,
+            cwd=root,
+            env=env,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            shell=False,
+            close_fds=True,
+            **owned_process_group_kwargs(hide_window=True),
+        )
+    except OSError as exc:
+        raise RuntimeError(f"could not query Git Credential Manager: {exc}") from exc
+    try:
+        stdout, _stderr = process.communicate(input=b"protocol=https\nhost=github.com\n\n", timeout=30)
+    except subprocess.TimeoutExpired as exc:
+        terminate_owned_process_tree(process, hide_window=True)
+        try:
+            process.communicate(timeout=5)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.communicate(timeout=5)
+        raise RuntimeError("Git Credential Manager credential lookup exceeded 30 seconds") from exc
+    if process.returncode != 0:
+        raise RuntimeError("Git Credential Manager could not provide GitHub credentials; reconnect Git Publisher first")
+    password = ""
+    for line in stdout.decode("utf-8", errors="strict").splitlines():
+        key, separator, value = line.partition("=")
+        if separator and key == "password":
+            password = value
+            break
+    if not password or len(password) > 4096 or any(char in password for char in "\r\n\x00"):
+        raise RuntimeError("Git Credential Manager returned no usable GitHub credential")
+    return password
+
+
+def _run_gh(
+    root: Path,
+    *args: str,
+    token: str,
+    timeout: int = 300,
+    check: bool = True,
+) -> subprocess.CompletedProcess[bytes]:
     gh = _gh_executable()
     env = os.environ.copy()
+    env.pop("GITHUB_TOKEN", None)
+    env["GH_TOKEN"] = token
     env["GH_PROMPT_DISABLED"] = "1"
     env["GH_PAGER"] = "cat"
     try:
@@ -644,24 +694,34 @@ def _release(root: Path) -> dict[str, Any]:
             gcm_only=True,
         )
 
-    _run_gh(root, "auth", "status", "--hostname", "github.com", timeout=60)
+    token = _github_token_from_gcm(root)
     repo_name = f"{repo['owner']}/{repo['repo']}"
-    existing = _run_gh(root, "release", "view", tag, "--repo", repo_name, check=False)
+    existing = _run_gh(root, "release", "view", tag, "--repo", repo_name, token=token, check=False)
     if existing.returncode == 0:
         _run_gh(
             root,
             "release", "upload", tag, str(exe), str(checksum), "--clobber", "--repo", repo_name,
+            token=token,
             timeout=300,
         )
-        _run_gh(root, "release", "edit", tag, "--title", f"FolderBridge {version}", "--latest", "--repo", repo_name)
+        _run_gh(
+            root,
+            "release", "edit", tag, "--title", f"FolderBridge {version}", "--latest", "--repo", repo_name,
+            token=token,
+        )
     else:
         _run_gh(
             root,
             "release", "create", tag, str(exe), str(checksum),
             "--verify-tag", "--generate-notes", "--title", f"FolderBridge {version}", "--latest", "--repo", repo_name,
+            token=token,
             timeout=300,
         )
-    verified = _run_gh(root, "release", "view", tag, "--repo", repo_name, "--json", "tagName,url")
+    verified = _run_gh(
+        root,
+        "release", "view", tag, "--repo", repo_name, "--json", "tagName,url",
+        token=token,
+    )
     return {
         **repo,
         "released": True,
