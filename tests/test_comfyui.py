@@ -7,7 +7,7 @@ import threading
 import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import unquote, urlparse
 
 from folderbridge_mcp.comfyui import comfyui_status, run_workflow
 from folderbridge_mcp.security import ToolError, Workspace
@@ -29,7 +29,23 @@ class _FakeComfyHandler(BaseHTTPRequestHandler):
         if parsed.path == "/system_stats":
             self._json(200, self.server.system_stats)  # type: ignore[attr-defined]
             return
+        if parsed.path.startswith("/object_info/"):
+            class_name = unquote(parsed.path.removeprefix("/object_info/"))
+            info = self.server.object_info.get(class_name)  # type: ignore[attr-defined]
+            if info is None:
+                self.send_error(404)
+            else:
+                self._json(200, {class_name: info})
+            return
         if parsed.path == "/history/prompt-test":
+            self.server.history_requests += 1  # type: ignore[attr-defined]
+            self.server.history_entered.set()  # type: ignore[attr-defined]
+            gate = self.server.history_gate  # type: ignore[attr-defined]
+            if gate is not None:
+                gate.wait(timeout=5)
+            if not self.server.history_complete:  # type: ignore[attr-defined]
+                self._json(200, {})
+                return
             self._json(
                 200,
                 {
@@ -51,11 +67,23 @@ class _FakeComfyHandler(BaseHTTPRequestHandler):
         self.send_error(404)
 
     def do_POST(self) -> None:
+        if self.path == "/api/jobs/prompt-test/cancel":
+            self.server.targeted_cancel_requests += 1  # type: ignore[attr-defined]
+            if not self.server.targeted_cancel_available:  # type: ignore[attr-defined]
+                self.send_error(404)
+                return
+            self._json(200, {"cancelled": True})
+            return
+        if self.path == "/interrupt":
+            self.server.global_interrupt_requests += 1  # type: ignore[attr-defined]
+            self._json(200, {})
+            return
         if self.path != "/prompt":
             self.send_error(404)
             return
         length = int(self.headers.get("Content-Length", "0"))
         body = json.loads(self.rfile.read(length))
+        self.server.prompt_requests += 1  # type: ignore[attr-defined]
         self.server.last_prompt = body  # type: ignore[attr-defined]
         self._json(200, {"prompt_id": "prompt-test", "node_errors": {}})
 
@@ -81,6 +109,15 @@ class ComfyUiTests(unittest.TestCase):
         self.server.history_outputs = {  # type: ignore[attr-defined]
             "9": {"images": [{"filename": "result.png", "subfolder": "", "type": "output"}]}
         }
+        self.server.object_info = {}  # type: ignore[attr-defined]
+        self.server.history_complete = True  # type: ignore[attr-defined]
+        self.server.history_requests = 0  # type: ignore[attr-defined]
+        self.server.history_entered = threading.Event()  # type: ignore[attr-defined]
+        self.server.history_gate = None  # type: ignore[attr-defined]
+        self.server.prompt_requests = 0  # type: ignore[attr-defined]
+        self.server.targeted_cancel_requests = 0  # type: ignore[attr-defined]
+        self.server.targeted_cancel_available = True  # type: ignore[attr-defined]
+        self.server.global_interrupt_requests = 0  # type: ignore[attr-defined]
         self.server.view_requests = 0  # type: ignore[attr-defined]
         self.port = self.server.server_address[1]
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
@@ -225,6 +262,198 @@ class ComfyUiTests(unittest.TestCase):
         self.assertTrue(result["artifacts_truncated"])
         self.assertEqual(len(result["artifacts"]), 64)
         self.assertEqual(self.server.view_requests, 0)  # type: ignore[attr-defined]
+
+    def test_dynamic_combo_string_option_is_accepted_and_submitted(self) -> None:
+        self.server.object_info = {  # type: ignore[attr-defined]
+            "SaveVideo": {
+                "input": {
+                    "required": {
+                        "video": ["VIDEO", {}],
+                        "codec": [
+                            "COMFY_DYNAMICCOMBO_V3",
+                            {"options": [{"key": "auto", "inputs": {"required": {}}}, {"key": "h264", "inputs": {"required": {}}}]},
+                        ],
+                    }
+                }
+            }
+        }
+        workflow = {
+            "16": {
+                "class_type": "SaveVideo",
+                "inputs": {"video": ["15", 0], "filename_prefix": "video/test", "format": "mp4", "codec": "auto"},
+            }
+        }
+        (self.root / "good-dynamic.json").write_text(json.dumps(workflow), encoding="utf-8")
+
+        result = run_workflow(self.workspace, "good-dynamic.json", timeout_seconds=5, port=self.port, include_image_data=False)
+
+        self.assertEqual(result["prompt_id"], "prompt-test")
+        self.assertEqual(self.server.prompt_requests, 1)  # type: ignore[attr-defined]
+        self.assertEqual(self.server.last_prompt["prompt"]["16"]["inputs"]["codec"], "auto")  # type: ignore[attr-defined]
+
+    def test_dynamic_combo_object_shape_is_rejected_before_prompt_submission(self) -> None:
+        self.server.object_info = {  # type: ignore[attr-defined]
+            "SaveVideo": {
+                "input": {
+                    "required": {
+                        "video": ["VIDEO", {}],
+                        "codec": [
+                            "COMFY_DYNAMICCOMBO_V3",
+                            {"options": [{"key": "auto", "inputs": {"required": {}}}, {"key": "h264", "inputs": {"required": {}}}]},
+                        ],
+                    }
+                }
+            }
+        }
+        workflow = {
+            "16": {
+                "class_type": "SaveVideo",
+                "inputs": {"video": ["15", 0], "filename_prefix": "video/test", "format": "mp4", "codec": {"codec": "auto"}},
+            }
+        }
+        (self.root / "bad-dynamic.json").write_text(json.dumps(workflow), encoding="utf-8")
+
+        with self.assertRaises(ToolError) as raised:
+            run_workflow(self.workspace, "bad-dynamic.json", timeout_seconds=5, port=self.port)
+
+        self.assertEqual(raised.exception.code, "INVALID_COMFYUI_WORKFLOW")
+        self.assertEqual(raised.exception.details["node_id"], "16")
+        self.assertEqual(raised.exception.details["input_name"], "codec")
+        self.assertEqual(self.server.prompt_requests, 0)  # type: ignore[attr-defined]
+
+    def test_preexisting_cancel_token_prevents_prompt_submission(self) -> None:
+        workflow = {"9": {"class_type": "SaveImage", "inputs": {}}}
+        (self.root / "pre-cancel.json").write_text(json.dumps(workflow), encoding="utf-8")
+        cancel_path = self.root / "pre-cancel.flag"
+        cancel_path.write_text("cancel\n", encoding="ascii")
+
+        with self.assertRaises(ToolError) as raised:
+            run_workflow(
+                self.workspace,
+                "pre-cancel.json",
+                timeout_seconds=30,
+                port=self.port,
+                cancel_token_path=str(cancel_path),
+            )
+
+        self.assertEqual(raised.exception.code, "COMFYUI_CANCELLED")
+        self.assertEqual(self.server.prompt_requests, 0)  # type: ignore[attr-defined]
+        self.assertEqual(self.server.targeted_cancel_requests, 0)  # type: ignore[attr-defined]
+
+    def test_cancel_token_targets_only_the_submitted_comfyui_prompt(self) -> None:
+        self.server.history_complete = False  # type: ignore[attr-defined]
+        workflow = {"9": {"class_type": "SaveImage", "inputs": {}}}
+        (self.root / "cancel.json").write_text(json.dumps(workflow), encoding="utf-8")
+        cancel_path = self.root / "cancel.flag"
+        errors: list[ToolError] = []
+
+        def run() -> None:
+            try:
+                run_workflow(
+                    self.workspace,
+                    "cancel.json",
+                    timeout_seconds=30,
+                    port=self.port,
+                    cancel_token_path=str(cancel_path),
+                )
+            except ToolError as exc:
+                errors.append(exc)
+
+        runner = threading.Thread(target=run, daemon=True)
+        runner.start()
+        for _ in range(100):
+            if self.server.prompt_requests:  # type: ignore[attr-defined]
+                break
+            threading.Event().wait(0.01)
+        cancel_path.write_text("cancel\n", encoding="ascii")
+        runner.join(timeout=3)
+
+        self.assertFalse(runner.is_alive())
+        self.assertEqual([error.code for error in errors], ["COMFYUI_CANCELLED"])
+        self.assertEqual(self.server.targeted_cancel_requests, 1)  # type: ignore[attr-defined]
+        self.assertEqual(self.server.global_interrupt_requests, 0)  # type: ignore[attr-defined]
+
+    def test_cancel_watcher_dispatches_while_history_request_is_blocked(self) -> None:
+        self.server.history_complete = False  # type: ignore[attr-defined]
+        self.server.history_gate = threading.Event()  # type: ignore[attr-defined]
+        workflow = {"9": {"class_type": "SaveImage", "inputs": {}}}
+        (self.root / "blocked-history-cancel.json").write_text(json.dumps(workflow), encoding="utf-8")
+        cancel_path = self.root / "blocked-cancel.flag"
+        errors: list[ToolError] = []
+
+        def run() -> None:
+            try:
+                run_workflow(
+                    self.workspace,
+                    "blocked-history-cancel.json",
+                    timeout_seconds=30,
+                    port=self.port,
+                    cancel_token_path=str(cancel_path),
+                )
+            except ToolError as exc:
+                errors.append(exc)
+
+        runner = threading.Thread(target=run, daemon=True)
+        runner.start()
+        self.assertTrue(self.server.history_entered.wait(timeout=2))  # type: ignore[attr-defined]
+        cancel_path.write_text("cancel\n", encoding="ascii")
+        for _ in range(100):
+            if self.server.targeted_cancel_requests:  # type: ignore[attr-defined]
+                break
+            threading.Event().wait(0.01)
+        self.assertEqual(self.server.targeted_cancel_requests, 1)  # type: ignore[attr-defined]
+        self.assertEqual(self.server.global_interrupt_requests, 0)  # type: ignore[attr-defined]
+        self.server.history_gate.set()  # type: ignore[attr-defined]
+        runner.join(timeout=3)
+        self.assertFalse(runner.is_alive())
+        self.assertEqual([error.code for error in errors], ["COMFYUI_CANCELLED"])
+
+    def test_missing_targeted_cancel_endpoint_never_falls_back_to_global_interrupt(self) -> None:
+        self.server.history_complete = False  # type: ignore[attr-defined]
+        self.server.targeted_cancel_available = False  # type: ignore[attr-defined]
+        workflow = {"9": {"class_type": "SaveImage", "inputs": {}}}
+        (self.root / "cancel-no-endpoint.json").write_text(json.dumps(workflow), encoding="utf-8")
+        cancel_path = self.root / "cancel-no-endpoint.flag"
+        errors: list[ToolError] = []
+
+        def run() -> None:
+            try:
+                run_workflow(
+                    self.workspace,
+                    "cancel-no-endpoint.json",
+                    timeout_seconds=30,
+                    port=self.port,
+                    cancel_token_path=str(cancel_path),
+                )
+            except ToolError as exc:
+                errors.append(exc)
+
+        runner = threading.Thread(target=run, daemon=True)
+        runner.start()
+        for _ in range(100):
+            if self.server.prompt_requests:  # type: ignore[attr-defined]
+                break
+            threading.Event().wait(0.01)
+        cancel_path.write_text("cancel\n", encoding="ascii")
+        runner.join(timeout=3)
+
+        self.assertFalse(runner.is_alive())
+        self.assertEqual([error.code for error in errors], ["COMFYUI_CANCELLED"])
+        self.assertFalse(errors[0].details["cancel_dispatched"])
+        self.assertEqual(self.server.targeted_cancel_requests, 1)  # type: ignore[attr-defined]
+        self.assertEqual(self.server.global_interrupt_requests, 0)  # type: ignore[attr-defined]
+
+    def test_workflow_timeout_targets_only_the_submitted_comfyui_prompt(self) -> None:
+        self.server.history_complete = False  # type: ignore[attr-defined]
+        workflow = {"9": {"class_type": "SaveImage", "inputs": {}}}
+        (self.root / "timeout.json").write_text(json.dumps(workflow), encoding="utf-8")
+
+        with self.assertRaises(ToolError) as raised:
+            run_workflow(self.workspace, "timeout.json", timeout_seconds=1, port=self.port)
+
+        self.assertEqual(raised.exception.code, "COMFYUI_TIMEOUT")
+        self.assertEqual(self.server.targeted_cancel_requests, 1)  # type: ignore[attr-defined]
+        self.assertEqual(self.server.global_interrupt_requests, 0)  # type: ignore[attr-defined]
 
     def test_ui_format_workflow_without_class_type_is_rejected(self) -> None:
         (self.root / "bad.json").write_text('{"nodes": []}', encoding="utf-8")

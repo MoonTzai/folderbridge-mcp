@@ -39,6 +39,7 @@ MAX_RUNNING_EXTENSION_JOBS = 16
 MAX_RETAINED_FINISHED_JOBS = 128
 MAX_FOREGROUND_EXTENSION_WORKERS = 16
 MAX_EXTENSION_JOB_SHUTDOWN_SECONDS = 5.0
+MAX_EXTENSION_JOB_CANCEL_GRACE_SECONDS = 2.0
 ACTIVE_EXTENSION_JOB_STATUSES = frozenset({"running", "termination_pending"})
 MAX_INHERITED_ENV_VALUE_BYTES = 64 * 1024
 MAX_WORKSPACE_ARTIFACTS = 64
@@ -899,6 +900,7 @@ def _worker_context_and_environment(
     *,
     workspace: Workspace | None,
     read_only: bool,
+    job_cancel_path: str | None = None,
 ) -> tuple[dict[str, Any], dict[str, str]]:
     workspace_root = workspace.root if workspace is not None else None
     state_dir: str | None = None
@@ -941,6 +943,7 @@ def _worker_context_and_environment(
         "permissions": list(record.manifest.permissions),
         "workspace_root": str(workspace_root) if workspace_root is not None else None,
         "workspace_read_only": bool(read_only),
+        "job_cancel_path": job_cancel_path,
         "state_dir": state_dir,
         "workspace_adapter": record.manifest.workspace_adapter,
         "inherited_environment": inherited_names,
@@ -987,8 +990,14 @@ def _worker_request(
     *,
     workspace: Workspace | None,
     read_only: bool,
+    job_cancel_path: str | None = None,
 ) -> tuple[bytes, dict[str, str], tuple[str, ...]]:
-    context, env = _worker_context_and_environment(record, workspace=workspace, read_only=read_only)
+    context, env = _worker_context_and_environment(
+        record,
+        workspace=workspace,
+        read_only=read_only,
+        job_cancel_path=job_cancel_path,
+    )
     try:
         request = json.dumps(
             {
@@ -1327,6 +1336,9 @@ class _ExtensionJob:
     started_at: float
     secrets: tuple[str, ...]
     on_finish: Callable[[], None] | None = None
+    cancel_control_dir: str | None = None
+    cancel_token_path: str | None = None
+    cancel_reaper_started: bool = False
     status: str = "running"
     finished_at: float | None = None
     exit_code: int | None = None
@@ -1368,6 +1380,77 @@ class ExtensionJobManager:
             job.finish_notified = True
             callback = job.on_finish
         self._call_finish(callback)
+
+    @staticmethod
+    def _prepare_cancel_control(job_id: str) -> tuple[str, str]:
+        control_dir = tempfile.mkdtemp(prefix=f"folderbridge-extension-job-{job_id[:8]}-")
+        try:
+            os.chmod(control_dir, 0o700)
+        except OSError:
+            pass
+        return control_dir, str(Path(control_dir) / "cancel")
+
+    @staticmethod
+    def _cleanup_cancel_control_paths(control_dir: str | None, token_path: str | None) -> None:
+        if not control_dir:
+            return
+        directory = Path(control_dir)
+        token = Path(token_path) if token_path else directory / "cancel"
+        try:
+            token.unlink()
+        except FileNotFoundError:
+            pass
+        except OSError:
+            return
+        try:
+            directory.rmdir()
+        except OSError:
+            pass
+
+    @classmethod
+    def _cleanup_cancel_control(cls, job: _ExtensionJob) -> None:
+        cls._cleanup_cancel_control_paths(job.cancel_control_dir, job.cancel_token_path)
+        job.cancel_control_dir = None
+        job.cancel_token_path = None
+
+    @staticmethod
+    def _signal_cancel(job: _ExtensionJob) -> bool:
+        raw = job.cancel_token_path
+        if not raw:
+            return False
+        try:
+            path = Path(raw)
+            path.write_text("cancel\n", encoding="ascii")
+            return True
+        except OSError:
+            return False
+
+    def _ensure_cancel_reaper(self, job: _ExtensionJob) -> None:
+        with self._lock:
+            if job.cancel_reaper_started or job.process.poll() is not None:
+                return
+            job.cancel_reaper_started = True
+        reaper = threading.Thread(
+            target=self._cancel_reaper,
+            args=(job,),
+            name=f"folderbridge-extension-cancel-{job.job_id[:8]}",
+            daemon=True,
+        )
+        try:
+            reaper.start()
+        except Exception:
+            with self._lock:
+                job.cancel_reaper_started = False
+            terminate_owned_process_tree(job.process)
+
+    def _cancel_reaper(self, job: _ExtensionJob) -> None:
+        try:
+            if _wait_for_process_exit_without_kill(job.process, MAX_EXTENSION_JOB_CANCEL_GRACE_SECONDS):
+                return
+            terminate_owned_process_tree(job.process)
+        finally:
+            with self._lock:
+                job.cancel_reaper_started = False
 
     def reserve_foreground(self) -> None:
         with self._lock:
@@ -1554,11 +1637,22 @@ class ExtensionJobManager:
                     limit=MAX_RUNNING_EXTENSION_JOBS,
                 )
             self._starting_jobs += 1
+        job_id = uuid.uuid4().hex
+        cancel_control_dir: str | None = None
+        cancel_token_path: str | None = None
         try:
-            request, env, secrets = _worker_request(record, action, params, workspace=workspace, read_only=read_only)
+            cancel_control_dir, cancel_token_path = self._prepare_cancel_control(job_id)
+            request, env, secrets = _worker_request(
+                record,
+                action,
+                params,
+                workspace=workspace,
+                read_only=read_only,
+                job_cancel_path=cancel_token_path,
+            )
             process, stdout, stderr = _start_worker_process(record, request, env)
             job = _ExtensionJob(
-                job_id=uuid.uuid4().hex,
+                job_id=job_id,
                 extension_id=record.manifest.extension_id,
                 action_name=action.name,
                 workspace_root=str(workspace.root) if workspace is not None else None,
@@ -1569,6 +1663,8 @@ class ExtensionJobManager:
                 started_at=time.time(),
                 secrets=secrets,
                 on_finish=on_finish,
+                cancel_control_dir=cancel_control_dir,
+                cancel_token_path=cancel_token_path,
             )
         except _WorkerLaunchTerminationPending as pending:
             terminal_error = {
@@ -1577,7 +1673,7 @@ class ExtensionJobManager:
                 "details": pending.error.details,
             }
             job = _ExtensionJob(
-                job_id=uuid.uuid4().hex,
+                job_id=job_id,
                 extension_id=record.manifest.extension_id,
                 action_name=action.name,
                 workspace_root=str(workspace.root) if workspace is not None else None,
@@ -1588,6 +1684,8 @@ class ExtensionJobManager:
                 started_at=time.time(),
                 secrets=secrets,
                 on_finish=on_finish,
+                cancel_control_dir=cancel_control_dir,
+                cancel_token_path=cancel_token_path,
             )
             with self._lock:
                 self._starting_jobs -= 1
@@ -1609,6 +1707,7 @@ class ExtensionJobManager:
         except Exception:
             with self._lock:
                 self._starting_jobs -= 1
+            self._cleanup_cancel_control_paths(cancel_control_dir, cancel_token_path)
             self._call_finish(on_finish)
             raise
         with self._lock:
@@ -1623,8 +1722,11 @@ class ExtensionJobManager:
         try:
             monitor.start()
         except Exception as exc:
-            terminate_owned_process_tree(job.process)
+            self._signal_cancel(job)
+            if not _wait_for_process_exit_without_kill(job.process, MAX_EXTENSION_JOB_CANCEL_GRACE_SECONDS):
+                terminate_owned_process_tree(job.process)
             if _wait_for_process_exit(job.process, MAX_EXTENSION_JOB_SHUTDOWN_SECONDS):
+                self._cleanup_cancel_control(job)
                 with self._lock:
                     self._jobs.pop(job.job_id, None)
                 self._notify_finish(job)
@@ -1668,7 +1770,9 @@ class ExtensionJobManager:
                 exit_code = job.process.wait(timeout=_wait_timeout(job.timeout_seconds))
             except subprocess.TimeoutExpired:
                 timed_out = True
-                terminate_owned_process_tree(job.process)
+                self._signal_cancel(job)
+                if not _wait_for_process_exit_without_kill(job.process, MAX_EXTENSION_JOB_CANCEL_GRACE_SECONDS):
+                    terminate_owned_process_tree(job.process)
                 if not _wait_for_process_exit(job.process, MAX_EXTENSION_JOB_SHUTDOWN_SECONDS):
                     timeout_error = {
                         "code": "EXTENSION_JOB_TIMEOUT",
@@ -1734,7 +1838,8 @@ class ExtensionJobManager:
             }
         # A terminal status must not become visible while the worker still owns
         # a cross-thread workspace mutation lease. The process has exited by
-        # this point, so release before publishing terminal status.
+        # this point, so clean up host control state and release before publishing.
+        self._cleanup_cancel_control(job)
         self._notify_finish(job)
         with self._lock:
             job.status = status
@@ -1803,6 +1908,7 @@ class ExtensionJobManager:
                 _close_worker_streams(job.process, job.stdout, job.stderr)
             except Exception:
                 pass
+            self._cleanup_cancel_control(job)
             self._notify_finish(job)
             with self._lock:
                 if job.cancel_requested:
@@ -1871,13 +1977,10 @@ class ExtensionJobManager:
             if was_pending:
                 job.pending_terminal_status = "cancelled"
                 job.pending_terminal_error = None
-        terminate_owned_process_tree(job.process)
+        self._signal_cancel(job)
+        self._ensure_cancel_reaper(job)
         if was_pending:
-            if not _wait_for_process_exit(job.process, MAX_EXTENSION_JOB_SHUTDOWN_SECONDS):
-                return {"job_id": job.job_id, "status": "termination_pending"}
-            self._reconcile_pending(job)
-            with self._lock:
-                return {"job_id": job.job_id, "status": job.status}
+            return {"job_id": job.job_id, "status": "termination_pending", "cancel_requested": True}
         return {"job_id": job.job_id, "status": "cancelling"}
 
     def close(self) -> None:
@@ -1887,6 +1990,8 @@ class ExtensionJobManager:
             foreground = list(self._foreground_running.values())
             for job in running:
                 job.cancel_requested = True
+        for job in running:
+            self._signal_cancel(job)
         # Foreground request threads must be released immediately even if an OS
         # process refuses termination. Process ownership and mutation leases stay
         # with the monitor until actual exit.
@@ -1896,8 +2001,12 @@ class ExtensionJobManager:
             exit_code = worker.process.poll()
             if exit_code is not None:
                 self._finalize_foreground(worker, exit_code)
+        cancel_deadline = time.monotonic() + MAX_EXTENSION_JOB_CANCEL_GRACE_SECONDS
+        while time.monotonic() < cancel_deadline and any(job.process.poll() is None for job in running):
+            time.sleep(0.05)
         for job in running:
-            terminate_owned_process_tree(job.process)
+            if job.process.poll() is None:
+                terminate_owned_process_tree(job.process)
         deadline = time.monotonic() + MAX_EXTENSION_JOB_SHUTDOWN_SECONDS
         for job in running:
             remaining = max(0.0, deadline - time.monotonic())
@@ -1912,7 +2021,19 @@ class ExtensionJobManager:
                 # A live monitor will publish the final status; only release the
                 # lease here after process death so queued workspace mutations
                 # can drain during shutdown even if monitor cleanup lags.
+                self._cleanup_cancel_control(job)
                 self._notify_finish(job)
+
+
+def _wait_for_process_exit_without_kill(process: subprocess.Popen[bytes], timeout: float) -> bool:
+    deadline = time.monotonic() + max(0.0, timeout)
+    while True:
+        if process.poll() is not None:
+            return True
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return process.poll() is not None
+        time.sleep(min(0.05, remaining))
 
 
 def _wait_for_process_exit(process: subprocess.Popen[bytes], timeout: float) -> bool:

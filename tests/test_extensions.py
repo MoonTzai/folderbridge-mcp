@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib.util
 import io
 import json
 import os
@@ -602,7 +603,7 @@ class ExtensionTests(unittest.TestCase):
                 "import time\n"
                 "def handle(action, params, context):\n"
                 "    time.sleep(0.08)\n"
-                "    return {'done': True}\n"
+                "    return {'done': True, 'cancel_path': context.get('job_cancel_path')}\n"
             )
         )
         manifest_path = path / "folderbridge-extension.json"
@@ -632,6 +633,8 @@ class ExtensionTests(unittest.TestCase):
             status = self.registry.job_status(started["job_id"], workspace=Workspace(self.workspace_root))
         self.assertEqual(status["status"], "succeeded")
         self.assertTrue(status["result"]["done"])
+        self.assertIsInstance(status["result"]["cancel_path"], str)
+        self.assertIn("folderbridge-extension-job-", status["result"]["cancel_path"])
         self.assertTrue(job_finished.wait(timeout=1))
 
     def test_foreground_shutdown_wakes_request_without_releasing_live_worker(self) -> None:
@@ -788,6 +791,50 @@ class ExtensionTests(unittest.TestCase):
                 self.assertTrue(finished.wait(timeout=1))
             finally:
                 manager.close()
+
+    def test_job_cancel_signals_host_token_before_force_fallback(self) -> None:
+        manager = extensions_module.ExtensionJobManager()
+        cancel_dir = self.base / "cancel-control"
+        cancel_dir.mkdir()
+        cancel_path = cancel_dir / "cancel"
+
+        class RunningProcess:
+            stdin = None
+            stdout = None
+            stderr = None
+
+            def poll(self):
+                return None
+
+        job = extensions_module._ExtensionJob(
+            job_id="d" * 32,
+            extension_id="example",
+            action_name="run",
+            workspace_root=str(self.workspace_root),
+            timeout_seconds=0,
+            process=RunningProcess(),
+            stdout=mock.Mock(),
+            stderr=mock.Mock(),
+            started_at=time.time(),
+            secrets=(),
+            cancel_control_dir=str(cancel_dir),
+            cancel_token_path=str(cancel_path),
+        )
+        with manager._lock:
+            manager._jobs[job.job_id] = job
+        try:
+            with mock.patch.object(manager, "_ensure_cancel_reaper") as reaper, mock.patch.object(
+                extensions_module, "terminate_owned_process_tree"
+            ) as terminate:
+                result = manager.cancel(job.job_id, workspace=Workspace(self.workspace_root))
+
+            self.assertEqual(result["status"], "cancelling")
+            self.assertEqual(cancel_path.read_text(encoding="ascii"), "cancel\n")
+            reaper.assert_called_once_with(job)
+            terminate.assert_not_called()
+        finally:
+            with manager._lock:
+                manager._jobs.pop(job.job_id, None)
 
     def test_job_timeout_never_releases_workspace_lease_while_worker_is_still_alive(self) -> None:
         manager = extensions_module.ExtensionJobManager()
@@ -1122,10 +1169,36 @@ class ExtensionTests(unittest.TestCase):
         self.assertEqual(artifact["size"], len("verdict"))
         self.assertEqual(len(artifact["sha256"]), 64)
 
+    def test_bundled_comfyui_plugin_passes_host_cancel_token_to_runner(self) -> None:
+        project_root = Path(__file__).resolve().parents[1]
+        plugin_path = project_root / "extensions" / "comfyui" / "plugin.py"
+        spec = importlib.util.spec_from_file_location("folderbridge_test_comfyui_plugin", plugin_path)
+        self.assertIsNotNone(spec)
+        self.assertIsNotNone(spec.loader if spec is not None else None)
+        module = importlib.util.module_from_spec(spec)
+        assert spec is not None and spec.loader is not None
+        spec.loader.exec_module(module)
+        cancel_path = str(self.base / "cancel-token")
+
+        with mock.patch.object(module, "run_workflow", return_value={"ok": True}) as runner:
+            result = module.handle(
+                "run",
+                {"workflow_path": "workflow.json"},
+                {
+                    "workspace_root": str(self.workspace_root),
+                    "workspace_read_only": False,
+                    "job_cancel_path": cancel_path,
+                },
+            )
+
+        self.assertEqual(result, {"ok": True})
+        self.assertEqual(runner.call_args.kwargs["cancel_token_path"], cancel_path)
+
     def test_bundled_comfyui_manifest_is_discoverable_from_repository(self) -> None:
         project_root = Path(__file__).resolve().parents[1]
         record = load_extension(project_root / "extensions" / "comfyui", bundled=True)
         self.assertEqual(record.manifest.extension_id, "comfyui")
+        self.assertEqual(record.manifest.version, "1.2.0")
         self.assertIn("status", record.manifest.actions)
         self.assertIn("run", record.manifest.actions)
         run_action = record.manifest.actions["run"]

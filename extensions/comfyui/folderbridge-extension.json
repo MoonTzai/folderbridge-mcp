@@ -2,8 +2,8 @@
   "schema_version": 1,
   "id": "comfyui",
   "name": "Local ComfyUI",
-  "version": "1.1.0",
-  "description": "Connect to local ComfyUI at 127.0.0.1:8188. Long workflow runs execute as host-owned jobs and return bounded artifact paths/metadata instead of embedding generated media in the MCP response.",
+  "version": "1.2.0",
+  "description": "Connect to local ComfyUI at 127.0.0.1:8188. Long workflow runs execute as host-owned jobs, preflight supported dynamic inputs, use prompt-scoped cancellation when available, and return bounded artifact paths/metadata instead of embedding generated media in the MCP response.",
   "entrypoint": "plugin.py",
   "permissions": [
     "network.loopback:127.0.0.1:8188",

@@ -2,6 +2,14 @@
 
 All notable changes to FolderBridge MCP are documented here.
 
+## 0.8.10 — 2026-08-25
+
+- Added bounded ComfyUI API-workflow preflight for supported dynamic inputs. The incident case `SaveVideo.codec={"codec":"auto"}` is now rejected before `/prompt`, while the correct API form `codec="auto"` remains accepted and submitted.
+- Completed host-owned ComfyUI job cancellation: FolderBridge passes a private cancellation token into the isolated worker, the bundled plugin watches it independently of history polling, and cancellation/timeout targets only the submitted ComfyUI `prompt_id` through `/api/jobs/{id}/cancel` before any bounded worker force-kill fallback.
+- Removed the legacy `/interrupt` cancellation fallback because it cannot guarantee prompt-scoped cancellation and could interrupt an unrelated ComfyUI GUI/job workload. If targeted cancellation is unavailable, FolderBridge fails closed and only reaps its own worker.
+- Hardened early-cancel, blocked-history, monitor-start failure, shutdown, timeout, and control-file cleanup paths while preserving the invariant that workspace mutation protection is not released until the extension worker is confirmed exited.
+- Added regression coverage for valid/invalid DynamicCombo API shapes, prompt submission suppression, prompt-scoped cancellation, blocked-history cancellation, pre-submit cancellation, and the no-global-interrupt safety rule. Bundled Local ComfyUI is now 1.2.0.
+
 ## 0.8.9 — 2026-08-25
 
 - Hardened bundled ComfyUI workflow execution for long-running image/video generation: `run` now uses a host-owned Extension Job instead of a foreground MCP request, with a 2-hour workflow timeout by default, explicit `0` for no automatic workflow timeout, and the existing job status/cancel control lane remaining responsive while generation runs.

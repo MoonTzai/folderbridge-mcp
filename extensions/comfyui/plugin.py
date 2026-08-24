@@ -27,4 +27,5 @@ def handle(action: str, params: dict[str, Any], context: dict[str, Any]) -> dict
         save_directory=save_directory,
         timeout_seconds=params.get("timeout_seconds", 2 * 60 * 60),
         include_image_data=False,
+        cancel_token_path=context.get("job_cancel_path"),
     )

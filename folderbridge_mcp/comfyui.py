@@ -3,12 +3,13 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import threading
 import time
 import uuid
 from pathlib import Path, PurePosixPath
 from typing import Any
 from urllib.error import HTTPError, URLError
-from urllib.parse import urlencode
+from urllib.parse import quote, urlencode
 from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
 
 from .security import ToolError, Workspace
@@ -21,6 +22,7 @@ MAX_JSON_RESPONSE_BYTES = 8 * 1024 * 1024
 MAX_IMAGE_BYTES = 8 * 1024 * 1024
 MAX_OUTPUT_IMAGES = 4
 MAX_OUTPUT_ARTIFACTS = 64
+MAX_DYNAMIC_PREFLIGHT_CLASSES = 64
 MAX_TOTAL_IMAGE_BYTES = 16 * 1024 * 1024
 DEFAULT_TIMEOUT_SECONDS = 2 * 60 * 60
 MAX_TIMEOUT_SECONDS = 24 * 60 * 60
@@ -64,6 +66,7 @@ def run_workflow(
     timeout_seconds: int = DEFAULT_TIMEOUT_SECONDS,
     port: int = COMFYUI_PORT,
     include_image_data: bool = True,
+    cancel_token_path: str | None = None,
 ) -> dict[str, Any]:
     if not isinstance(timeout_seconds, int) or isinstance(timeout_seconds, bool) or not 0 <= timeout_seconds <= MAX_TIMEOUT_SECONDS:
         raise ToolError("INVALID_ARGUMENT", f"timeout_seconds must be between 0 and {MAX_TIMEOUT_SECONDS}; 0 disables automatic timeout.")
@@ -71,6 +74,9 @@ def run_workflow(
         raise ToolError("INVALID_ARGUMENT", "include_image_data must be boolean.")
     workflow = _load_workflow(workspace, workflow_path)
     _apply_overrides(workflow, overrides)
+    _preflight_dynamic_inputs(workflow, port=port)
+    if _cancel_requested(cancel_token_path):
+        raise ToolError("COMFYUI_CANCELLED", "ComfyUI workflow cancellation was requested before prompt submission.")
 
     client_id = f"folderbridge-{uuid.uuid4()}"
     queued = _json_request(
@@ -83,22 +89,64 @@ def run_workflow(
     prompt_id = queued.get("prompt_id") if isinstance(queued, dict) else None
     if not isinstance(prompt_id, str) or not prompt_id:
         raise ToolError("COMFYUI_INVALID_RESPONSE", "ComfyUI did not return a prompt_id.")
+    if _cancel_requested(cancel_token_path):
+        cancel_dispatched = _cancel_prompt(prompt_id, port=port)
+        raise ToolError(
+            "COMFYUI_CANCELLED",
+            "ComfyUI workflow cancellation was requested during prompt submission.",
+            prompt_id=prompt_id,
+            cancel_dispatched=cancel_dispatched,
+        )
     node_errors = queued.get("node_errors") if isinstance(queued, dict) else None
     if isinstance(node_errors, dict) and node_errors:
         raise ToolError("COMFYUI_NODE_ERROR", "ComfyUI rejected one or more workflow nodes.", node_errors=node_errors)
 
     deadline = None if timeout_seconds == 0 else time.monotonic() + timeout_seconds
     history_entry: dict[str, Any] | None = None
-    while deadline is None or time.monotonic() < deadline:
-        history = _json_request("GET", f"/history/{prompt_id}", port=port, timeout=10)
-        if isinstance(history, dict):
-            candidate = history.get(prompt_id)
-            if isinstance(candidate, dict):
-                history_entry = candidate
-                break
-        time.sleep(0.5)
+    cancel_stop = threading.Event()
+    cancel_attempted = threading.Event()
+    cancel_dispatched_event = threading.Event()
+    cancel_watcher: threading.Thread | None = None
+    if cancel_token_path:
+        cancel_watcher = threading.Thread(
+            target=_watch_cancel_token,
+            args=(cancel_token_path, prompt_id, port, cancel_stop, cancel_attempted, cancel_dispatched_event),
+            name=f"folderbridge-comfyui-cancel-{prompt_id[:8]}",
+            daemon=True,
+        )
+        cancel_watcher.start()
+    try:
+        while deadline is None or time.monotonic() < deadline:
+            if _cancel_requested(cancel_token_path):
+                if not cancel_attempted.is_set():
+                    if _cancel_prompt(prompt_id, port=port):
+                        cancel_dispatched_event.set()
+                    cancel_attempted.set()
+                raise ToolError(
+                    "COMFYUI_CANCELLED",
+                    "ComfyUI workflow cancellation was requested.",
+                    prompt_id=prompt_id,
+                    cancel_dispatched=cancel_dispatched_event.is_set(),
+                )
+            history = _json_request("GET", f"/history/{prompt_id}", port=port, timeout=10)
+            if isinstance(history, dict):
+                candidate = history.get(prompt_id)
+                if isinstance(candidate, dict):
+                    history_entry = candidate
+                    break
+            time.sleep(0.5)
+    finally:
+        cancel_stop.set()
+        if cancel_watcher is not None:
+            cancel_watcher.join(timeout=0.5)
     if history_entry is None:
-        raise ToolError("COMFYUI_TIMEOUT", f"ComfyUI workflow did not finish within {timeout_seconds} seconds.", prompt_id=prompt_id)
+        cancel_dispatched = _cancel_prompt(prompt_id, port=port)
+        raise ToolError(
+            "COMFYUI_TIMEOUT",
+            f"ComfyUI workflow did not finish within {timeout_seconds} seconds.",
+            prompt_id=prompt_id,
+            cancel_dispatched=cancel_dispatched,
+        )
 
     status = history_entry.get("status")
     if isinstance(status, dict) and status.get("status_str") == "error":
@@ -208,6 +256,133 @@ def _apply_overrides(workflow: dict[str, Any], overrides: dict[str, Any] | None)
         if not isinstance(inputs, dict):
             raise ToolError("INVALID_COMFYUI_WORKFLOW", f"Node {node_id} inputs are not an object.")
         inputs.update(input_values)
+
+
+def _preflight_dynamic_inputs(workflow: dict[str, Any], *, port: int) -> None:
+    suspects: list[tuple[str, str, dict[str, Any]]] = []
+    class_types: set[str] = set()
+    for node_id, node in workflow.items():
+        inputs = node.get("inputs") or {}
+        if not isinstance(inputs, dict):
+            continue
+        if not any(isinstance(value, dict) or "." in name for name, value in inputs.items()):
+            continue
+        class_type = node.get("class_type")
+        if not isinstance(class_type, str):
+            continue
+        suspects.append((node_id, class_type, inputs))
+        class_types.add(class_type)
+    if not suspects:
+        return
+    if len(class_types) > MAX_DYNAMIC_PREFLIGHT_CLASSES:
+        raise ToolError(
+            "INVALID_COMFYUI_WORKFLOW",
+            f"Workflow uses more than {MAX_DYNAMIC_PREFLIGHT_CLASSES} node classes requiring dynamic-input preflight.",
+        )
+
+    schemas: dict[str, dict[str, Any]] = {}
+    for class_type in sorted(class_types):
+        response = _json_request(
+            "GET",
+            f"/object_info/{quote(class_type, safe='')}",
+            port=port,
+            timeout=5,
+        )
+        info = response.get(class_type) if isinstance(response, dict) else None
+        if not isinstance(info, dict):
+            raise ToolError(
+                "INVALID_COMFYUI_WORKFLOW",
+                f"ComfyUI did not return schema information for node class {class_type}.",
+                class_type=class_type,
+            )
+        schemas[class_type] = info
+
+    for node_id, class_type, inputs in suspects:
+        schema_input = schemas[class_type].get("input")
+        if not isinstance(schema_input, dict):
+            continue
+        for section_name in ("required", "optional"):
+            section = schema_input.get(section_name)
+            if not isinstance(section, dict):
+                continue
+            for input_name, descriptor in section.items():
+                if not (
+                    isinstance(input_name, str)
+                    and isinstance(descriptor, list)
+                    and len(descriptor) >= 2
+                    and descriptor[0] == "COMFY_DYNAMICCOMBO_V3"
+                ):
+                    continue
+                if input_name not in inputs:
+                    if section_name == "required":
+                        raise ToolError(
+                            "INVALID_COMFYUI_WORKFLOW",
+                            f"Node {node_id} ({class_type}) is missing required dynamic input {input_name}.",
+                            node_id=node_id,
+                            class_type=class_type,
+                            input_name=input_name,
+                        )
+                    continue
+                value = inputs[input_name]
+                options_raw = descriptor[1].get("options") if isinstance(descriptor[1], dict) else None
+                option_keys = [
+                    option.get("key")
+                    for option in options_raw
+                    if isinstance(option, dict) and isinstance(option.get("key"), str)
+                ] if isinstance(options_raw, list) else []
+                if not isinstance(value, str) or (option_keys and value not in option_keys):
+                    raise ToolError(
+                        "INVALID_COMFYUI_WORKFLOW",
+                        f"Node {node_id} ({class_type}) dynamic input {input_name} must be an option key string, not a nested object.",
+                        node_id=node_id,
+                        class_type=class_type,
+                        input_name=input_name,
+                        allowed_options=option_keys[:32],
+                    )
+
+
+def _watch_cancel_token(
+    cancel_token_path: str,
+    prompt_id: str,
+    port: int,
+    stop: threading.Event,
+    attempted: threading.Event,
+    dispatched: threading.Event,
+) -> None:
+    while not stop.wait(0.1):
+        if not _cancel_requested(cancel_token_path):
+            continue
+        if not attempted.is_set():
+            if _cancel_prompt(prompt_id, port=port):
+                dispatched.set()
+            attempted.set()
+        return
+
+
+def _cancel_requested(cancel_token_path: str | None) -> bool:
+    if not cancel_token_path:
+        return False
+    try:
+        path = Path(cancel_token_path)
+        return path.is_file() and path.stat().st_size > 0
+    except OSError:
+        return False
+
+
+def _cancel_prompt(prompt_id: str, *, port: int) -> bool:
+    encoded_prompt_id = quote(prompt_id, safe="")
+    try:
+        response = _json_request(
+            "POST",
+            f"/api/jobs/{encoded_prompt_id}/cancel",
+            port=port,
+            timeout=5,
+        )
+        return bool(isinstance(response, dict) and response.get("cancelled"))
+    except ToolError:
+        # Fail closed: legacy /interrupt is process-global and cannot guarantee
+        # that only this FolderBridge-owned ComfyUI prompt would be stopped.
+        return False
 
 
 def _prepare_save_directory(workspace: Workspace, raw: str) -> Path:
