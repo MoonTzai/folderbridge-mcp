@@ -2,6 +2,11 @@
 
 All notable changes to FolderBridge MCP are documented here.
 
+## 0.8.8 — 2026-08-25
+
+- Fixed two false positives found by real-workspace verification of the new built-in `test`/`build` providers: UTF-8 JSON files with a BOM are now decoded as `utf-8-sig`, and conventional diagnostic output files (`err.txt`, `error.txt`, `stderr.txt`, `stdout.txt`) are excluded from source/content validation.
+- Added regression coverage reproducing the Debate-Exam BOM calibration file and Debate-Judge diagnostic-output cases while preserving failure on genuinely invalid JSON and non-diagnostic non-UTF-8 project text.
+
 ## 0.8.7 — 2026-08-25
 
 - Made globally pre-authorized `test` and `build` capabilities usable in every selected workspace, including single-file/static HTML, documentation, content, collection, and source-only folders that do not define npm/Python build scripts. Explicit project test/build entry points still take precedence.

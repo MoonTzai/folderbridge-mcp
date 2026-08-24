@@ -132,6 +132,19 @@ class CapabilityTests(unittest.TestCase):
         self.assertEqual(build_result["stdout_total_bytes"], len(build_result["stdout"].encode("utf-8")))
         self.assertEqual(test_result["exit_code"], 0)
 
+    def test_builtin_smoke_accepts_utf8_bom_and_skips_diagnostic_outputs(self) -> None:
+        (self.root / "legacy.json").write_bytes(b"\xef\xbb\xbf{\"ok\":true}\n")
+        (self.root / "err.txt").write_bytes(b"\xff\xfelegacy diagnostic output")
+        (self.root / "stderr.txt").write_bytes(b"\xff\xfelegacy diagnostic output")
+
+        result = workspace_validation_module.run_workspace_smoke(self.root)
+
+        self.assertEqual(result["exit_code"], 0)
+        self.assertEqual(result["checks"]["json_files"], 1)
+        self.assertFalse(any("legacy.json" in item for item in result["issues"]))
+        self.assertFalse(any("err.txt" in item for item in result["issues"]))
+        self.assertFalse(any("stderr.txt" in item for item in result["issues"]))
+
     def test_builtin_smoke_fails_on_invalid_json_but_skips_sensitive_and_dependency_files(self) -> None:
         (self.root / "broken.json").write_text("{broken", encoding="utf-8")
         (self.root / ".env").write_bytes(b"\xff\xfeSECRET=hidden")

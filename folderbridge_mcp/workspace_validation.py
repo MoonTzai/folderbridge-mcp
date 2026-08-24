@@ -18,6 +18,7 @@ MAX_JS_SYNTAX_CHECKS = 25
 SCAN_SECONDS = 20.0
 MAX_ISSUES = 50
 MAX_DELIVERABLES = 50
+DIAGNOSTIC_OUTPUT_NAMES = {"err.txt", "error.txt", "stderr.txt", "stdout.txt"}
 
 TEXT_SUFFIXES = {
     ".bcc", ".css", ".csv", ".htm", ".html", ".js", ".json", ".md", ".mjs",
@@ -74,7 +75,12 @@ def _skip_validation_file(path: Path, root: Path) -> bool:
     if any(part.startswith(".") for part in relative.parts):
         return True
     lowered = path.name.lower()
-    return lowered.endswith((".bak", ".tmp")) or ".bak." in lowered or lowered.startswith("tmp-")
+    return (
+        lowered in DIAGNOSTIC_OUTPUT_NAMES
+        or lowered.endswith((".bak", ".tmp"))
+        or ".bak." in lowered
+        or lowered.startswith("tmp-")
+    )
 
 
 def _node_executable(root: Path) -> str | None:
@@ -160,7 +166,7 @@ def run_workspace_smoke(root: Path) -> dict[str, object]:
             break
         try:
             data = path.read_bytes()
-            text = data.decode("utf-8")
+            text = data.decode("utf-8-sig")
         except UnicodeDecodeError:
             issue(f"{relative}: text file is not valid UTF-8")
             continue

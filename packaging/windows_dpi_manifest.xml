@@ -4,7 +4,7 @@
       name="FolderBridge.MCP"
       processorArchitecture="*"
       type="win32"
-      version="0.8.7.0" />
+      version="0.8.8.0" />
   <trustInfo xmlns="urn:schemas-microsoft-com:asm.v3">
     <security>
       <requestedPrivileges>
