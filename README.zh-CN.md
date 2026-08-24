@@ -276,9 +276,11 @@ MCP 不能删除或移动文件。绝对路径、`..`、符号链接、junction/
 
 ## 全局预授权能力
 
-启动器可以把常见能力一次授权给当前和未来所有工作区：`test`、`build`、`package-windows`、`package-android` 和 `git-push`。这些权限保存在启动器设置中，不写进每个工作区的 `.folderbridge.json`。因此某个工作区加入 FolderBridge 时即使还没有 EXE/APK 构建脚本，几个月后新增受支持的入口，也会在调用时自动发现，无需重新添加工作区或手改 JSON。主界面同时提供“全选”和“清空”按钮。
+启动器可以把常见能力一次授权给当前和未来所有工作区：`test`、`build`、`package-windows`、`package-android` 和 `git-push`。这些权限保存在启动器设置中，不写进每个工作区的 `.folderbridge.json`。主界面同时提供“全选”和“清空”按钮。
 
-`git-push` 继续作为底层“只推送”能力：限制为 GitHub HTTPS `origin`、当前分支、禁止 force push，并拒绝仓库本地的 credential helper、pushurl/receivepack 和 URL 重写配置。若需要浏览器授权＋显式文件 commit＋push，请改用 bundled **Git Publisher** Extension。构建/封装能力可能执行本地项目代码，所以只勾选你愿意全局预授权的能力。
+对已经全局预授权的 `test` 与 `build`，FolderBridge 现在保证每个已选择工作区都有可用 provider。若项目本身存在 `npm run test`、`npm run build`、Python unittest/pytest 等受支持入口，继续优先执行项目入口；若没有，`test` 自动使用 FolderBridge 自有的有界 workspace smoke：复用核心的凭据/VCS/依赖目录/link 拒绝策略，检查常见 UTF-8 文本、JSON/HTML 结构，并在可信系统 Node 可用时用 `--check` 做有界 JavaScript 语法解析而不执行工作区 JavaScript。`build` 则使用不修改工作区的安全 fallback：静态 HTML、文档/内容型和本来无需构建的目录明确返回 `identity` 模式；有源码但没有构建入口的目录明确返回 `validation-only` 模式。两者都不会伪造编译产物，`server_info` 会报告实际选中的 provider。
+
+`git-push` 继续作为底层“只推送”能力：限制为 GitHub HTTPS `origin`、当前分支、禁止 force push，并拒绝仓库本地的 credential helper、pushurl/receivepack 和 URL 重写配置。若需要浏览器授权＋显式文件 commit＋push，请改用 bundled **Git Publisher** Extension。显式项目构建/封装能力可能执行本地项目代码，所以只勾选你愿意全局预授权的能力。
 
 直接 stdio 客户端可在 `serve` 或 `client-config` 命令中重复加入 `--capability <名称>`；Windows 启动器提供同样的持久化复选框。
 

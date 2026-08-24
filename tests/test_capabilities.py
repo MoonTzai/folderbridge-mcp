@@ -8,6 +8,7 @@ from pathlib import Path
 from unittest import mock
 
 import folderbridge_mcp.capabilities as capabilities_module
+import folderbridge_mcp.workspace_validation as workspace_validation_module
 from folderbridge_mcp.capabilities import normalize_capability_names
 from folderbridge_mcp.config import load_config
 from folderbridge_mcp.security import ToolError
@@ -70,6 +71,98 @@ class CapabilityTests(unittest.TestCase):
         self.assertEqual(structured["capability"], "test")
         self.assertEqual(structured["exit_code"], 0)
         self.assertFalse((self.root / ".folderbridge.json").exists())
+
+    def test_globally_authorized_test_and_build_are_available_for_plain_workspace(self) -> None:
+        runtime = ToolRuntime(self.root, load_config(self.root), capabilities=["test", "build"])
+
+        info = runtime.call("server_info", {})["structuredContent"]
+        by_name = {item["name"]: item for item in info["capabilities"]}
+
+        self.assertTrue(by_name["test"]["available"])
+        self.assertEqual(by_name["test"]["provider"], "builtin-workspace-smoke")
+        self.assertTrue(by_name["build"]["available"])
+        self.assertEqual(by_name["build"]["provider"], "builtin-safe-build")
+
+        test_result = runtime.call("run_capability", {"name": "test"})
+        self.assertFalse(test_result["isError"])
+        self.assertEqual(test_result["structuredContent"]["exit_code"], 0)
+        self.assertEqual(test_result["structuredContent"]["provider"], "builtin-workspace-smoke")
+
+        build_result = runtime.call("run_capability", {"name": "build"})
+        self.assertFalse(build_result["isError"])
+        self.assertEqual(build_result["structuredContent"]["exit_code"], 0)
+        self.assertEqual(build_result["structuredContent"]["provider"], "builtin-safe-build")
+        self.assertFalse(build_result["structuredContent"]["generated_artifacts"])
+        self.assertFalse((self.root / ".folderbridge.json").exists())
+
+    def test_static_html_uses_identity_build_and_builtin_smoke(self) -> None:
+        (self.root / "index.html").write_text(
+            "<!doctype html><html><body><script>const answer = 42;</script></body></html>\n",
+            encoding="utf-8",
+        )
+        runtime = ToolRuntime(self.root, load_config(self.root), capabilities=["test", "build"])
+
+        test_result = runtime.call("run_capability", {"name": "test"})["structuredContent"]
+        build_result = runtime.call("run_capability", {"name": "build"})["structuredContent"]
+
+        self.assertEqual(test_result["exit_code"], 0)
+        self.assertEqual(test_result["profile"], "static-web")
+        self.assertEqual(test_result["checks"]["html_files"], 1)
+        self.assertEqual(build_result["build_mode"], "identity")
+        self.assertIn("index.html", build_result["deliverables"])
+
+    def test_module_inline_script_is_checked_as_module_and_build_metadata_matches_stdout(self) -> None:
+        (self.root / "index.html").write_text(
+            '<script type="module">export const answer = 42;</script>\n',
+            encoding="utf-8",
+        )
+        checked_suffixes: list[str] = []
+
+        def fake_node_check(root: Path, node: str, target: Path, *, timeout: int = 10) -> str | None:
+            checked_suffixes.append(target.suffix)
+            return None
+
+        with mock.patch.object(workspace_validation_module, "_node_executable", return_value="node"), mock.patch.object(
+            workspace_validation_module, "_node_check", side_effect=fake_node_check
+        ):
+            test_result = workspace_validation_module.run_workspace_smoke(self.root)
+            build_result = workspace_validation_module.run_safe_build(self.root)
+
+        self.assertIn(".mjs", checked_suffixes)
+        self.assertEqual(build_result["stdout_total_bytes"], len(build_result["stdout"].encode("utf-8")))
+        self.assertEqual(test_result["exit_code"], 0)
+
+    def test_builtin_smoke_fails_on_invalid_json_but_skips_sensitive_and_dependency_files(self) -> None:
+        (self.root / "broken.json").write_text("{broken", encoding="utf-8")
+        (self.root / ".env").write_bytes(b"\xff\xfeSECRET=hidden")
+        deps = self.root / "node_modules"
+        deps.mkdir()
+        (deps / "bad.json").write_text("{also broken", encoding="utf-8")
+        runtime = ToolRuntime(self.root, load_config(self.root), capabilities=["test"])
+
+        result = runtime.call("run_capability", {"name": "test"})
+
+        self.assertFalse(result["isError"])
+        structured = result["structuredContent"]
+        self.assertEqual(structured["exit_code"], 1)
+        self.assertTrue(any("broken.json" in item for item in structured["issues"]))
+        self.assertFalse(any(".env" in item for item in structured["issues"]))
+        self.assertFalse(any("node_modules" in item for item in structured["issues"]))
+
+    def test_explicit_project_scripts_still_win_over_builtin_providers(self) -> None:
+        (self.root / "package.json").write_text(
+            '{"scripts":{"test":"node --test","build":"node build.js"}}',
+            encoding="utf-8",
+        )
+        runtime = ToolRuntime(self.root, load_config(self.root), capabilities=["test", "build"])
+
+        info = runtime.call("server_info", {})["structuredContent"]
+        by_name = {item["name"]: item for item in info["capabilities"]}
+
+        self.assertEqual(by_name["test"]["provider"], "project-task")
+        self.assertIn("npm", by_name["test"]["source"])
+        self.assertEqual(by_name["build"]["provider"], "project-task")
+        self.assertIn("npm", by_name["build"]["source"])
 
     def test_git_push_rejects_unsafe_repository_local_helpers(self) -> None:
         git = shutil.which("git")

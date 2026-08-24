@@ -2,6 +2,13 @@
 
 All notable changes to FolderBridge MCP are documented here.
 
+## 0.8.7 — 2026-08-25
+
+- Made globally pre-authorized `test` and `build` capabilities usable in every selected workspace, including single-file/static HTML, documentation, content, collection, and source-only folders that do not define npm/Python build scripts. Explicit project test/build entry points still take precedence.
+- Added a FolderBridge-owned bounded workspace smoke provider that reuses the core workspace safety policy, skips credential-like/VCS/dependency/hidden paths, validates common UTF-8 text plus JSON/HTML structure, and uses trusted system Node `--check` for bounded JavaScript syntax checks when Node is available. Workspace JavaScript is parsed, not executed.
+- Added a non-mutating safe build fallback: static/content/no-build workspaces use an identity build, while source workspaces without a build entry point use validation-only mode. Both report their provider/mode explicitly and never pretend to generate compiled artifacts.
+- `server_info` now reports the selected capability provider, so globally authorized `test`/`build` show available across workspaces while remaining auditable as `project-task`, `builtin-workspace-smoke`, or `builtin-safe-build`.
+
 ## 0.8.6 — 2026-08-25
 
 - Fixed Git Publisher Release authentication when Git Credential Manager is already connected but GitHub CLI has no separate `gh auth login` session. Git Publisher 1.2.1 now retrieves the existing GitHub credential from GCM inside the isolated worker and passes it to `gh.exe` only through the child-process `GH_TOKEN` environment for the duration of the Release operation.

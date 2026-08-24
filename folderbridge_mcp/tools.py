@@ -317,7 +317,14 @@ class ToolRuntime:
                 {
                     "name": name,
                     "available": name in discovered,
-                    **({"source": discovered[name]["source"]} if name in discovered else {}),
+                    **(
+                        {
+                            "source": discovered[name]["source"],
+                            "provider": discovered[name].get("provider", "project-task"),
+                        }
+                        if name in discovered
+                        else {}
+                    ),
                 }
                 for name in self.capabilities
             ],

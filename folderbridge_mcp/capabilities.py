@@ -11,6 +11,7 @@ from typing import Iterable
 from .config import Task
 from .security import ToolError, clean_environment, resolve_task_executable
 from .task_runner import run_task
+from .workspace_validation import run_safe_build, run_workspace_smoke
 
 
 EXECUTION_CAPABILITY_NAMES = (
@@ -68,6 +69,20 @@ def discover_capabilities(workspace: Path) -> dict[str, dict[str, str]]:
             discovered[name] = {
                 "label": CAPABILITY_LABELS[name],
                 "source": _task_source(task),
+                "provider": "project-task",
+            }
+            continue
+        if name == "test":
+            discovered[name] = {
+                "label": CAPABILITY_LABELS[name],
+                "source": "FolderBridge built-in bounded workspace smoke",
+                "provider": "builtin-workspace-smoke",
+            }
+        elif name == "build":
+            discovered[name] = {
+                "label": CAPABILITY_LABELS[name],
+                "source": "FolderBridge built-in safe build fallback (identity or validation-only)",
+                "provider": "builtin-safe-build",
             }
     if _safe_directory(root, ".git"):
         discovered["git-push"] = {
@@ -96,12 +111,20 @@ def run_capability(workspace: Path, name: str) -> dict[str, object]:
     }
     task = builders[name](root)
     if task is None:
-        raise ToolError(
-            "CAPABILITY_UNAVAILABLE",
-            f"{CAPABILITY_LABELS[name]} is globally pre-authorized but no supported project entry point is currently present.",
-            capability=name,
-        )
-    result = run_task(root, task)
+        if name == "test":
+            result = run_workspace_smoke(root)
+        elif name == "build":
+            result = run_safe_build(root)
+        else:
+            raise ToolError(
+                "CAPABILITY_UNAVAILABLE",
+                f"{CAPABILITY_LABELS[name]} is globally pre-authorized but no supported project entry point is currently present.",
+                capability=name,
+            )
+    else:
+        result = run_task(root, task)
+        result["provider"] = "project-task"
+        result["provider_kind"] = "workspace-code"
     result["capability"] = name
     result["label"] = CAPABILITY_LABELS[name]
     return result
