@@ -123,6 +123,11 @@ def verify(executable: Path) -> dict[str, Any]:
             f"engineering Skill set mismatch: expected {sorted(EXPECTED_ENGINEERING_SKILLS)}, "
             f"got {sorted(actual_skills)}"
         )
+    source = engineering.get("source")
+    if not isinstance(source, dict):
+        raise RuntimeError("folderbridge-engineering has no source attribution")
+    if source.get("repository") != "https://github.com/mattpocock/skills" or source.get("license") != "MIT":
+        raise RuntimeError("folderbridge-engineering upstream attribution/license mismatch")
 
     self_test = _json(executable, "extensions", "--self-test")
     if self_test.get("comfyui", {}).get("extension_id") != "comfyui":

@@ -91,7 +91,8 @@ class LauncherBackendTests(unittest.TestCase):
 
         migrated = LauncherSettingsStore(path).load()
 
-        self.assertEqual(migrated.version, 3)
+        self.assertEqual(migrated.version, 4)
+        self.assertEqual(migrated.language, "zh")
         self.assertEqual(migrated.capabilities, [])
         self.assertEqual(migrated.workspaces, [str(self.root)])
         self.assertEqual(migrated.configured_fingerprint, "legacy")
@@ -214,6 +215,27 @@ class LauncherBackendTests(unittest.TestCase):
         settings.capabilities.append("test")
         self.assertNotEqual(first, settings.fingerprint())
 
+    def test_language_persists_without_changing_connection_fingerprint(self) -> None:
+        path = Path(self.temp.name) / "launcher-language.json"
+        store = LauncherSettingsStore(path)
+        settings = self.settings()
+        first = settings.fingerprint()
+        settings.language = "en"
+        self.assertEqual(settings.fingerprint(), first)
+        store.save(settings)
+        loaded = store.load()
+        self.assertEqual(loaded.language, "en")
+        self.assertEqual(loaded.fingerprint(), first)
+
+    def test_invalid_language_is_rejected_on_load(self) -> None:
+        path = Path(self.temp.name) / "launcher-invalid-language.json"
+        settings = self.settings()
+        payload = settings.__dict__.copy()
+        payload["version"] = 4
+        payload["language"] = "fr"
+        path.write_text(json.dumps(payload), encoding="utf-8")
+        self.assertEqual(LauncherSettingsStore(path).load(), LauncherSettings())
+
     def test_retired_comfyui_capability_is_migrated_without_resetting_settings(self) -> None:
         path = Path(self.temp.name) / "launcher-v3-comfyui.json"
         settings = self.settings()
@@ -232,6 +254,8 @@ class LauncherBackendTests(unittest.TestCase):
 
         loaded = LauncherSettingsStore(path).load()
 
+        self.assertEqual(loaded.version, 4)
+        self.assertEqual(loaded.language, "zh")
         self.assertEqual(loaded.workspaces, settings.workspaces)
         self.assertEqual(loaded.capabilities, ["test", "git-push"])
         self.assertEqual(loaded.configured_fingerprint, "kept")

@@ -39,6 +39,7 @@ from .launcher_backend import (
     render_client_config,
     run_short_command,
 )
+from .i18n import contains_cjk, normalize_language, translate_text
 from .managed_services import ManagedServiceError, default_managed_service_manager
 from .security import ToolError
 from .skills import SkillEngine, skill_pack_root_path
@@ -127,11 +128,30 @@ DPI_FONT_SPECS: dict[str, tuple[str, int, str]] = {
 }
 
 
+class _LocalizedStringVar(tk.StringVar):
+    def __init__(self, master: tk.Misc, *, value: str = "", language_getter) -> None:
+        self._language_getter = language_getter
+        self._source_text = str(value)
+        super().__init__(master=master, value=translate_text(self._source_text, self._language_getter()))
+
+    def set(self, value: object) -> None:
+        self._source_text = str(value)
+        super().set(translate_text(self._source_text, self._language_getter()))
+
+    def relocalize(self) -> None:
+        super().set(translate_text(self._source_text, self._language_getter()))
+
+
 class FolderBridgeLauncher:
     def __init__(self, root: tk.Tk) -> None:
         self.root = root
         self.store = LauncherSettingsStore()
         self.settings = self.store.load()
+        self._language = normalize_language(self.settings.language)
+        self._widget_source_text: dict[str, str] = {}
+        self._localized_vars: list[_LocalizedStringVar] = []
+        self._connection_state = "stopped"
+        self._connection_pid: int | None = None
         self.events: queue.Queue[tuple[str, object]] = queue.Queue(maxsize=1_000)
         self.supervisor = TunnelSupervisor(self._queue_tunnel_output)
         self.extension_registry = ExtensionRegistry()
@@ -166,6 +186,7 @@ class FolderBridgeLauncher:
         self._configure_window()
         self._configure_styles()
         self._build_ui()
+        self._apply_language()
         self.root.bind_all("<MouseWheel>", self._on_mousewheel, add="+")
         self.root.bind_all("<Button-4>", self._on_mousewheel, add="+")
         self.root.bind_all("<Button-5>", self._on_mousewheel, add="+")
@@ -198,13 +219,27 @@ class FolderBridgeLauncher:
         self.api_key_var = tk.StringVar()
         self.show_key_var = tk.BooleanVar()
 
-        self.connection_text = tk.StringVar(value="已停止")
-        self.connection_detail = tk.StringVar(value="点击启动后建立出站连接")
-        self.workspace_status = tk.StringVar()
-        self.access_status = tk.StringVar()
-        self.client_status = tk.StringVar()
-        self.config_status = tk.StringVar()
-        self.key_hint = tk.StringVar()
+        make_display_var = lambda value="": _LocalizedStringVar(
+            self.root,
+            value=value,
+            language_getter=lambda: self._language,
+        )
+        self.connection_text = make_display_var("已停止")
+        self.connection_detail = make_display_var("点击启动后建立出站连接")
+        self.workspace_status = make_display_var()
+        self.access_status = make_display_var()
+        self.client_status = make_display_var()
+        self.config_status = make_display_var()
+        self.key_hint = make_display_var()
+        self._localized_vars = [
+            self.connection_text,
+            self.connection_detail,
+            self.workspace_status,
+            self.access_status,
+            self.client_status,
+            self.config_status,
+            self.key_hint,
+        ]
 
         for variable in (
             self.access_var,
@@ -216,8 +251,61 @@ class FolderBridgeLauncher:
         ):
             variable.trace_add("write", self._on_form_changed)
 
+    def _t(self, text: object) -> str:
+        return translate_text(str(text), getattr(self, "_language", "zh"))
+
+    def _ask_yesno(self, title: object, message: object) -> bool:
+        return bool(messagebox.askyesno(self._t(title), self._t(message), parent=self.root))
+
+    def _show_info(self, title: object, message: object) -> None:
+        messagebox.showinfo(self._t(title), self._t(message), parent=self.root)
+
+    def _set_widget_text(self, widget: tk.Misc, source: str) -> None:
+        self._widget_source_text[str(widget)] = source
+        try:
+            widget.configure(text=self._t(source))
+        except tk.TclError:
+            pass
+
+    def _localize_widget_tree(self, widget: tk.Misc) -> None:
+        try:
+            current = str(widget.cget("text"))
+        except (tk.TclError, AttributeError):
+            current = ""
+        if current:
+            key = str(widget)
+            source = self._widget_source_text.get(key)
+            if source is None or contains_cjk(current):
+                source = current
+                self._widget_source_text[key] = source
+            try:
+                widget.configure(text=self._t(source))
+            except tk.TclError:
+                pass
+        for child in widget.winfo_children():
+            self._localize_widget_tree(child)
+
+    def _apply_language(self) -> None:
+        self._language = normalize_language(self.settings.language)
+        self.root.title(self._t("FolderBridge MCP · 本地工作区连接器"))
+        for variable in self._localized_vars:
+            variable.relocalize()
+        self._localize_widget_tree(self.root)
+        if hasattr(self, "workspace_tree"):
+            self.workspace_tree.heading("path", text=self._t("已允许的本地目录（最多 8 个）"), anchor="w")
+        self.root.after_idle(self._fit_window_to_content)
+
+    def _toggle_language(self) -> None:
+        self.settings.language = "en" if self._language == "zh" else "zh"
+        self._language = self.settings.language
+        self.store.save(self.settings)
+        self._apply_language()
+        if hasattr(self, "extension_list_frame"):
+            self._refresh_extension_sidebar()
+        self._set_connection_state(self._connection_state, self._connection_pid)
+
     def _configure_window(self) -> None:
-        self.root.title("FolderBridge MCP · 本地工作区连接器")
+        self.root.title(self._t("FolderBridge MCP · 本地工作区连接器"))
         self.root.configure(bg="#f4f6fa")
         self._dpi = window_dpi(self.root)
         self._ui_scale = scale_for_dpi(self._dpi)
@@ -429,16 +517,18 @@ class FolderBridgeLauncher:
             text="把一个或多个明确的本地文件夹安全地接到支持 MCP 的 AI 客户端",
             style="Subtitle.TLabel",
         ).grid(row=1, column=0, sticky="w", pady=(2, 0))
+        self.language_button = ttk.Button(header, text="中文 / EN", command=self._toggle_language)
+        self.language_button.grid(row=0, column=1, rowspan=2, sticky="e")
         self.guide_button = ttk.Button(header, text="连接设置向导", command=self._open_web_setup)
-        self.guide_button.grid(row=0, column=1, rowspan=2, sticky="e")
+        self.guide_button.grid(row=0, column=2, rowspan=2, sticky="e", padx=(8, 0))
         self.sections_toggle_button = ttk.Button(
             header,
             text="全部折叠",
             command=self._toggle_all_sections,
         )
-        self.sections_toggle_button.grid(row=0, column=2, rowspan=2, sticky="e", padx=(8, 0))
+        self.sections_toggle_button.grid(row=0, column=3, rowspan=2, sticky="e", padx=(8, 0))
         self.extension_toggle_button = ttk.Button(header, text="扩展与 Skills ▸", command=self._toggle_extension_sidebar)
-        self.extension_toggle_button.grid(row=0, column=3, rowspan=2, sticky="e", padx=(8, 0))
+        self.extension_toggle_button.grid(row=0, column=4, rowspan=2, sticky="e", padx=(8, 0))
 
         self._build_overview(page).grid(row=1, column=0, sticky="ew", pady=(0, 12))
 
@@ -521,7 +611,7 @@ class FolderBridgeLauncher:
         section["collapsed"] = bool(collapsed)
         button = section.get("button")
         if isinstance(button, ttk.Button):
-            button.configure(text="展开 ▾" if collapsed else "收起 ▴")
+            self._set_widget_text(button, "展开 ▾" if collapsed else "收起 ▴")
         if key == "log":
             card = section.get("card")
             if isinstance(card, ttk.Frame):
@@ -543,7 +633,7 @@ class FolderBridgeLauncher:
         if not hasattr(self, "sections_toggle_button") or not self._collapsible_sections:
             return
         all_collapsed = all(bool(section.get("collapsed")) for section in self._collapsible_sections.values())
-        self.sections_toggle_button.configure(text="全部展开" if all_collapsed else "全部折叠")
+        self._set_widget_text(self.sections_toggle_button, "全部展开" if all_collapsed else "全部折叠")
 
     def _on_page_content_configure(self, _event: tk.Event[tk.Misc]) -> None:
         if not hasattr(self, "page_canvas"):
@@ -716,10 +806,10 @@ class FolderBridgeLauncher:
         if self._sidebar_visible:
             self.extension_sidebar.grid()
             self._refresh_managed_service_statuses_async()
-            self.extension_toggle_button.configure(text="扩展与 Skills ◂")
+            self._set_widget_text(self.extension_toggle_button, "扩展与 Skills ◂")
         else:
             self.extension_sidebar.grid_remove()
-            self.extension_toggle_button.configure(text="扩展与 Skills ▸")
+            self._set_widget_text(self.extension_toggle_button, "扩展与 Skills ▸")
         self.root.after_idle(self._fit_window_to_content)
 
     def _refresh_extension_sidebar(self) -> None:
@@ -872,6 +962,7 @@ class FolderBridgeLauncher:
             error_label.pack(fill="x", pady=(3, 6))
             self._extension_wrapped_labels.append(error_label)
         self._render_skill_pack_section()
+        self._localize_widget_tree(self.extension_list_frame)
         self.root.after_idle(lambda: self.extension_canvas.configure(scrollregion=self.extension_canvas.bbox("all")))
 
     def _render_skill_pack_section(self) -> None:
@@ -991,7 +1082,7 @@ class FolderBridgeLauncher:
                         "Skill 文本不会执行本地代码，但会影响模型的方法选择和行为。\n"
                         "任何 Pack 文件发生变化后，本批准会自动失效。"
                     )
-                    if not messagebox.askyesno("批准 FolderBridge Skill Pack", warning, parent=self.root):
+                    if not self._ask_yesno("批准 FolderBridge Skill Pack", warning):
                         var.set(False)
                         return
                     self.skill_engine.approve_pack(pack_id, item["sha256"])
@@ -1007,10 +1098,9 @@ class FolderBridgeLauncher:
             self._refresh_extension_sidebar()
 
     def _revoke_skill_pack(self, pack_id: str) -> None:
-        if not messagebox.askyesno(
+        if not self._ask_yesno(
             "撤销 Skill Pack 批准",
             "撤销该外部 Skill Pack 的本机批准记录并立即停用？之后再次启用时需要重新核对精确 hash。",
-            parent=self.root,
         ):
             return
         try:
@@ -1039,7 +1129,7 @@ class FolderBridgeLauncher:
             )
             if value
         ]
-        messagebox.showinfo(
+        self._show_info(
             "Skill Pack 详情",
             f"{item.get('name', '')} {item.get('version', '')}\n"
             f"ID: {item.get('id', '')}\n"
@@ -1048,7 +1138,6 @@ class FolderBridgeLauncher:
             f"SHA-256: {item.get('sha256', '')}\n"
             f"来源：{' · '.join(source_lines) or '未声明'}\n\n"
             f"Skills：\n{skill_lines}\n\n{item.get('description', '')}",
-            parent=self.root,
         )
 
     def _open_skill_folder(self) -> None:
@@ -1099,7 +1188,8 @@ class FolderBridgeLauncher:
             return
         text, style = self._managed_service_status_presentation(extension_id, state, controller.config())
         try:
-            label.configure(text=text, style=style)
+            self._set_widget_text(label, text)
+            label.configure(style=style)
         except tk.TclError:
             self.managed_service_status_labels.pop(extension_id, None)
 
@@ -1119,7 +1209,7 @@ class FolderBridgeLauncher:
                         "插件代码会在独立子进程运行，但这不是完整 OS 沙箱。来源不可信的插件应放入 VM/容器。\n"
                         "任一插件文件或权限发生变化后，本批准会自动失效。"
                     )
-                    if not messagebox.askyesno("批准 FolderBridge Extension", warning, parent=self.root):
+                    if not self._ask_yesno("批准 FolderBridge Extension", warning):
                         var.set(False)
                         return
                     self.extension_registry.trust_store.approve(record, enabled=True)
@@ -1146,10 +1236,9 @@ class FolderBridgeLauncher:
         except (OSError, ValueError) as exc:
             self._show_error(f"无法读取扩展：{exc}")
             return
-        if not messagebox.askyesno(
+        if not self._ask_yesno(
             "撤销 Extension 批准",
             f"撤销 {record.manifest.name} 的本机批准记录并立即停用？\n\n之后再次启用时需要重新核对 hash 与权限。",
-            parent=self.root,
         ):
             return
         if self.managed_services.controller(extension_id) is not None:
@@ -1175,7 +1264,7 @@ class FolderBridgeLauncher:
             for action in record.manifest.actions.values()
         )
         permissions = "\n".join(f"• {value}" for value in record.manifest.permissions) or "• 无"
-        messagebox.showinfo(
+        self._show_info(
             "Extension 详情",
             f"{record.manifest.name} {record.manifest.version}\n"
             f"ID: {record.manifest.extension_id}\n"
@@ -1183,7 +1272,6 @@ class FolderBridgeLauncher:
             f"Trusted: {status['trusted']} · Enabled: {status['enabled']}\n"
             f"SHA-256: {record.sha256}\n\n权限：\n{permissions}\n\n动作：\n{actions}\n\n"
             f"{record.manifest.description}",
-            parent=self.root,
         )
 
     def _open_extension_folder(self) -> None:
@@ -1309,7 +1397,7 @@ class FolderBridgeLauncher:
             return
         current = controller.config().install_root
         selected = filedialog.askdirectory(
-            title="选择 ComfyUI 安装目录",
+            title=self._t("选择 ComfyUI 安装目录"),
             initialdir=current or str(Path.home()),
             parent=self.root,
         )
@@ -1736,6 +1824,7 @@ class FolderBridgeLauncher:
                 name for name in CAPABILITY_NAMES
                 if self.capability_vars[name].get()
             ],
+            language=self._language,
             configured_fingerprint=self.settings.configured_fingerprint,
         )
 
@@ -1753,7 +1842,7 @@ class FolderBridgeLauncher:
 
     def _add_workspace(self) -> None:
         initial = self.workspace_paths[-1] if self.workspace_paths else str(Path.cwd())
-        selected = filedialog.askdirectory(title="添加允许 AI 访问的工作区", initialdir=initial)
+        selected = filedialog.askdirectory(title=self._t("添加允许 AI 访问的工作区"), initialdir=initial)
         if not selected:
             return
         try:
@@ -1775,8 +1864,8 @@ class FolderBridgeLauncher:
 
     def _browse_tunnel_client(self) -> None:
         selected = filedialog.askopenfilename(
-            title="只选择完整包中的 tunnel-client.exe（不要选 Runtime）",
-            filetypes=(("正确的 tunnel-client.exe", "tunnel-client.exe"), ("可执行文件", "*.exe"), ("所有文件", "*.*")),
+            title=self._t("只选择完整包中的 tunnel-client.exe（不要选 Runtime）"),
+            filetypes=((self._t("正确的 tunnel-client.exe"), "tunnel-client.exe"), (self._t("可执行文件"), "*.exe"), (self._t("所有文件"), "*.*")),
         )
         if selected:
             self.tunnel_client_var.set(selected)
@@ -1960,7 +2049,7 @@ class FolderBridgeLauncher:
         executable = find_tunnel_client(self.tunnel_client_var.get())
 
         dialog = tk.Toplevel(self.root)
-        dialog.title("FolderBridge · MCP 连接向导")
+        dialog.title(self._t("FolderBridge · MCP 连接向导"))
         dialog.transient(self.root)
         dialog.grab_set()
         dialog.resizable(True, True)
@@ -2019,7 +2108,7 @@ class FolderBridgeLauncher:
             initial_client_status = "✗ 选错了 Runtime 内部组件；请重新下载完整包。"
         else:
             initial_client_status = f"✓ 已找到：{executable}" if executable else "尚未找到 tunnel-client.exe"
-        client_status = tk.StringVar(value=initial_client_status)
+        client_status = _LocalizedStringVar(dialog, value=initial_client_status, language_getter=lambda: self._language)
         client_tab = self._guide_tab(
             notebook,
             "下载并解压官方客户端",
@@ -2034,7 +2123,7 @@ class FolderBridgeLauncher:
                 1: "不要下载或选择 tunnel-client-runtime-*：它只是内部组件，不支持 init，必然配置失败。只下载完整的 tunnel-client-v<版本>-windows-amd64.zip。",
             },
         )
-        notebook.add(client_tab, text="1  Windows x64 客户端")
+        notebook.add(client_tab, text=self._t("1  Windows x64 客户端"))
         ttk.Label(client_tab, textvariable=client_status, style="Body.TLabel", wraplength=wrap).pack(anchor="w", pady=(8, 6))
         client_buttons = ttk.Frame(client_tab, style="Guide.TFrame")
         client_buttons.pack(fill="x", pady=(4, 0))
@@ -2066,7 +2155,7 @@ class FolderBridgeLauncher:
                 3: "只关联需要访问此本地工作区的 Organization / ChatGPT workspace，不要无范围地多选。",
             },
         )
-        notebook.add(platform_tab, text="2  Platform Tunnel")
+        notebook.add(platform_tab, text=self._t("2  Platform Tunnel"))
         platform_buttons = ttk.Frame(platform_tab, style="Guide.TFrame")
         platform_buttons.pack(fill="x", pady=(10, 0))
         ttk.Button(platform_buttons, text="打开 Tunnel 设置", command=lambda: webbrowser.open(TUNNEL_SETTINGS_URL)).pack(side="left")
@@ -2085,7 +2174,7 @@ class FolderBridgeLauncher:
             ),
             wrap,
         )
-        notebook.add(local_tab, text="3  启动 FolderBridge")
+        notebook.add(local_tab, text=self._t("3  启动 FolderBridge"))
         local_buttons = ttk.Frame(local_tab, style="Guide.TFrame")
         local_buttons.pack(fill="x", pady=(10, 0))
         if looks_like_tunnel_id(tunnel_id):
@@ -2116,7 +2205,7 @@ class FolderBridgeLauncher:
                 4: "不要保留默认 OAuth，也不要把 https://tunnel-service... 地址当“服务器 URL”填写，否则会报 does not implement OAuth。",
             },
         )
-        notebook.add(chatgpt_tab, text="4  ChatGPT 创建与调用")
+        notebook.add(chatgpt_tab, text=self._t("4  ChatGPT 创建与调用"))
         chatgpt_buttons = ttk.Frame(chatgpt_tab, style="Guide.TFrame")
         chatgpt_buttons.pack(fill="x", pady=(10, 0))
         ttk.Button(chatgpt_buttons, text="打开 ChatGPT Plugins", command=lambda: webbrowser.open(CHATGPT_PLUGINS_URL)).pack(side="left")
@@ -2143,7 +2232,7 @@ class FolderBridgeLauncher:
                 5: "不要因为客户端显示了确认弹窗，就把它当成 FolderBridge 的唯一安全边界。",
             },
         )
-        notebook.add(other_tab, text="5  其他 MCP 客户端")
+        notebook.add(other_tab, text=self._t("5  其他 MCP 客户端"))
         other_buttons = ttk.Frame(other_tab, style="Guide.TFrame")
         other_buttons.pack(fill="x", pady=(10, 0))
         ttk.Button(
@@ -2178,7 +2267,7 @@ class FolderBridgeLauncher:
                 5: "只给可信项目开启会执行项目代码的 test/build/package 能力。",
             },
         )
-        notebook.add(dependencies_tab, text="附录  Python / Node")
+        notebook.add(dependencies_tab, text=self._t("附录  Python / Node"))
         dependency_buttons = ttk.Frame(dependencies_tab, style="Guide.TFrame")
         dependency_buttons.pack(fill="x", pady=(10, 0))
         ttk.Button(
@@ -2209,7 +2298,7 @@ class FolderBridgeLauncher:
                 4: "独立子进程不是安全容器。权限声明是 FolderBridge 的授权契约，不应被描述成能阻止恶意 Python 绕过操作系统权限。",
             },
         )
-        notebook.add(extension_tab, text="附录  插件标准")
+        notebook.add(extension_tab, text=self._t("附录  插件标准"))
         extension_buttons = ttk.Frame(extension_tab, style="Guide.TFrame")
         extension_buttons.pack(fill="x", pady=(10, 0))
         ttk.Button(extension_buttons, text="打开插件目录", command=self._open_extension_folder).pack(side="left")
@@ -2224,6 +2313,7 @@ class FolderBridgeLauncher:
             command=lambda: self._copy_text(EXTENSION_LLM_PROMPT, "LLM 插件开发指令已复制。"),
         ).pack(side="left", padx=(8, 0))
 
+        self._localize_widget_tree(dialog)
         self._fit_guide_dialog(dialog, body)
 
     def _fit_guide_dialog(self, dialog: tk.Toplevel, body: ttk.Frame) -> None:
@@ -2304,12 +2394,12 @@ class FolderBridgeLauncher:
             spacing1=self._px(4),
             spacing3=self._px(8),
         )
-        guide_text.insert("end", f"{title}\n", "title")
+        guide_text.insert("end", f"{self._t(title)}\n", "title")
         for step_number, step in enumerate(steps, start=1):
-            guide_text.insert("end", f"{step}\n", "step")
+            guide_text.insert("end", f"{self._t(step)}\n", "step")
             warning = warnings.get(step_number, "").strip()
             if warning:
-                guide_text.insert("end", f"注意：{warning}\n", "warning")
+                guide_text.insert("end", f"{self._t(f'注意：{warning}')}\n", "warning")
         guide_text.configure(state="disabled")
         guide_text.bind("<Control-a>", self._select_all_guide_text)
         guide_text.bind("<Control-A>", self._select_all_guide_text)
@@ -2420,7 +2510,7 @@ class FolderBridgeLauncher:
                 self._show_error(redact_text(str(payload), (self._active_secret,)))
             elif kind == "notice":
                 self._log(str(payload))
-                messagebox.showinfo("FolderBridge MCP", str(payload), parent=self.root)
+                self._show_info("FolderBridge MCP", str(payload))
             elif kind == "busy":
                 self._set_busy(bool(payload))
             elif kind == "managed-service-state":
@@ -2476,13 +2566,15 @@ class FolderBridgeLauncher:
         process = self.supervisor.process
         if process is not None:
             code = process.poll()
-            if code is not None and self._last_exit_reported is None and self.connection_text.get() == "运行中":
+            if code is not None and self._last_exit_reported is None and self._connection_state == "running":
                 self._last_exit_reported = code
                 self._set_connection_state("error")
                 self._log(f"Tunnel 进程意外退出（退出码 {code}）。请运行诊断。")
         self.root.after(500, self._poll_process)
 
     def _set_connection_state(self, state: str, pid: int | None = None) -> None:
+        self._connection_state = state
+        self._connection_pid = pid
         colors = {"stopped": "#98a2b3", "starting": "#f59e0b", "running": "#16a34a", "error": "#dc2626"}
         labels = {"stopped": "已停止", "starting": "启动中", "running": "运行中", "error": "异常"}
         details = {
@@ -2495,10 +2587,12 @@ class FolderBridgeLauncher:
         self.connection_text.set(labels[state])
         self.connection_detail.set(details[state])
         if state == "running":
-            self.start_button.configure(text="停止连接", bg="#dc2626", activebackground="#b91c1c", state="normal")
+            self._set_widget_text(self.start_button, "停止连接")
+            self.start_button.configure(bg="#dc2626", activebackground="#b91c1c", state="normal")
             self._set_form_state(False)
         else:
-            self.start_button.configure(text="启动连接", bg="#2563eb", activebackground="#1d4ed8")
+            self._set_widget_text(self.start_button, "启动连接")
+            self.start_button.configure(bg="#2563eb", activebackground="#1d4ed8")
             if not self._busy:
                 self.start_button.configure(state="normal")
                 self._set_form_state(True)
@@ -2542,7 +2636,7 @@ class FolderBridgeLauncher:
         self.workspace_tree.state(("!disabled",) if enabled else ("disabled",))
 
     def _log(self, text: str) -> None:
-        clean = redact_text(text.rstrip(), (self._active_secret,))
+        clean = redact_text(self._t(text.rstrip()), (self._active_secret,))
         if not clean:
             return
         timestamp = time.strftime("%H:%M:%S")
@@ -2565,16 +2659,15 @@ class FolderBridgeLauncher:
     def _show_error(self, message: str) -> None:
         safe = redact_text(message, (self._active_secret,))
         self._log(f"错误：{safe}")
-        messagebox.showerror("FolderBridge MCP", safe, parent=self.root)
+        messagebox.showerror("FolderBridge MCP", self._t(safe), parent=self.root)
 
     def _exit_application(self) -> None:
         self._shutdown_application()
 
     def _on_close(self) -> None:
-        if not messagebox.askyesno(
+        if not self._ask_yesno(
             "退出 FolderBridge MCP",
             "将先停止 FolderBridge 托管的插件服务和 Tunnel，然后退出。外部启动的软件不会被终止。",
-            parent=self.root,
         ):
             return
         self._shutdown_application()

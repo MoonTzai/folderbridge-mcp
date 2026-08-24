@@ -12,7 +12,7 @@
 
 **在 AI 客户端与一组由你明确选择的本地文件夹之间，建立更安全的本地优先桥梁。**
 
-FolderBridge MCP 是一个零第三方依赖的 Python MCP 服务器和桌面启动器。它让 ChatGPT 网页端或其他支持本地 stdio MCP 的客户端，在明确边界内查看并谨慎修改本地工作区。项目主动舍弃了公网 HTTP 服务器、任意 Shell、遥测以及静默常驻服务。
+FolderBridge MCP 是一个零第三方依赖的 Python MCP 服务器和桌面启动器。它让 ChatGPT 网页端或其他支持本地 stdio MCP 的客户端，在明确边界内查看并谨慎修改本地工作区。项目主动舍弃了公网 HTTP 服务器、任意 Shell、遥测以及静默常驻服务。Windows Launcher 现在可通过“连接设置向导”左侧固定的 `中文 / EN` 按钮切换完整用户界面；语言选择会持久化，但不会改变 Tunnel 配置指纹，也不会触发重新连接。
 
 > [!IMPORTANT]
 > 项目目前处于早期公开测试阶段。它可以缩小攻击面，但不是操作系统级沙箱。只应开放你信任的文件夹和代码仓库。
@@ -22,7 +22,7 @@ FolderBridge MCP 是一个零第三方依赖的 Python MCP 服务器和桌面启
 - **新增本地 Skill Engine，且不扩张 MCP tool 目录：** 可信的方法类 Skill 可按需发现、匹配和加载；统一通过 bundled `skill-engine` Extension 走现有稳定 `extension` 网关，新增 Skill Pack 不会新增 MCP tool 名称。
 - **模型路由，不虚假宣称强制调用：** MCP 初始化指令只注入有界 routing index，在架构、调试、TDD、代码审查和实现任务中提示模型先 `match`、再 `get` 合适的方法；`server_info` 明确标记为 model-routed，而不是保证每次必调。
 - **外部 Skill Pack 使用 exact-hash 信任：** 未批准或已 stale 的 Pack 对模型侧不可见；Launcher 批准时必须携带刚显示的精确 hash，Pack 任一文件变化都会使批准失效；`get` 还会重新核验最终返回正文的确切字节，避免 Skill 在 `match` 后悄悄变化。
-- **内置工程方法 Pack：** `folderbridge-engineering` 提供代码设计、架构优化、故障诊断、测试驱动开发、代码审查和按方案实现六类方法。Skill 只是方法文本，不会作为本地代码执行。
+- **内置工程方法 Pack：** `folderbridge-engineering` 提供代码设计、架构优化、故障诊断、测试驱动开发、代码审查和按方案实现六类方法。该 Pack 是 FolderBridge 针对自身 Skill Engine 做的精简／改编版本，来源于 Matt Pocock 的开源 [`mattpocock/skills`](https://github.com/mattpocock/skills) 中选定的工程 Skills，并按上游 MIT License 保留归属与许可说明；它不是 Matt Pocock 官方插件。Skill 只是方法文本，不会作为本地代码执行。
 - **Launcher 统一为 Extensions & Skills：** 右侧栏分别管理 Extension 与 Skill Pack，可打开用户 Skill 目录、启停 Pack、核对外部 Pack hash、撤销批准和查看详情，并明确提示“不会执行本地代码，但会影响模型的方法选择和行为”。
 - **打包链真实验证 Skill：** `skills --json` 在 Windows 管道中固定输出 UTF-8；`extensions --self-test` 会实际启动 ComfyUI 与 Skill Engine worker；Windows build 会把 `skill_packs` 打进单文件 EXE，并在生成 checksum 前验证 bundled Skill 与 worker 链路。
 - **PPTX XML 实际占用可观测：** `pptx_inspect` 在保留 256 MiB XML/relationship 解析前上限的同时，正常结果新增实际未压缩字节数、限制值与占用比例，便于判断真实课件离上限还有多远。
@@ -353,8 +353,16 @@ python -m venv .build-venv
 
 构建结果和 SHA-256 文件位于 `release\windows-x64`。
 
+### 发布 GitHub Release
+
+仓库 `main` 的 push 与 GitHub Release 现在明确分离：普通 commit/push 只更新源码，不会误发版本。正式发布时，最终 commit 第一行必须严格写成 `Release FolderBridge <version>`，其中 `<version>` 必须等于 `pyproject.toml` 中稳定的 `x.y.z` 版本（例如 `Release FolderBridge 0.8.3`）。随后 `.github/workflows/release-windows.yml` 会在 Windows / Python 3.11 上重新读取并核对版本、运行完整测试、构建并再次验证 `FolderBridge.exe`、创建或验证 `v<version>` 标签，并创建或修复对应 GitHub Release，上传 `FolderBridge.exe` 与 `FolderBridge.exe.sha256`。工作流不提供手工 version/tag 输入，因此 Release 版本不会再与项目元数据脱节。
+
+如果工作流在已经创建 tag 之后失败，直接对同一次 Actions run 执行 rerun 即可：已有 tag 只有在确实指向同一个 release commit 时才会被接受，两个 release asset 会以 clobber 方式重新上传，并重新标记该版本为 Latest。
+
 ## 许可证
 
-项目采用 [Apache License 2.0](LICENSE)。
+FolderBridge 自行创作的项目代码与文档采用 [Apache License 2.0](LICENSE) 授权。
+
+内置的 `folderbridge-engineering` Skill Pack 含有基于 Matt Pocock 的 [`mattpocock/skills`](https://github.com/mattpocock/skills) 中选定工程 Skills 精简／改编的方法文本。上游版权归 Matt Pocock 所有，上游内容采用 MIT License。FolderBridge 在 [`skill_packs/matt-pocock-engineering/NOTICE.md`](skill_packs/matt-pocock-engineering/NOTICE.md) 与 [`LICENSE.upstream-MIT.txt`](skill_packs/matt-pocock-engineering/LICENSE.upstream-MIT.txt) 中保留来源、归属与完整 MIT 许可文本。该 Pack 是 FolderBridge 的适配版本，不是 Matt Pocock 官方插件，也不暗示 Matt Pocock 或 AI Hero 对 FolderBridge 的从属、背书或赞助关系。
 
 FolderBridge MCP 是独立开源项目，与 OpenAI 不存在从属、背书或赞助关系。ChatGPT、OpenAI、MCP 及其他产品名称归各自权利人所有。

@@ -21,7 +21,7 @@ from .process_control import owned_process_group_kwargs, terminate_owned_process
 from .user_paths import user_config_root
 
 
-LAUNCHER_SETTINGS_VERSION = 3
+LAUNCHER_SETTINGS_VERSION = 4
 MAX_SETTINGS_BYTES = 64 * 1024
 MAX_COMMAND_OUTPUT = 256 * 1024
 PROFILE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,39}$")
@@ -46,6 +46,7 @@ class LauncherSettings:
     tunnel_client_path: str = ""
     allow_tasks: bool = False
     capabilities: list[str] = field(default_factory=list)
+    language: str = "zh"
     configured_fingerprint: str = ""
 
     def validate(self, *, require_tunnel_id: bool = False) -> tuple[Path, ...]:
@@ -67,6 +68,8 @@ class LauncherSettings:
             raise LauncherError("Tunnel ID 格式无效")
         if not isinstance(self.allow_tasks, bool):
             raise LauncherError("任务开关配置无效")
+        if self.language not in {"zh", "en"}:
+            raise LauncherError("界面语言配置无效")
         try:
             normalize_capability_names(self.capabilities)
         except (TypeError, ValueError) as exc:
@@ -138,6 +141,7 @@ class LauncherSettingsStore:
                 "tunnel_client_path": raw.get("tunnel_client_path", ""),
                 "allow_tasks": raw.get("allow_tasks", False),
                 "capabilities": [],
+                "language": "zh",
                 "configured_fingerprint": raw.get("configured_fingerprint", ""),
             }
         elif raw.get("version") == 2:
@@ -157,6 +161,26 @@ class LauncherSettingsStore:
                 **raw,
                 "version": LAUNCHER_SETTINGS_VERSION,
                 "capabilities": [],
+                "language": "zh",
+            }
+        elif raw.get("version") == 3:
+            version_three_allowed = {
+                "version",
+                "workspaces",
+                "access_mode",
+                "profile",
+                "tunnel_id",
+                "tunnel_client_path",
+                "allow_tasks",
+                "capabilities",
+                "configured_fingerprint",
+            }
+            if set(raw).difference(version_three_allowed):
+                return LauncherSettings()
+            raw = {
+                **raw,
+                "version": LAUNCHER_SETTINGS_VERSION,
+                "language": "zh",
             }
         # 0.3.x exposed ComfyUI as a global capability. In 0.4 it is the
         # first hot-loaded extension, so preserve the rest of the v3 launcher
@@ -184,10 +208,12 @@ class LauncherSettingsStore:
                     settings.profile,
                     settings.tunnel_id,
                     settings.tunnel_client_path,
+                    settings.language,
                     settings.configured_fingerprint,
                 )
             )
             or not isinstance(settings.allow_tasks, bool)
+            or settings.language not in {"zh", "en"}
             or not isinstance(settings.capabilities, list)
             or not all(isinstance(value, str) for value in settings.capabilities)
         ):

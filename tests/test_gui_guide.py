@@ -80,6 +80,18 @@ class GuideGuiTests(unittest.TestCase):
         self.assertIn("self._fit_guide_dialog(dialog, body)", block)
         self.assertIn("width - self._px(", block)
 
+    def test_language_toggle_is_left_of_connection_guide_and_uses_internal_connection_state(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        gui = (root / "folderbridge_mcp" / "gui.py").read_text(encoding="utf-8")
+        header = gui.split("self.language_button =", 1)[1].split("self._build_overview(page)", 1)[0]
+        self.assertIn('text="中文 / EN"', header)
+        self.assertIn("self.language_button.grid(row=0, column=1", header)
+        self.assertIn("self.guide_button.grid(row=0, column=2", header)
+        self.assertLess(header.index("self.language_button.grid"), header.index("self.guide_button.grid"))
+        self.assertIn('self.settings.language = "en" if self._language == "zh" else "zh"', gui)
+        self.assertIn('self._connection_state == "running"', gui)
+        self.assertNotIn('self.connection_text.get() == "运行中"', gui)
+
     def test_global_capability_select_all_and_clear(self) -> None:
         launcher = FolderBridgeLauncher.__new__(FolderBridgeLauncher)
         launcher.capability_vars = {"a": _BoolVarStub(), "b": _BoolVarStub()}

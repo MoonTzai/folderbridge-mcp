@@ -4,7 +4,12 @@
   "name": "FolderBridge Engineering Methods",
   "version": "1.0.0",
   "description": "Six engineering methods for architecture, diagnosis, test-driven development, review, and implementation.",
-  "source": {},
+  "source": {
+    "repository": "https://github.com/mattpocock/skills",
+    "ref": "",
+    "commit": "",
+    "license": "MIT"
+  },
   "skills": [
     {
       "id": "codebase-design",

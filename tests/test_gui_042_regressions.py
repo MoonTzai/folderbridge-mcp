@@ -57,7 +57,7 @@ class Gui042RegressionTests(unittest.TestCase):
         self.assertIn("def _toggle_all_sections", self.gui)
         self.assertIn('text="全部折叠"', self.gui)
         self.assertIn('text="收起 ▴"', self.gui)
-        self.assertIn('button.configure(text="展开 ▾" if collapsed else "收起 ▴")', self.gui)
+        self.assertIn('self._set_widget_text(button, "展开 ▾" if collapsed else "收起 ▴")', self.gui)
         self.assertIn('self._register_collapsible_section("local"', self.gui)
         self.assertIn('self._register_collapsible_section("tunnel"', self.gui)
         self.assertIn('"log",\n            log_card,', self.gui)

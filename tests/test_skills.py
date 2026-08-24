@@ -106,13 +106,36 @@ class SkillEngineTests(unittest.TestCase):
         self.assertIn("folderbridge-engineering/improve-codebase-architecture", refs)
         self.assertIn("folderbridge-engineering/diagnosing-bugs", refs)
 
-    def test_bundled_engineering_pack_has_no_personal_branding_in_shipped_text(self) -> None:
+    def test_bundled_engineering_skill_bodies_have_no_personal_branding(self) -> None:
         pack_root = Path(__file__).resolve().parents[1] / "skill_packs" / "matt-pocock-engineering"
-        for path in pack_root.rglob("*"):
-            if path.is_file() and path.suffix.lower() in {".md", ".json"}:
-                text = path.read_text(encoding="utf-8")
-                self.assertNotIn("Matt Pocock", text, path.as_posix())
-                self.assertNotIn("mattpocock", text.lower(), path.as_posix())
+        for path in (pack_root / "skills").rglob("SKILL.md"):
+            text = path.read_text(encoding="utf-8")
+            self.assertNotIn("Matt Pocock", text, path.as_posix())
+            self.assertNotIn("mattpocock", text.lower(), path.as_posix())
+
+    def test_bundled_engineering_pack_preserves_upstream_mit_attribution(self) -> None:
+        pack_root = Path(__file__).resolve().parents[1] / "skill_packs" / "matt-pocock-engineering"
+        manifest = json.loads((pack_root / "folderbridge-skill-pack.json").read_text(encoding="utf-8"))
+        self.assertEqual(manifest["source"]["repository"], "https://github.com/mattpocock/skills")
+        self.assertEqual(manifest["source"]["license"], "MIT")
+
+        notice = (pack_root / "NOTICE.md").read_text(encoding="utf-8")
+        upstream_license = (pack_root / "LICENSE.upstream-MIT.txt").read_text(encoding="utf-8")
+        self.assertIn("Matt Pocock", notice)
+        self.assertIn("https://github.com/mattpocock/skills", notice)
+        self.assertIn("adapted", notice.lower())
+        self.assertIn("MIT", notice)
+        self.assertIn("Copyright (c) 2026 Matt Pocock", upstream_license)
+        self.assertIn("Permission is hereby granted", upstream_license)
+
+        project_root = Path(__file__).resolve().parents[1]
+        readme = (project_root / "README.md").read_text(encoding="utf-8")
+        readme_zh = (project_root / "README.zh-CN.md").read_text(encoding="utf-8")
+        for text in (readme, readme_zh):
+            self.assertIn("Matt Pocock", text)
+            self.assertIn("mattpocock/skills", text)
+            self.assertIn("MIT", text)
+            self.assertIn("LICENSE.upstream-MIT.txt", text)
 
     def test_bundled_pack_is_trusted_enabled_and_get_verifies_returned_bytes(self) -> None:
         write_pack(self.bundled, "bundled-pack", bundled=True)

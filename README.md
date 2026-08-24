@@ -12,7 +12,7 @@
 
 **A safer, local-first bridge between AI clients and a small set of folders you explicitly choose.**
 
-FolderBridge MCP is a zero-dependency Python MCP server plus a desktop launcher. It lets ChatGPT on the web—or any client that supports local stdio MCP—inspect and carefully edit a bounded local workspace. It deliberately avoids a public HTTP server, arbitrary shell access, telemetry, and silent background services.
+FolderBridge MCP is a zero-dependency Python MCP server plus a desktop launcher. It lets ChatGPT on the web—or any client that supports local stdio MCP—inspect and carefully edit a bounded local workspace. It deliberately avoids a public HTTP server, arbitrary shell access, telemetry, and silent background services. The Windows launcher can switch the complete user-facing interface between Chinese and English with the persistent `中文 / EN` button immediately to the left of the connection guide; changing language does not reconfigure or reconnect the Tunnel.
 
 > [!IMPORTANT]
 > This project is in an early public beta. It reduces the attack surface; it is not an operating-system sandbox. Only expose folders and repositories you trust.
@@ -22,7 +22,7 @@ FolderBridge MCP is a zero-dependency Python MCP server plus a desktop launcher.
 - **Local Skill Engine without MCP schema churn:** trusted methodology Skills are discovered, matched, and loaded on demand through the bundled read-only `skill-engine` Extension behind the existing stable `extension` gateway. Adding Skill Packs does not add MCP tool names.
 - **Model-routed, not falsely forced:** MCP initialization includes a bounded routing index for architecture, debugging, TDD, review, and implementation work. The model can call `match` and then `get` relevant methods; `server_info` reports this honestly as model-routed rather than guaranteed invocation.
 - **Exact-hash Skill trust:** external Skill Packs remain invisible to the model until the exact displayed hash is approved. Any later file change makes approval stale, and `get` re-hashes the exact bytes it returns so a changed Skill fails closed between selection and use.
-- **Bundled engineering methods:** `folderbridge-engineering` provides six focused methods for codebase design, architecture improvement, bug diagnosis, test-driven development, code review, and implementation. Skills are methodology text only and are never executed as local code.
+- **Bundled engineering methods:** `folderbridge-engineering` provides six focused methods for codebase design, architecture improvement, bug diagnosis, test-driven development, code review, and implementation. This FolderBridge-specific condensed/adapted Pack is derived from selected Skills in Matt Pocock's open-source [`mattpocock/skills`](https://github.com/mattpocock/skills) project under the MIT License; it is not the official Matt Pocock plugin. Skills are methodology text only and are never executed as local code.
 - **Extensions & Skills launcher:** the existing right sidebar now manages Extensions and Skill Packs separately, including user Skill directory access, enable/disable state, exact-hash approval, revoke, provenance/details, and a clear warning that Skill text can influence model behavior without receiving executable permissions.
 - **Packaged Skill verification:** `skills --json` emits stable UTF-8 diagnostics on Windows; `extensions --self-test` exercises both the ComfyUI and Skill Engine workers; the Windows build embeds `skill_packs` and verifies both bundled Skill discovery and worker execution before writing the EXE checksum.
 - **PPTX XML usage visibility:** `pptx_inspect` now reports actual aggregate XML/relationship uncompressed bytes, configured limit, and usage ratio, while keeping the existing 256 MiB pre-parse guard.
@@ -351,8 +351,16 @@ python -m venv .build-venv
 
 Artifacts and a SHA-256 file are written to `release\windows-x64`.
 
+### Publish a GitHub Release
+
+Repository `main` pushes and GitHub Releases are intentionally distinct. A normal commit/push updates source only. To publish a release, the final commit title must be exactly `Release FolderBridge <version>`, where `<version>` is the stable `x.y.z` value in `pyproject.toml` (for example, `Release FolderBridge 0.8.3`). The `.github/workflows/release-windows.yml` workflow then re-reads that version, runs the complete tests on Windows/Python 3.11, builds and re-verifies `FolderBridge.exe`, creates or validates tag `v<version>`, and creates or repairs the GitHub Release with `FolderBridge.exe` plus `FolderBridge.exe.sha256`. The workflow exposes no manual version/tag input, so the release identifier cannot drift from project metadata.
+
+If a release run fails after its tag was created, rerunning the same Actions job is safe: the workflow accepts an existing tag only when it resolves to the same release commit and will re-upload the two assets with clobber semantics before marking that Release latest.
+
 ## License
 
-Licensed under the [Apache License 2.0](LICENSE).
+FolderBridge's project-authored code and documentation are licensed under the [Apache License 2.0](LICENSE).
+
+The bundled `folderbridge-engineering` Skill Pack contains condensed/adapted methodology text derived from selected Skills in Matt Pocock's [`mattpocock/skills`](https://github.com/mattpocock/skills) project. Upstream copyright is held by Matt Pocock and the upstream material is licensed under MIT. FolderBridge preserves the attribution and full MIT permission notice in [`skill_packs/matt-pocock-engineering/NOTICE.md`](skill_packs/matt-pocock-engineering/NOTICE.md) and [`LICENSE.upstream-MIT.txt`](skill_packs/matt-pocock-engineering/LICENSE.upstream-MIT.txt). The Pack is a FolderBridge adaptation, not the official Matt Pocock plugin, and no affiliation or endorsement is implied.
 
 FolderBridge MCP is an independent open-source project. It is not affiliated with, endorsed by, or sponsored by OpenAI. ChatGPT, OpenAI, MCP, and other product names belong to their respective owners.

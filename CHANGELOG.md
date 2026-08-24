@@ -2,6 +2,15 @@
 
 All notable changes to FolderBridge MCP are documented here.
 
+## 0.8.3 — 2026-08-25
+
+- Added a persistent Chinese/English launcher UI switch (`中文 / EN`) immediately to the left of the connection guide. Main-window labels, live connection/service status, Extension/Skill controls, setup-guide content, file dialogs, confirmation/error dialogs, and launcher logs share one localization layer; language changes do not alter the Tunnel configuration fingerprint or require a reconnect.
+- Added localization regression gates: launcher settings migrate to v4 with `language=zh` by default, invalid language values fail closed, and AST coverage rejects newly added Chinese launcher/backend UI text unless an English rendering exists.
+- Fixed the repository publishing lifecycle that allowed `main` to advance while GitHub Releases remained stale. A release commit whose first line is exactly `Release FolderBridge <pyproject version>` now triggers a Windows GitHub Actions job that re-validates the version, runs the full tests, builds and verifies the EXE, creates/validates the matching version tag, and creates or repairs the GitHub Release with `FolderBridge.exe` plus `FolderBridge.exe.sha256`. Ordinary pushes do not publish a Release, and no manual tag/version input is exposed.
+- Added explicit third-party attribution for the bundled `folderbridge-engineering` Skill Pack. README documentation now states that it is a FolderBridge-specific condensed/adapted selection derived from Matt Pocock's `mattpocock/skills`, not the official upstream plugin.
+- Preserved the upstream MIT license and copyright notice inside the bundled Pack via `NOTICE.md` and `LICENSE.upstream-MIT.txt`, while keeping FolderBridge's project-authored code/documentation under Apache-2.0.
+- Added machine-readable upstream repository/license metadata to the bundled Pack and extended source/package regression gates so missing Matt Pocock/MIT attribution fails tests and the packaged EXE verifier checks that the attribution survives bundling.
+
 ## 0.8.2 — 2026-08-25
 
 - Fixed upgrade compatibility for external Skill Packs and Extensions. Exact-hash approvals remain in the user-level trust stores across executable upgrades when external content/permissions are unchanged; regression coverage now locks this behavior across fresh Engine/Registry instances.
