@@ -292,6 +292,13 @@ class ExtensionRegistry:
                     continue
                 extension_id = record.manifest.extension_id
                 if extension_id in records:
+                    existing = records[extension_id]
+                    if existing.bundled and not record.bundled:
+                        # A release may absorb a previously external Extension. The
+                        # release-trusted bundled copy remains authoritative; an older
+                        # user installation with the same id is safely superseded rather
+                        # than reported as a persistent upgrade-time load failure.
+                        continue
                     errors.append({"path": str(child), "error": f"duplicate extension id: {extension_id}"})
                     continue
                 records[extension_id] = record

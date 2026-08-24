@@ -80,14 +80,17 @@ class SkillEngineExtensionTests(unittest.TestCase):
         self.assertEqual(payload["comfyui"]["extension_id"], "comfyui")
         self.assertIn("folderbridge-engineering", {item["id"] for item in payload["skill_engine"]["packs"]})
 
-    def test_windows_packaging_includes_skill_data_and_smokes_skill_gateway(self) -> None:
+    def test_windows_packaging_includes_only_allowlisted_bundles_and_runs_verifier(self) -> None:
         script = (ROOT / "scripts" / "build_windows.ps1").read_text(encoding="utf-8")
-        self.assertIn('"skill_packs") + ";skill_packs"', script)
-        self.assertIn("skills --json", script)
-        self.assertIn('"id"\\s*:\\s*"folderbridge-engineering"', script)
-        self.assertIn('foreach ($requiredExtension in @("comfyui", "office", "git-publisher", "skill-engine"))', script)
-        self.assertIn('$gitPublisherExtension.version -ne "1.1.0"', script)
-        self.assertIn('$officeExtension.version -ne "1.1.0"', script)
+        verifier = (ROOT / "scripts" / "verify_windows_bundle.py").read_text(encoding="utf-8")
+        self.assertIn('$bundledExtensions = @("comfyui", "git-publisher", "office", "skill-engine")', script)
+        self.assertIn('$bundledSkillPacks = @("matt-pocock-engineering")', script)
+        self.assertNotIn('--add-data ((Join-Path $projectRoot "extensions") + ";extensions")', script)
+        self.assertNotIn('--add-data ((Join-Path $projectRoot "skill_packs") + ";skill_packs")', script)
+        self.assertIn("verify_windows_bundle.py", script)
+        self.assertIn('EXPECTED_BUNDLED_EXTENSIONS = {"comfyui", "git-publisher", "office", "skill-engine"}', verifier)
+        self.assertIn('EXPECTED_BUNDLED_SKILL_PACKS = {"folderbridge-engineering"}', verifier)
+        self.assertIn('json.loads(completed.stdout.decode("utf-8"))', verifier)
         for skill_id in (
             "codebase-design",
             "improve-codebase-architecture",
@@ -96,7 +99,7 @@ class SkillEngineExtensionTests(unittest.TestCase):
             "code-review",
             "implement",
         ):
-            self.assertIn(f'"id"\\s*:\\s*"{skill_id}"', script)
+            self.assertIn(f'"{skill_id}"', verifier)
 
 
 if __name__ == "__main__":

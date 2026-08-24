@@ -178,6 +178,34 @@ class ExtensionTests(unittest.TestCase):
         )
         self.assertFalse(self.trust.status(record)["trusted"])
 
+    def test_external_approval_survives_registry_recreation(self) -> None:
+        self.make_extension("persistent")
+        record = self.registry.get("persistent")
+        self.trust.approve(record, enabled=True)
+
+        reloaded = ExtensionRegistry(
+            user_root=self.user_root,
+            bundled_root=self.bundled_root,
+            trust_store=ExtensionTrustStore(self.trust.path),
+        )
+        item = next(entry for entry in reloaded.describe()["extensions"] if entry["id"] == "persistent")
+        self.assertTrue(item["trusted"])
+        self.assertTrue(item["enabled"])
+        self.assertTrue(item["loaded"])
+
+    def test_bundled_extension_safely_supersedes_old_external_same_id(self) -> None:
+        self.make_extension("same-id", bundled=True)
+        external = self.make_extension("same-id")
+        (external / "plugin.py").write_text(
+            "def handle(action, params, context):\n    return {'external_override': True}\n",
+            encoding="utf-8",
+        )
+
+        description = self.registry.describe()
+        selected = next(entry for entry in description["extensions"] if entry["id"] == "same-id")
+        self.assertTrue(selected["bundled"])
+        self.assertEqual(description["errors"], [])
+
     def test_oversized_trust_store_is_rejected_before_reading_contents(self) -> None:
         root = self.make_extension()
         record = load_extension(root, bundled=False)

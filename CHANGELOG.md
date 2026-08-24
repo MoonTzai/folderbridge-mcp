@@ -2,6 +2,13 @@
 
 All notable changes to FolderBridge MCP are documented here.
 
+## 0.8.2 — 2026-08-25
+
+- Fixed upgrade compatibility for external Skill Packs and Extensions. Exact-hash approvals remain in the user-level trust stores across executable upgrades when external content/permissions are unchanged; regression coverage now locks this behavior across fresh Engine/Registry instances.
+- Made bundled-vs-external ID collisions upgrade-safe without weakening trust: a release-trusted bundled component always wins, while an older external installation with the same ID is treated as superseded instead of producing a persistent duplicate-ID load error. External components still cannot override bundled components, and true same-tier duplicate IDs remain errors.
+- Removed build-directory contamination from Windows releases. Packaging now uses explicit bundled allowlists for the four shipped Extensions and the engineering Skill Pack instead of recursively embedding the whole repository `extensions` / `skill_packs` directories, so untracked or locally staged third-party components cannot be accidentally promoted into `FolderBridge.exe`.
+- Strengthened packaged-product smoke tests to compare the EXE's actual bundled Extension/Skill sets against those allowlists. This closes the 0.8.1 failure mode that could package a local `folderbridge-discipline` source folder as bundled and then collide with the user's separately installed copy.
+
 ## 0.8.1 — 2026-08-25
 
 - Removed the remaining small-file search bottleneck: literal UTF-8 search now streams files up to 512 MiB instead of skipping everything above 256 KiB, keeps bounded file/time budgets, reports skip reasons explicitly, and supports result pagination. File listing is pageable as well.

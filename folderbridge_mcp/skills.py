@@ -257,6 +257,13 @@ class SkillEngine:
                     errors.append({"code": "SKILL_PACK_INVALID", "path": str(child), "error": str(exc)})
                     continue
                 if record.pack_id in records:
+                    existing = records[record.pack_id]
+                    if existing.bundled and not record.bundled:
+                        # Upgrades may promote a formerly external Pack to a bundled Pack.
+                        # Keep the release-trusted bundled copy authoritative and treat the
+                        # old user copy as a harmless, superseded installation rather than
+                        # turning every later startup into a duplicate-ID failure.
+                        continue
                     errors.append({
                         "code": "SKILL_PACK_DUPLICATE",
                         "path": str(child),

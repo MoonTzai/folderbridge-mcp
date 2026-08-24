@@ -312,10 +312,31 @@ class SkillEngineTests(unittest.TestCase):
 
     def test_user_pack_cannot_shadow_bundled_pack_id(self) -> None:
         write_pack(self.bundled, "same-id")
-        write_pack(self.user, "same-id")
+        external = write_pack(self.user, "same-id")
+        (external / "skills" / "architecture" / "SKILL.md").write_text(
+            "external override must never replace bundled content\n",
+            encoding="utf-8",
+        )
         admin = self.engine().describe(include_untrusted=True)
         self.assertEqual([item["id"] for item in admin["packs"]], ["same-id"])
-        self.assertGreaterEqual(admin["error_count"], 1)
+        self.assertTrue(admin["packs"][0]["bundled"])
+        self.assertEqual(admin["error_count"], 0)
+        selected = self.engine().match("architecture")["matches"][0]
+        loaded = self.engine().get(selected["skill_ref"], selected["sha256"])
+        self.assertIn("Use deep modules", loaded["text"])
+        self.assertNotIn("external override", loaded["text"])
+
+    def test_external_approval_survives_engine_recreation(self) -> None:
+        write_pack(self.user, "external-pack")
+        first = self.engine()
+        displayed = first.describe(include_untrusted=True)["packs"][0]
+        first.approve_pack("external-pack", displayed["sha256"])
+
+        reloaded = self.engine()
+        trusted = reloaded.describe()["packs"]
+        self.assertEqual([item["id"] for item in trusted], ["external-pack"])
+        self.assertTrue(trusted[0]["trusted"])
+        self.assertTrue(trusted[0]["enabled"])
 
     def test_manifest_schema_version_rejects_json_boolean(self) -> None:
         pack = write_pack(self.user, "bool-schema")

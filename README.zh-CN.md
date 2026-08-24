@@ -264,6 +264,8 @@ JSON 示例采用许多桌面客户端使用的 `mcpServers` 约定：
 
 Skill 路由也采用同样的规模化策略。初始化只携带 64 KiB 的紧凑 round-robin 路由索引，不嵌入 Skill 正文；如果启用的 Skill 放不下，会明确报告遗漏数量，而 `skill-engine match` 始终保留为完整的任务级发现入口。Extension `list` 同样保持紧凑可分页，完整 schema 延后到 `extension(info)` 获取。
 
+外部 Skill Pack 与 Extension 属于用户安装内容，不属于 Release payload。它们的精确 hash 批准记录保存在用户级 FolderBridge 配置目录中；只要外部文件内容／声明权限没有变化，升级 EXE 不会要求重新批准。源码仓库里的 `skill_packs` 与 `extensions` 是 Release 自身的源目录；Windows 构建现在只封装显式 bundled allowlist，因此其中临时放置的 untracked／第三方目录不会再被误打进 EXE。若未来某个外部组件被正式收编为 bundled，且与旧外部安装使用同一个 ID，则 bundled 版本安全优先，旧外部副本被忽略而不是持续报 duplicate-ID；外部代码始终不能覆盖 bundled ID。
+
 ### 有界 MCP 并发
 
 FolderBridge 0.8.0 将请求拆成两个有界 lane，让长时间的数据面任务不会拖死控制/状态请求。当前默认是 2 个 control worker、最多 8 个 control in-flight，以及 6 个 data worker、最多 12 个 data in-flight。达到上限时不会继续无界排队，而是直接返回 JSON-RPC `-32001` / `Server busy`。并发响应允许按 request id 乱序完成（JSON-RPC 本身允许），但 FolderBridge 会串行写出完整 JSONL，因此不同响应的字节不会交叉。
