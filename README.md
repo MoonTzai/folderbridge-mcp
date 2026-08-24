@@ -32,7 +32,7 @@ FolderBridge MCP is a zero-dependency Python MCP server plus a desktop launcher.
 - **Bounded first-party subprocess ownership:** core Git inspection plus bundled Git Publisher and Office external-process calls now share owned-process timeout cleanup; partial/truncated Git safety inspection fails closed.
 - **Additional resource/lifecycle guards:** managed ComfyUI startup keeps a stable process handle across shutdown races, and core PPTX inspection rejects aggregate XML/relationship expansion above 256 MiB before parsing.
 - **Cross-monitor DPI font resizing:** on Windows Per-Monitor V2 displays, FolderBridge now explicitly recalculates named-font pixel sizes whenever the launcher moves between monitors with different scaling. Existing ttk labels/buttons/entries/Treeview text, the runtime log, the primary start/stop button, and setup-guide text all resize with the new monitor instead of relying on Tk's undefined runtime `tk scaling` behavior for existing widgets.
-- **Long-running Extension jobs:** actions may use `run_mode=job`, return immediately with a FolderBridge-owned `job_id`, and be inspected or cancelled through the same stable `extension` gateway. Timeouts may be configured from 1 second through 24 hours; `0` means no automatic timeout termination. Job ownership is bounded to 16 concurrently starting/running jobs and 128 retained finished records per FolderBridge process.
+- **Long-running Extension jobs:** actions may use `run_mode=job`, return immediately with a FolderBridge-owned `job_id`, and be inspected or cancelled through the same stable `extension` gateway. Timeouts may be configured from 1 second through 24 hours; `0` means no automatic timeout termination. Job ownership is bounded to 16 concurrently active jobs (including `termination_pending`) and 128 retained finished records per FolderBridge process; foreground Extension workers have a separate 16-worker lifecycle budget.
 - **Explicit secret/environment boundary:** extensions still start from a cleaned environment. Only variables named by exact `environment.inherit:NAME` permissions are copied; FolderBridge's `CONTROL_PLANE_API_KEY` and internal/control-plane names are permanently reserved. Values inherited through key/token/secret/password/auth-like names are recursively redacted from surfaced results/logs/errors. This makes API-backed integrations possible without exposing the Tunnel control key.
 - **External HTTPS declaration:** API-backed plugins can declare `network.outbound:https` so the user sees the network requirement during exact-hash approval. Permission declarations remain authorization contracts rather than a kernel sandbox.
 - **Host-validated artifacts:** plugins can return `workspace_artifacts`; FolderBridge revalidates each workspace-relative path and attaches size/SHA-256 metadata before exposing the result.
@@ -247,20 +247,24 @@ The built-in server tools do not depend on per-workspace task configuration:
 
 - `server_info`: reports each available workspace name, stable `workspace_id`, built-in/global capabilities, and safety boundary;
 - `workspace`: lists, reads, searches, and shows bounded Git status/diff output inside the selected `workspace_id`;
-- `file_info`: returns bounded metadata and SHA-256 for binary files;
+- `file_info`: returns bounded metadata and a whole-file SHA-256 for regular files; use it to obtain the current SHA before editing text above 1 MiB;
 - `pptx_inspect`: inspects PPTX text, OOXML diagram relationships, and SmartArt data without executing Office content;
 - `image_open`: returns bounded PNG/JPEG/GIF/WebP image content to the MCP client, including exact image members inside ZIP files;
 - `extension`: the stable `list` / `info` / `run` gateway for hot-loaded extensions; installing more plugins does not add MCP tool names;
-- `edit_file`: in read/write mode, creates or exactly edits a UTF-8 file inside the selected workspace.
+- `edit_file`: in read/write mode, creates small inline UTF-8 files and exactly edits existing UTF-8 text up to 128 MiB; existing-file edits require a current whole-file SHA-256, while large whole-file creation uses `write_file`;
+- `write_file`: in read/write mode, provides `begin`, `append`, `status`, `commit`, and `abort` for transactional whole-file UTF-8 creates or replacements up to 512 MiB while the MCP single-message limit remains 1 MiB.
 
 With one workspace, existing clients may continue omitting `workspace_id`. With multiple workspaces, workspace-scoped tools require a `workspace_id` returned by `server_info`; missing or unknown IDs are rejected. Duplicate roots, parent/child overlaps, and lists beyond eight entries are rejected before startup.
 
-A safe edit loop is:
+For local exact replacements, list/search the file, inspect the relevant range, retain the current whole-file SHA-256, call `edit_file`, then inspect the Git diff. `workspace(read)` returns the whole-file SHA for files up to 1 MiB; use `file_info` for larger files. New-file publication is no-clobber, and existing-file edits recheck the expected SHA immediately before atomic publication. If the underlying filesystem cannot provide safe atomic no-clobber publication, creation fails safely instead of falling back to an overwrite.
 
-1. list or search for a file;
-2. read it and retain the returned SHA-256;
-3. submit an exact replacement with that hash;
-4. inspect the Git diff.
+For a large whole-file create or replacement, use `write_file`: call `begin` (`replace` also requires the old SHA from `file_info`), send `append` chunks at the exact next UTF-8 byte offset, optionally call `status`, then `commit` with the complete new byte size and SHA-256 or `abort`. Each chunk is capped at 128 KiB so worst-case JSON escaping stays below the unchanged 1 MiB MCP message ceiling. Transactions are process-local, stage outside the workspace, support files up to 512 MiB, and clean stale staging older than 24 hours on a later startup. Commit revalidates UTF-8, size, new SHA, workspace/link policy, and replacement baseline before a fully written same-directory temporary file is atomically published; create mode never overwrites a path that appeared after `begin`.
+
+### Bounded MCP concurrency
+
+FolderBridge 0.8.0 uses separate bounded request lanes so a long data-plane operation does not make control/status calls unresponsive. The current defaults are 2 control workers with at most 8 in-flight control requests and 6 data workers with at most 12 in-flight data requests. Saturation never creates an unbounded queue: excess requests fail fast with JSON-RPC `-32001` / `Server busy`. Concurrent responses may complete out of request order, as JSON-RPC permits, but FolderBridge serializes complete JSONL writes so response bytes never interleave.
+
+Control work includes initialization/ping/catalog calls, `server_info`, extension list/info/job status/cancel, and transactional write status/abort. Reads and independent data work can proceed while other data operations are running. Core writes to the same target file are serialized; different target files can overlap. Tasks, build/package/capability execution, and non-read-only Extension actions are treated as opaque workspace mutations and cannot overlap core file writes in that workspace. Both foreground non-read-only Extension actions and non-read-only Extension Jobs keep the workspace mutation lease until the host has confirmed that the worker process exited. If termination cannot be confirmed immediately, the worker enters host-owned `termination_pending` handling and the lease stays held; bounded daemon reapers reconcile it automatically when the process later exits. The 16-Job and 16-foreground-worker lifecycle budgets remain separate from MCP request-worker limits. On stdio shutdown FolderBridge first closes mutation admission and wakes queued mutation waiters, then retries termination of owned Extension workers, drains bounded request workers, and finally cleans transactional staging.
 
 The server cannot delete or move files. Absolute paths, `..`, symlinks, junctions/reparse points, VCS internals, common dependency/build folders, and credential-like names are denied.
 

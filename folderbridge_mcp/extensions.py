@@ -12,9 +12,9 @@ import tempfile
 import threading
 import time
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
-from typing import Any, Iterable
+from typing import Any, Callable, Iterable
 
 from .config import workspace_id
 from .process_control import owned_process_group_kwargs, terminate_owned_process_tree
@@ -37,6 +37,9 @@ MAX_FOREGROUND_TIMEOUT_SECONDS = 24 * 60 * 60
 MAX_JOB_TIMEOUT_SECONDS = 24 * 60 * 60
 MAX_RUNNING_EXTENSION_JOBS = 16
 MAX_RETAINED_FINISHED_JOBS = 128
+MAX_FOREGROUND_EXTENSION_WORKERS = 16
+MAX_EXTENSION_JOB_SHUTDOWN_SECONDS = 5.0
+ACTIVE_EXTENSION_JOB_STATUSES = frozenset({"running", "termination_pending"})
 MAX_INHERITED_ENV_VALUE_BYTES = 64 * 1024
 MAX_WORKSPACE_ARTIFACTS = 64
 EXTENSION_ID_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
@@ -107,6 +110,28 @@ class ExtensionRecord:
     manifest: ExtensionManifest
     sha256: str
     bundled: bool
+
+
+@dataclass(frozen=True)
+class PreparedExtensionAction:
+    record: ExtensionRecord
+    action: ExtensionAction
+
+
+@dataclass(frozen=True)
+class PreparedExtensionRun:
+    contract: PreparedExtensionAction
+    params: dict[str, Any]
+    workspace: Workspace | None
+    read_only: bool
+
+    @property
+    def record(self) -> ExtensionRecord:
+        return self.contract.record
+
+    @property
+    def action(self) -> ExtensionAction:
+        return self.contract.action
 
 
 class ExtensionTrustStore:
@@ -319,15 +344,7 @@ class ExtensionRegistry:
             "errors": errors,
         }
 
-    def run(
-        self,
-        extension_id: str,
-        action_name: str,
-        params: dict[str, Any],
-        *,
-        workspace: Workspace | None,
-        read_only: bool,
-    ) -> dict[str, Any]:
+    def prepare_action(self, extension_id: str, action_name: str) -> PreparedExtensionAction:
         record = self.get(extension_id)
         action = record.manifest.actions.get(action_name)
         if action is None:
@@ -337,6 +354,93 @@ class ExtensionRegistry:
                 extension_id=extension_id,
                 available=sorted(record.manifest.actions),
             )
+        return PreparedExtensionAction(record=record, action=action)
+
+    def prepare_run(
+        self,
+        contract: PreparedExtensionAction,
+        params: dict[str, Any],
+        *,
+        workspace: Workspace | None,
+        read_only: bool,
+    ) -> PreparedExtensionRun:
+        self._authorize_prepared(contract.record, contract.action, workspace=workspace, read_only=read_only)
+        validate_json_schema(params, contract.action.input_schema, path="params")
+        return PreparedExtensionRun(
+            contract=contract,
+            params=dict(params),
+            workspace=workspace,
+            read_only=read_only,
+        )
+
+    def execute_prepared(
+        self,
+        prepared: PreparedExtensionRun,
+        *,
+        on_job_finish: Callable[[], None] | None = None,
+    ) -> dict[str, Any]:
+        # Recheck mutable authorization/applicability immediately before spawn,
+        # but never rescan the manifest: locking and execution must use exactly
+        # the same immutable action contract. The worker's private snapshot then
+        # verifies that source bytes still match prepared.record.sha256.
+        try:
+            self._authorize_prepared(
+                prepared.record,
+                prepared.action,
+                workspace=prepared.workspace,
+                read_only=prepared.read_only,
+            )
+        except Exception:
+            if on_job_finish is not None:
+                on_job_finish()
+            raise
+        if prepared.action.run_mode == "job":
+            return self.jobs.start(
+                prepared.record,
+                prepared.action,
+                prepared.params,
+                workspace=prepared.workspace,
+                read_only=prepared.read_only,
+                on_finish=on_job_finish,
+            )
+        return _run_worker(
+            prepared.record,
+            prepared.action,
+            prepared.params,
+            workspace=prepared.workspace,
+            read_only=prepared.read_only,
+            owner=self.jobs,
+            on_finish=on_job_finish,
+        )
+
+    def run(
+        self,
+        extension_id: str,
+        action_name: str,
+        params: dict[str, Any],
+        *,
+        workspace: Workspace | None,
+        read_only: bool,
+        on_job_finish: Callable[[], None] | None = None,
+    ) -> dict[str, Any]:
+        contract = self.prepare_action(extension_id, action_name)
+        prepared = self.prepare_run(
+            contract,
+            params,
+            workspace=workspace,
+            read_only=read_only,
+        )
+        return self.execute_prepared(prepared, on_job_finish=on_job_finish)
+
+    def _authorize_prepared(
+        self,
+        record: ExtensionRecord,
+        action: ExtensionAction,
+        *,
+        workspace: Workspace | None,
+        read_only: bool,
+    ) -> None:
+        extension_id = record.manifest.extension_id
         if action.requires_workspace and workspace is None:
             raise ToolError("WORKSPACE_REQUIRED", "This extension action requires a selected workspace.")
         if not action.read_only and read_only:
@@ -348,8 +452,6 @@ class ExtensionRegistry:
                 extension_id=extension_id,
             )
         trust = self.trust_store.status(record)
-        # External code is never executed before exact-hash approval. Bundled
-        # read-only discovery/status actions may explicitly opt out of global authorization.
         if not record.bundled and not trust["trusted"]:
             raise ToolError(
                 "EXTENSION_NOT_TRUSTED",
@@ -362,10 +464,6 @@ class ExtensionRegistry:
                 "This extension action requires one-time global approval and enablement in the FolderBridge sidebar.",
                 extension_id=extension_id,
             )
-        validate_json_schema(params, action.input_schema, path="params")
-        if action.run_mode == "job":
-            return self.jobs.start(record, action, params, workspace=workspace, read_only=read_only)
-        return _run_worker(record, action, params, workspace=workspace, read_only=read_only)
 
     def job_status(self, job_id: str, *, workspace: Workspace | None) -> dict[str, Any]:
         return self.jobs.status(job_id, workspace=workspace)
@@ -894,6 +992,21 @@ def _worker_request(
     return request, env, _inherited_secret_values(context, env)
 
 
+class _WorkerLaunchTerminationPending(RuntimeError):
+    def __init__(
+        self,
+        process: subprocess.Popen[bytes],
+        stdout: _BoundedCapture,
+        stderr: _BoundedCapture,
+        error: ToolError,
+    ) -> None:
+        super().__init__(str(error))
+        self.process = process
+        self.stdout = stdout
+        self.stderr = stderr
+        self.error = error
+
+
 def _start_worker_process(record: ExtensionRecord, request: bytes, env: dict[str, str]) -> tuple[subprocess.Popen[bytes], _BoundedCapture, _BoundedCapture]:
     kwargs: dict[str, Any] = {
         # The worker itself starts from a neutral directory. After it creates
@@ -922,30 +1035,22 @@ def _start_worker_process(record: ExtensionRecord, request: bytes, env: dict[str
         process.stdin.write(request)
         process.stdin.close()
     except OSError as exc:
+        error = ToolError("EXTENSION_PROTOCOL_ERROR", f"Could not send request to extension worker: {exc}")
         terminate_owned_process_tree(process)
-        try:
-            process.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            process.kill()
-            try:
-                process.wait(timeout=1)
-            except subprocess.TimeoutExpired:
-                pass
         try:
             process.stdin.close()
         except OSError:
             pass
-        stdout.join(timeout=1)
-        stderr.join(timeout=1)
+        if not _wait_for_process_exit(process, MAX_EXTENSION_JOB_SHUTDOWN_SECONDS):
+            # The caller must retain ownership of the still-live worker and any
+            # workspace mutation lease; never hide this process behind a plain
+            # protocol error.
+            raise _WorkerLaunchTerminationPending(process, stdout, stderr, error) from exc
         try:
-            process.stdout.close()
-        except OSError:
+            _close_worker_streams(process, stdout, stderr)
+        except Exception:
             pass
-        try:
-            process.stderr.close()
-        except OSError:
-            pass
-        raise ToolError("EXTENSION_PROTOCOL_ERROR", f"Could not send request to extension worker: {exc}") from exc
+        raise error from exc
     return process, stdout, stderr
 
 
@@ -1079,33 +1184,118 @@ def _run_worker(
     *,
     workspace: Workspace | None,
     read_only: bool,
+    owner: ExtensionJobManager,
+    on_finish: Callable[[], None] | None = None,
 ) -> dict[str, Any]:
-    request, env, secrets = _worker_request(record, action, params, workspace=workspace, read_only=read_only)
-    process, stdout, stderr = _start_worker_process(record, request, env)
-    timeout = _action_timeout(record, action)
     try:
+        owner.reserve_foreground()
+    except Exception:
+        if on_finish is not None:
+            on_finish()
+        raise
+    reservation_active = True
+    worker: _ForegroundWorker | None = None
+    try:
+        request, env, secrets = _worker_request(record, action, params, workspace=workspace, read_only=read_only)
         try:
-            exit_code = process.wait(timeout=_wait_timeout(timeout))
-        except subprocess.TimeoutExpired:
-            terminate_owned_process_tree(process)
-            try:
-                process.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                pass
+            process, stdout, stderr = _start_worker_process(record, request, env)
+        except _WorkerLaunchTerminationPending as pending:
+            worker = owner.adopt_foreground(pending.process, pending.stdout, pending.stderr, on_finish)
+            reservation_active = False
+            raise ToolError(
+                "EXTENSION_TERMINATION_PENDING",
+                "Extension worker could not be terminated after a startup protocol failure; workspace mutation protection remains held until the process exits.",
+                extension_id=record.manifest.extension_id,
+                action=action.name,
+                recovery_token=worker.token,
+                cause_code=pending.error.code,
+            ) from pending
+
+        worker = owner.adopt_foreground(process, stdout, stderr, on_finish)
+        reservation_active = False
+        timeout = _action_timeout(record, action)
+        state = owner.wait_foreground(worker, _wait_timeout(timeout))
+        if state == "shutdown":
+            terminate_owned_process_tree(worker.process)
+            raise ToolError(
+                "SERVER_SHUTTING_DOWN",
+                "FolderBridge is shutting down; the foreground Extension request was released while process ownership remains with the host.",
+                extension_id=record.manifest.extension_id,
+                action=action.name,
+                recovery_token=worker.token,
+            )
+        if state == "monitor_failed":
+            terminate_owned_process_tree(worker.process)
+            if _wait_for_process_exit(worker.process, MAX_EXTENSION_JOB_SHUTDOWN_SECONDS):
+                owner._finalize_foreground(worker, worker.process.poll())
+                raise ToolError(
+                    "EXTENSION_MONITOR_FAILED",
+                    "Could not start the foreground Extension lifecycle monitor.",
+                    extension_id=record.manifest.extension_id,
+                    action=action.name,
+                )
+            raise ToolError(
+                "EXTENSION_TERMINATION_PENDING",
+                "The foreground Extension lifecycle monitor failed and the worker process is still alive; workspace mutation protection remains held.",
+                extension_id=record.manifest.extension_id,
+                action=action.name,
+                recovery_token=worker.token,
+            )
+        if state == "timeout":
+            terminate_owned_process_tree(worker.process)
+            if not owner.wait_foreground_exit(worker, MAX_EXTENSION_JOB_SHUTDOWN_SECONDS):
+                raise ToolError(
+                    "EXTENSION_TERMINATION_PENDING",
+                    "Extension timed out and the worker process is still alive; workspace mutation protection remains held until the process exits.",
+                    extension_id=record.manifest.extension_id,
+                    action=action.name,
+                    recovery_token=worker.token,
+                )
             raise ToolError(
                 "EXTENSION_TIMEOUT",
                 f"Extension exceeded {timeout} seconds.",
                 extension_id=record.manifest.extension_id,
                 action=action.name,
             )
+
+        if worker.cleanup_error is not None:
+            raise worker.cleanup_error
+        if worker.exit_code is None:
+            raise ToolError("EXTENSION_PROTOCOL_ERROR", "Foreground Extension worker finished without an exit code.")
+        return _decode_worker_result(
+            record,
+            action,
+            worker.stdout,
+            worker.stderr_text,
+            exit_code=worker.exit_code,
+            workspace=workspace,
+            secrets=secrets,
+        )
     finally:
-        if process.stdin is not None:
-            try:
-                process.stdin.close()
-            except OSError:
-                pass
-    stderr_text = _close_worker_streams(process, stdout, stderr)
-    return _decode_worker_result(record, action, stdout, stderr_text, exit_code=exit_code, workspace=workspace, secrets=secrets)
+        if reservation_active:
+            owner.finish_foreground(on_finish)
+
+
+@dataclass
+class _ForegroundWorker:
+    token: str
+    process: subprocess.Popen[bytes]
+    stdout: _BoundedCapture
+    stderr: _BoundedCapture
+    on_finish: Callable[[], None] | None
+    condition: threading.Condition = field(
+        default_factory=lambda: threading.Condition(threading.Lock()),
+        repr=False,
+        compare=False,
+    )
+    finished: bool = False
+    finalizing: bool = False
+    shutdown_requested: bool = False
+    monitor_failed: bool = False
+    pending_reaper_started: bool = False
+    exit_code: int | None = None
+    stderr_text: str = ""
+    cleanup_error: ToolError | None = None
 
 
 @dataclass
@@ -1120,12 +1310,18 @@ class _ExtensionJob:
     stderr: _BoundedCapture
     started_at: float
     secrets: tuple[str, ...]
+    on_finish: Callable[[], None] | None = None
     status: str = "running"
     finished_at: float | None = None
     exit_code: int | None = None
     result: dict[str, Any] | None = None
     error: dict[str, Any] | None = None
     cancel_requested: bool = False
+    finish_notified: bool = False
+    pending_terminal_status: str | None = None
+    pending_terminal_error: dict[str, Any] | None = None
+    reconcile_in_progress: bool = False
+    pending_reaper_started: bool = False
 
 
 class ExtensionJobManager:
@@ -1134,12 +1330,186 @@ class ExtensionJobManager:
     def __init__(self) -> None:
         self._jobs: dict[str, _ExtensionJob] = {}
         self._starting_jobs = 0
+        self._foreground_active = 0
+        self._foreground_running: dict[str, _ForegroundWorker] = {}
+        self._closed = False
         self._lock = threading.Lock()
         atexit.register(self.close)
 
+    @staticmethod
+    def _call_finish(callback: Callable[[], None] | None) -> None:
+        if callback is None:
+            return
+        try:
+            callback()
+        except Exception:
+            pass
+
+    def _notify_finish(self, job: _ExtensionJob) -> None:
+        with self._lock:
+            if job.finish_notified:
+                return
+            job.finish_notified = True
+            callback = job.on_finish
+        self._call_finish(callback)
+
+    def reserve_foreground(self) -> None:
+        with self._lock:
+            if self._closed:
+                raise ToolError("SERVER_SHUTTING_DOWN", "FolderBridge is shutting down; new Extension workers are disabled.")
+            if self._foreground_active >= MAX_FOREGROUND_EXTENSION_WORKERS:
+                raise ToolError(
+                    "EXTENSION_FOREGROUND_LIMIT",
+                    f"At most {MAX_FOREGROUND_EXTENSION_WORKERS} foreground Extension workers may remain active concurrently.",
+                    limit=MAX_FOREGROUND_EXTENSION_WORKERS,
+                )
+            self._foreground_active += 1
+
+    def finish_foreground(self, on_finish: Callable[[], None] | None) -> None:
+        """Release a foreground reservation that never adopted a process."""
+        self._call_finish(on_finish)
+        with self._lock:
+            if self._foreground_active > 0:
+                self._foreground_active -= 1
+
+    def adopt_foreground(
+        self,
+        process: subprocess.Popen[bytes],
+        stdout: _BoundedCapture,
+        stderr: _BoundedCapture,
+        on_finish: Callable[[], None] | None,
+    ) -> _ForegroundWorker:
+        token = uuid.uuid4().hex
+        worker = _ForegroundWorker(token, process, stdout, stderr, on_finish)
+        with self._lock:
+            self._foreground_running[token] = worker
+            closed = self._closed
+        monitor = threading.Thread(
+            target=self._monitor_foreground,
+            args=(worker,),
+            name=f"folderbridge-extension-foreground-{token[:8]}",
+            daemon=True,
+        )
+        try:
+            monitor.start()
+        except Exception:
+            with worker.condition:
+                worker.monitor_failed = True
+                worker.shutdown_requested = True
+                worker.condition.notify_all()
+            terminate_owned_process_tree(worker.process)
+            if worker.process.poll() is not None:
+                self._finalize_foreground(worker, worker.process.poll())
+            else:
+                self._ensure_foreground_pending_reaper(worker)
+            return worker
+        if closed:
+            self.request_foreground_shutdown(worker)
+            terminate_owned_process_tree(worker.process)
+        return worker
+
+    def _monitor_foreground(self, worker: _ForegroundWorker) -> None:
+        try:
+            exit_code = worker.process.wait()
+        except Exception:
+            exit_code = worker.process.poll()
+            if exit_code is None:
+                with worker.condition:
+                    worker.monitor_failed = True
+                    worker.condition.notify_all()
+                self._ensure_foreground_pending_reaper(worker)
+                return
+        self._finalize_foreground(worker, exit_code)
+
+    def _ensure_foreground_pending_reaper(self, worker: _ForegroundWorker) -> None:
+        with worker.condition:
+            if worker.finished or worker.pending_reaper_started:
+                return
+            worker.pending_reaper_started = True
+        reaper = threading.Thread(
+            target=self._monitor_pending_foreground,
+            args=(worker,),
+            name=f"folderbridge-extension-foreground-pending-{worker.token[:8]}",
+            daemon=True,
+        )
+        try:
+            reaper.start()
+        except Exception:
+            with worker.condition:
+                worker.pending_reaper_started = False
+
+    def _monitor_pending_foreground(self, worker: _ForegroundWorker) -> None:
+        while True:
+            exit_code = worker.process.poll()
+            if exit_code is not None:
+                self._finalize_foreground(worker, exit_code)
+                return
+            try:
+                exit_code = worker.process.wait(timeout=1.0)
+            except subprocess.TimeoutExpired:
+                continue
+            except Exception:
+                time.sleep(0.1)
+                continue
+            if exit_code is not None:
+                self._finalize_foreground(worker, exit_code)
+                return
+
+    def _finalize_foreground(self, worker: _ForegroundWorker, exit_code: int | None) -> bool:
+        if exit_code is None:
+            return False
+        with worker.condition:
+            if worker.finished or worker.finalizing:
+                return False
+            worker.finalizing = True
+        stderr_text = ""
+        cleanup_error: ToolError | None = None
+        try:
+            stderr_text = _close_worker_streams(worker.process, worker.stdout, worker.stderr)
+        except ToolError as exc:
+            cleanup_error = exc
+        except Exception as exc:
+            cleanup_error = ToolError("EXTENSION_PROTOCOL_ERROR", f"Could not finalize Extension worker streams: {type(exc).__name__}")
+        self._call_finish(worker.on_finish)
+        with worker.condition:
+            worker.exit_code = exit_code
+            worker.stderr_text = stderr_text
+            worker.cleanup_error = cleanup_error
+            worker.finished = True
+            worker.finalizing = False
+            worker.condition.notify_all()
+        with self._lock:
+            if self._foreground_running.pop(worker.token, None) is not None and self._foreground_active > 0:
+                self._foreground_active -= 1
+        return True
+
+    def request_foreground_shutdown(self, worker: _ForegroundWorker) -> None:
+        with worker.condition:
+            worker.shutdown_requested = True
+            worker.condition.notify_all()
+
+    def wait_foreground(self, worker: _ForegroundWorker, timeout: float | None) -> str:
+        with worker.condition:
+            worker.condition.wait_for(
+                lambda: worker.finished or worker.shutdown_requested or worker.monitor_failed,
+                timeout=timeout,
+            )
+            if worker.finished:
+                return "finished"
+            if worker.shutdown_requested:
+                return "shutdown"
+            if worker.monitor_failed:
+                return "monitor_failed"
+            return "timeout"
+
+    def wait_foreground_exit(self, worker: _ForegroundWorker, timeout: float | None) -> bool:
+        with worker.condition:
+            worker.condition.wait_for(lambda: worker.finished, timeout=timeout)
+            return worker.finished
+
     def _prune_finished_locked(self) -> None:
         finished = sorted(
-            (job for job in self._jobs.values() if job.status != "running"),
+            (job for job in self._jobs.values() if job.status not in ACTIVE_EXTENSION_JOB_STATUSES),
             key=lambda job: job.finished_at or job.started_at,
         )
         excess = len(finished) - MAX_RETAINED_FINISHED_JOBS
@@ -1154,10 +1524,13 @@ class ExtensionJobManager:
         *,
         workspace: Workspace | None,
         read_only: bool,
+        on_finish: Callable[[], None] | None = None,
     ) -> dict[str, Any]:
         with self._lock:
+            if self._closed:
+                raise ToolError("SERVER_SHUTTING_DOWN", "FolderBridge is shutting down; new Extension Jobs are disabled.")
             self._prune_finished_locked()
-            running = sum(job.status == "running" for job in self._jobs.values())
+            running = sum(job.status in ACTIVE_EXTENSION_JOB_STATUSES for job in self._jobs.values())
             if running + self._starting_jobs >= MAX_RUNNING_EXTENSION_JOBS:
                 raise ToolError(
                     "EXTENSION_JOB_LIMIT",
@@ -1179,10 +1552,48 @@ class ExtensionJobManager:
                 stderr=stderr,
                 started_at=time.time(),
                 secrets=secrets,
+                on_finish=on_finish,
             )
+        except _WorkerLaunchTerminationPending as pending:
+            terminal_error = {
+                "code": pending.error.code,
+                "message": str(pending.error),
+                "details": pending.error.details,
+            }
+            job = _ExtensionJob(
+                job_id=uuid.uuid4().hex,
+                extension_id=record.manifest.extension_id,
+                action_name=action.name,
+                workspace_root=str(workspace.root) if workspace is not None else None,
+                timeout_seconds=_action_timeout(record, action),
+                process=pending.process,
+                stdout=pending.stdout,
+                stderr=pending.stderr,
+                started_at=time.time(),
+                secrets=secrets,
+                on_finish=on_finish,
+            )
+            with self._lock:
+                self._starting_jobs -= 1
+                self._jobs[job.job_id] = job
+            self._set_termination_pending(
+                job,
+                terminal_status="failed",
+                terminal_error=terminal_error,
+                code="EXTENSION_JOB_TERMINATION_PENDING",
+                message="Extension Job startup failed but its worker is still alive; workspace mutation protection remains held.",
+            )
+            return {
+                "job_id": job.job_id,
+                "status": "termination_pending",
+                "extension_id": record.manifest.extension_id,
+                "extension_action": action.name,
+                "timeout_seconds": job.timeout_seconds,
+            }
         except Exception:
             with self._lock:
                 self._starting_jobs -= 1
+            self._call_finish(on_finish)
             raise
         with self._lock:
             self._starting_jobs -= 1
@@ -1193,7 +1604,33 @@ class ExtensionJobManager:
             name=f"folderbridge-extension-job-{job.job_id[:8]}",
             daemon=True,
         )
-        monitor.start()
+        try:
+            monitor.start()
+        except Exception as exc:
+            terminate_owned_process_tree(job.process)
+            if _wait_for_process_exit(job.process, MAX_EXTENSION_JOB_SHUTDOWN_SECONDS):
+                with self._lock:
+                    self._jobs.pop(job.job_id, None)
+                self._notify_finish(job)
+                raise
+            monitor_error = {
+                "code": "EXTENSION_JOB_MONITOR_START_FAILED",
+                "message": f"Could not start the Extension Job monitor: {type(exc).__name__}",
+            }
+            self._set_termination_pending(
+                job,
+                terminal_status="failed",
+                terminal_error=monitor_error,
+                code="EXTENSION_JOB_TERMINATION_PENDING",
+                message="The Extension Job monitor failed to start and the worker is still alive; workspace mutation protection remains held.",
+            )
+            return {
+                "job_id": job.job_id,
+                "status": "termination_pending",
+                "extension_id": record.manifest.extension_id,
+                "extension_action": action.name,
+                "timeout_seconds": job.timeout_seconds,
+            }
         return {
             "job_id": job.job_id,
             "status": "running",
@@ -1216,10 +1653,20 @@ class ExtensionJobManager:
             except subprocess.TimeoutExpired:
                 timed_out = True
                 terminate_owned_process_tree(job.process)
-                try:
-                    exit_code = job.process.wait(timeout=5)
-                except subprocess.TimeoutExpired:
-                    exit_code = job.process.poll() if job.process.poll() is not None else -1
+                if not _wait_for_process_exit(job.process, MAX_EXTENSION_JOB_SHUTDOWN_SECONDS):
+                    timeout_error = {
+                        "code": "EXTENSION_JOB_TIMEOUT",
+                        "message": f"Extension job exceeded {job.timeout_seconds} seconds.",
+                    }
+                    self._set_termination_pending(
+                        job,
+                        terminal_status="timed_out",
+                        terminal_error=timeout_error,
+                        code="EXTENSION_JOB_TERMINATION_PENDING",
+                        message="Extension Job timed out but the worker process is still alive; workspace mutation protection remains held.",
+                    )
+                    return
+                exit_code = job.process.poll()
             stderr_text = _close_worker_streams(job.process, job.stdout, job.stderr)
             with self._lock:
                 cancel_requested = job.cancel_requested
@@ -1244,6 +1691,24 @@ class ExtensionJobManager:
                     result = None
                     error = {"code": exc.code, "message": str(exc), "details": exc.details}
         except Exception as exc:
+            if job.process.poll() is None:
+                terminate_owned_process_tree(job.process)
+                if not _wait_for_process_exit(job.process, MAX_EXTENSION_JOB_SHUTDOWN_SECONDS):
+                    internal_error = {
+                        "code": "EXTENSION_JOB_INTERNAL_ERROR",
+                        "message": _redact_secrets(f"{type(exc).__name__}: {exc}", job.secrets),
+                    }
+                    self._set_termination_pending(
+                        job,
+                        terminal_status="failed",
+                        terminal_error=internal_error,
+                        code="EXTENSION_JOB_TERMINATION_PENDING",
+                        message=_redact_secrets(
+                            f"Extension Job monitor failed and the worker is still alive: {type(exc).__name__}: {exc}",
+                            job.secrets,
+                        ),
+                    )
+                    return
             exit_code = job.process.poll()
             status = "failed"
             result = None
@@ -1251,6 +1716,10 @@ class ExtensionJobManager:
                 "code": "EXTENSION_JOB_INTERNAL_ERROR",
                 "message": _redact_secrets(f"{type(exc).__name__}: {exc}", job.secrets),
             }
+        # A terminal status must not become visible while the worker still owns
+        # a cross-thread workspace mutation lease. The process has exited by
+        # this point, so release before publishing terminal status.
+        self._notify_finish(job)
         with self._lock:
             job.status = status
             job.exit_code = exit_code
@@ -1258,6 +1727,88 @@ class ExtensionJobManager:
             job.error = error
             job.finished_at = time.time()
             self._prune_finished_locked()
+
+    def _set_termination_pending(
+        self,
+        job: _ExtensionJob,
+        *,
+        terminal_status: str,
+        terminal_error: dict[str, Any] | None,
+        code: str,
+        message: str,
+    ) -> None:
+        with self._lock:
+            job.status = "termination_pending"
+            job.exit_code = None
+            job.result = None
+            job.error = {"code": code, "message": message}
+            job.finished_at = None
+            job.pending_terminal_status = terminal_status
+            job.pending_terminal_error = terminal_error
+            job.reconcile_in_progress = False
+            start_reaper = not job.pending_reaper_started
+            if start_reaper:
+                job.pending_reaper_started = True
+        if start_reaper:
+            monitor = threading.Thread(
+                target=self._monitor_pending_job,
+                args=(job,),
+                name=f"folderbridge-extension-pending-{job.job_id[:8]}",
+                daemon=True,
+            )
+            try:
+                monitor.start()
+            except Exception:
+                with self._lock:
+                    job.pending_reaper_started = False
+
+    def _monitor_pending_job(self, job: _ExtensionJob) -> None:
+        try:
+            job.process.wait()
+        except Exception:
+            return
+        self._reconcile_pending(job)
+
+    def _reconcile_pending(self, job: _ExtensionJob) -> bool:
+        """Publish a pending terminal state only after the worker is confirmed dead."""
+        with self._lock:
+            if job.status != "termination_pending" or job.reconcile_in_progress:
+                return False
+            exit_code = job.process.poll()
+            if exit_code is None:
+                return False
+            job.reconcile_in_progress = True
+
+        # The process is already dead, so bounded stream cleanup cannot reopen a
+        # workspace-mutation race. Cleanup diagnostics must not prevent lease
+        # release or leave the job permanently stuck in reconciliation.
+        try:
+            try:
+                _close_worker_streams(job.process, job.stdout, job.stderr)
+            except Exception:
+                pass
+            self._notify_finish(job)
+            with self._lock:
+                if job.cancel_requested:
+                    final_status = "cancelled"
+                    final_error = None
+                else:
+                    final_status = job.pending_terminal_status or "failed"
+                    final_error = job.pending_terminal_error or job.error
+                job.status = final_status
+                job.exit_code = exit_code
+                job.result = None
+                job.error = final_error
+                job.finished_at = time.time()
+                job.pending_terminal_status = None
+                job.pending_terminal_error = None
+                job.reconcile_in_progress = False
+                self._prune_finished_locked()
+            return True
+        finally:
+            with self._lock:
+                if job.status == "termination_pending":
+                    job.reconcile_in_progress = False
 
     def _get(self, job_id: str, *, workspace: Workspace | None) -> _ExtensionJob:
         if not isinstance(job_id, str) or not re.fullmatch(r"[0-9a-f]{32}", job_id):
@@ -1275,6 +1826,7 @@ class ExtensionJobManager:
 
     def status(self, job_id: str, *, workspace: Workspace | None) -> dict[str, Any]:
         job = self._get(job_id, workspace=workspace)
+        self._reconcile_pending(job)
         with self._lock:
             payload: dict[str, Any] = {
                 "job_id": job.job_id,
@@ -1294,20 +1846,75 @@ class ExtensionJobManager:
 
     def cancel(self, job_id: str, *, workspace: Workspace | None) -> dict[str, Any]:
         job = self._get(job_id, workspace=workspace)
+        self._reconcile_pending(job)
         with self._lock:
-            if job.status != "running":
+            if job.status not in ACTIVE_EXTENSION_JOB_STATUSES:
                 return {"job_id": job.job_id, "status": job.status, "already_finished": True}
+            was_pending = job.status == "termination_pending"
             job.cancel_requested = True
+            if was_pending:
+                job.pending_terminal_status = "cancelled"
+                job.pending_terminal_error = None
         terminate_owned_process_tree(job.process)
+        if was_pending:
+            if not _wait_for_process_exit(job.process, MAX_EXTENSION_JOB_SHUTDOWN_SECONDS):
+                return {"job_id": job.job_id, "status": "termination_pending"}
+            self._reconcile_pending(job)
+            with self._lock:
+                return {"job_id": job.job_id, "status": job.status}
         return {"job_id": job.job_id, "status": "cancelling"}
 
     def close(self) -> None:
         with self._lock:
-            running = [job for job in self._jobs.values() if job.status == "running"]
+            self._closed = True
+            running = [job for job in self._jobs.values() if job.status in ACTIVE_EXTENSION_JOB_STATUSES]
+            foreground = list(self._foreground_running.values())
             for job in running:
                 job.cancel_requested = True
+        # Foreground request threads must be released immediately even if an OS
+        # process refuses termination. Process ownership and mutation leases stay
+        # with the monitor until actual exit.
+        for worker in foreground:
+            self.request_foreground_shutdown(worker)
+            terminate_owned_process_tree(worker.process)
+            exit_code = worker.process.poll()
+            if exit_code is not None:
+                self._finalize_foreground(worker, exit_code)
         for job in running:
             terminate_owned_process_tree(job.process)
+        deadline = time.monotonic() + MAX_EXTENSION_JOB_SHUTDOWN_SECONDS
+        for job in running:
+            remaining = max(0.0, deadline - time.monotonic())
+            if not _wait_for_process_exit(job.process, remaining):
+                continue
+            if job.status == "termination_pending":
+                with self._lock:
+                    job.pending_terminal_status = "cancelled"
+                    job.pending_terminal_error = None
+                self._reconcile_pending(job)
+            else:
+                # A live monitor will publish the final status; only release the
+                # lease here after process death so queued workspace mutations
+                # can drain during shutdown even if monitor cleanup lags.
+                self._notify_finish(job)
+
+
+def _wait_for_process_exit(process: subprocess.Popen[bytes], timeout: float) -> bool:
+    if process.poll() is not None:
+        return True
+    try:
+        process.wait(timeout=max(0.0, timeout))
+        return True
+    except subprocess.TimeoutExpired:
+        try:
+            process.kill()
+        except OSError:
+            pass
+        try:
+            process.wait(timeout=1.0)
+        except subprocess.TimeoutExpired:
+            return process.poll() is not None
+        return True
 
 
 def _worker_argv(record: ExtensionRecord) -> list[str]:

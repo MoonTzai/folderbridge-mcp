@@ -17,7 +17,8 @@ from .process_control import owned_process_group_kwargs, terminate_owned_process
 
 
 MAX_READ_BYTES = 256 * 1024
-MAX_WRITE_BYTES = 1024 * 1024
+MAX_INLINE_EDIT_HASH_BYTES = 1024 * 1024
+MAX_EDIT_TEXT_BYTES = 128 * 1024 * 1024
 MAX_RESULTS = 200
 MAX_FILES_SCANNED = 5000
 MAX_SCAN_SECONDS = 5.0
@@ -150,7 +151,7 @@ class Workspace:
             selected = selected[: exc.start]
             text = selected.decode("utf-8")
             truncated = True
-        full_hash = sha256_bytes(_bounded_file_bytes(path, MAX_WRITE_BYTES)) if size <= MAX_WRITE_BYTES else None
+        full_hash = sha256_bytes(_bounded_file_bytes(path, MAX_INLINE_EDIT_HASH_BYTES)) if size <= MAX_INLINE_EDIT_HASH_BYTES else None
         return {
             "path": path.relative_to(self.root).as_posix(),
             "text": text,
@@ -275,10 +276,10 @@ class Workspace:
             if create_content is not None:
                 raise ToolError("INVALID_ARGUMENT", "create_content is only valid for a new file")
             try:
-                original = _bounded_file_bytes(path, MAX_WRITE_BYTES)
+                original = _bounded_file_bytes(path, MAX_EDIT_TEXT_BYTES)
             except OSError as exc:
                 raise ToolError("READ_FAILED", f"Could not read {raw}: {exc}") from exc
-            if len(original) > MAX_WRITE_BYTES or b"\x00" in original:
+            if len(original) > MAX_EDIT_TEXT_BYTES or b"\x00" in original:
                 raise ToolError("FILE_TOO_LARGE", "Only bounded UTF-8 text files can be edited.")
             actual_hash = sha256_bytes(original)
             if not isinstance(expected_sha256, str) or expected_sha256 != actual_hash:
@@ -313,12 +314,15 @@ class Workspace:
             if not isinstance(create_content, str):
                 raise ToolError("INVALID_ARGUMENT", "create_content is required for a new file")
             updated = create_content
-        encoded = updated.encode("utf-8")
-        if len(encoded) > MAX_WRITE_BYTES:
-            raise ToolError("FILE_TOO_LARGE", f"Edited files may not exceed {MAX_WRITE_BYTES} bytes")
+        encoded = _encode_utf8_text(updated)
+        if len(encoded) > MAX_EDIT_TEXT_BYTES:
+            raise ToolError("FILE_TOO_LARGE", f"Edited files may not exceed {MAX_EDIT_TEXT_BYTES} bytes")
         path.parent.mkdir(parents=True, exist_ok=True)
         self._reject_linked_components(path)
-        _atomic_replace(path, encoded)
+        if exists:
+            _atomic_replace(path, encoded, expected_sha256=actual_hash)
+        else:
+            _atomic_create(path, encoded)
         return {
             "path": path.relative_to(self.root).as_posix(),
             "created": not exists,
@@ -347,6 +351,13 @@ class Workspace:
             raise ToolError("GIT_FAILED", f"Could not run git: {exc}") from exc
         output = (completed[1] + completed[2]).decode("utf-8", errors="replace")
         return {"action": action, "exit_code": completed[0], "output": output, "truncated": completed[3]}
+
+
+def _encode_utf8_text(value: str) -> bytes:
+    try:
+        return value.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise ToolError("NOT_UTF8", "Text input must be valid UTF-8 and may not contain lone surrogate code points.") from exc
 
 
 def _result_cap(value: int) -> int:
@@ -424,7 +435,7 @@ def _run_bounded_process(
     return exit_code, bytes(stdout.data), bytes(stderr.data), timed_out or stdout.total > output_limit or stderr.total > output_limit
 
 
-def _atomic_replace(path: Path, data: bytes) -> None:
+def _atomic_create(path: Path, data: bytes) -> None:
     temporary_name: str | None = None
     try:
         with tempfile.NamedTemporaryFile(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent, delete=False) as handle:
@@ -432,12 +443,57 @@ def _atomic_replace(path: Path, data: bytes) -> None:
             handle.write(data)
             handle.flush()
             os.fsync(handle.fileno())
+        try:
+            os.link(temporary_name, path)
+        except FileExistsError as exc:
+            raise ToolError("TARGET_EXISTS", "The target already exists; create refused.", path=path.name) from exc
+        except OSError as exc:
+            raise ToolError("WRITE_FAILED", "Could not atomically create the file without clobbering an existing target.") from exc
+        _fsync_directory(path.parent)
+    except ToolError:
+        raise
+    except OSError as exc:
+        raise ToolError("WRITE_FAILED", f"Could not create the file: {exc}") from exc
+    finally:
+        if temporary_name:
+            try:
+                Path(temporary_name).unlink()
+            except FileNotFoundError:
+                pass
+
+
+def _atomic_replace(path: Path, data: bytes, *, expected_sha256: str | None = None) -> None:
+    temporary_name: str | None = None
+    try:
+        with tempfile.NamedTemporaryFile(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent, delete=False) as handle:
+            temporary_name = handle.name
+            handle.write(data)
+            handle.flush()
+            os.fsync(handle.fileno())
+        if expected_sha256 is not None:
+            if not path.is_file() or path.is_symlink() or _is_reparse_point(path):
+                raise ToolError("STALE_FILE", "The file changed type before the atomic edit was published.")
+            try:
+                current = _bounded_file_bytes(path, MAX_EDIT_TEXT_BYTES)
+            except (OSError, ToolError) as exc:
+                raise ToolError("STALE_FILE", "The file changed before the atomic edit was published.") from exc
+            current_sha256 = sha256_bytes(current)
+            if current_sha256 != expected_sha256:
+                raise ToolError(
+                    "STALE_FILE",
+                    "The file changed before the atomic edit was published.",
+                    actual_sha256=current_sha256,
+                )
         if path.exists():
             try:
                 os.chmod(temporary_name, stat.S_IMODE(path.stat().st_mode))
             except OSError:
                 pass
         os.replace(temporary_name, path)
+        temporary_name = None
+        _fsync_directory(path.parent)
+    except ToolError:
+        raise
     except OSError as exc:
         raise ToolError("WRITE_FAILED", f"Could not update the file: {exc}") from exc
     finally:
@@ -446,6 +502,22 @@ def _atomic_replace(path: Path, data: bytes) -> None:
                 Path(temporary_name).unlink()
             except FileNotFoundError:
                 pass
+
+
+def _fsync_directory(path: Path) -> None:
+    if os.name == "nt":
+        return
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    try:
+        descriptor = os.open(path, flags)
+    except OSError:
+        return
+    try:
+        os.fsync(descriptor)
+    except OSError:
+        pass
+    finally:
+        os.close(descriptor)
 
 
 def _is_reparse_point(path: Path) -> bool:

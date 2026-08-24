@@ -7,6 +7,7 @@ import tempfile
 import threading
 import time
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from unittest import mock
 
@@ -565,12 +566,14 @@ class ExtensionTests(unittest.TestCase):
         record = self.registry.get("example")
         self.trust.approve(record, enabled=True)
 
+        job_finished = threading.Event()
         started = self.registry.run(
             "example",
             "echo",
             {"value": "ignored"},
             workspace=Workspace(self.workspace_root),
             read_only=True,
+            on_job_finish=job_finished.set,
         )
         self.assertEqual(started["status"], "running")
         self.assertEqual(started["timeout_seconds"], 0)
@@ -582,6 +585,315 @@ class ExtensionTests(unittest.TestCase):
             status = self.registry.job_status(started["job_id"], workspace=Workspace(self.workspace_root))
         self.assertEqual(status["status"], "succeeded")
         self.assertTrue(status["result"]["done"])
+        self.assertTrue(job_finished.wait(timeout=1))
+
+    def test_foreground_shutdown_wakes_request_without_releasing_live_worker(self) -> None:
+        manager = extensions_module.ExtensionJobManager()
+        finished = threading.Event()
+        exited = threading.Event()
+
+        class StubbornProcess:
+            stdin = None
+            stdout = None
+            stderr = None
+
+            def wait(self, timeout=None):
+                if timeout is None:
+                    exited.wait(timeout=1)
+                    return 137 if exited.is_set() else None
+                if not exited.is_set():
+                    raise extensions_module.subprocess.TimeoutExpired(cmd="worker", timeout=timeout)
+                return 137
+
+            def poll(self):
+                return 137 if exited.is_set() else None
+
+            def kill(self):
+                return None
+
+        manager.reserve_foreground()
+        worker = manager.adopt_foreground(
+            StubbornProcess(),
+            mock.Mock(),
+            mock.Mock(),
+            finished.set,
+        )
+        with ThreadPoolExecutor(max_workers=1) as executor, mock.patch.object(
+            extensions_module, "terminate_owned_process_tree"
+        ), mock.patch.object(extensions_module, "_wait_for_process_exit", return_value=False), mock.patch.object(
+            extensions_module, "_close_worker_streams", return_value=""
+        ):
+            waiting = executor.submit(manager.wait_foreground, worker, 60)
+            time.sleep(0.05)
+            manager.close()
+            self.assertEqual(waiting.result(timeout=1), "shutdown")
+            self.assertFalse(finished.is_set())
+            exited.set()
+            self.assertTrue(finished.wait(timeout=1))
+
+    def test_foreground_timeout_defers_finish_until_worker_really_exits(self) -> None:
+        manager = extensions_module.ExtensionJobManager()
+        finished = threading.Event()
+        exited = threading.Event()
+
+        class LaterExitProcess:
+            stdin = None
+            stdout = None
+            stderr = None
+
+            def wait(self, timeout=None):
+                if timeout is None:
+                    exited.wait()
+                    return 137
+                if not exited.is_set():
+                    raise extensions_module.subprocess.TimeoutExpired(cmd="worker", timeout=timeout)
+                return 137
+
+            def poll(self):
+                return 137 if exited.is_set() else None
+
+            def kill(self):
+                return None
+
+        process = LaterExitProcess()
+        record = mock.Mock()
+        record.manifest.extension_id = "example"
+        action = mock.Mock()
+        action.name = "mutate"
+        with mock.patch.object(extensions_module, "_worker_request", return_value=(b"{}", {}, ())), mock.patch.object(
+            extensions_module, "_start_worker_process", return_value=(process, mock.Mock(), mock.Mock())
+        ), mock.patch.object(extensions_module, "_action_timeout", return_value=1), mock.patch.object(
+            extensions_module, "terminate_owned_process_tree"
+        ), mock.patch.object(extensions_module, "MAX_EXTENSION_JOB_SHUTDOWN_SECONDS", 0.05), mock.patch.object(
+            extensions_module, "_close_worker_streams", return_value=""
+        ):
+            with self.assertRaises(ToolError) as raised:
+                extensions_module._run_worker(
+                    record,
+                    action,
+                    {},
+                    workspace=Workspace(self.workspace_root),
+                    read_only=False,
+                    owner=manager,
+                    on_finish=finished.set,
+                )
+            self.assertEqual(raised.exception.code, "EXTENSION_TERMINATION_PENDING")
+            self.assertFalse(finished.is_set())
+            exited.set()
+            self.assertTrue(finished.wait(timeout=1))
+
+    def test_foreground_monitor_failure_auto_reaps_after_worker_later_exits(self) -> None:
+        manager = extensions_module.ExtensionJobManager()
+        finished = threading.Event()
+        exited = threading.Event()
+
+        class MonitorFailureProcess:
+            stdin = None
+            stdout = None
+            stderr = None
+
+            def __init__(self) -> None:
+                self.wait_calls = 0
+
+            def wait(self, timeout=None):
+                if timeout is None:
+                    self.wait_calls += 1
+                    if self.wait_calls == 1:
+                        raise OSError("simulated monitor failure")
+                    exited.wait(timeout=1)
+                    return 137 if exited.is_set() else None
+                if not exited.is_set():
+                    raise extensions_module.subprocess.TimeoutExpired(cmd="worker", timeout=timeout)
+                return 137
+
+            def poll(self):
+                return 137 if exited.is_set() else None
+
+            def kill(self):
+                return None
+
+        process = MonitorFailureProcess()
+        record = mock.Mock()
+        record.manifest.extension_id = "example"
+        action = mock.Mock()
+        action.name = "mutate"
+        with mock.patch.object(extensions_module, "_worker_request", return_value=(b"{}", {}, ())), mock.patch.object(
+            extensions_module, "_start_worker_process", return_value=(process, mock.Mock(), mock.Mock())
+        ), mock.patch.object(extensions_module, "_action_timeout", return_value=60), mock.patch.object(
+            extensions_module, "terminate_owned_process_tree"
+        ), mock.patch.object(extensions_module, "_wait_for_process_exit", return_value=False), mock.patch.object(
+            extensions_module, "_close_worker_streams", return_value=""
+        ):
+            with self.assertRaises(ToolError) as raised:
+                extensions_module._run_worker(
+                    record,
+                    action,
+                    {},
+                    workspace=Workspace(self.workspace_root),
+                    read_only=False,
+                    owner=manager,
+                    on_finish=finished.set,
+                )
+            self.assertEqual(raised.exception.code, "EXTENSION_TERMINATION_PENDING")
+            self.assertFalse(finished.is_set())
+            exited.set()
+            try:
+                self.assertTrue(finished.wait(timeout=1))
+            finally:
+                manager.close()
+
+    def test_job_timeout_never_releases_workspace_lease_while_worker_is_still_alive(self) -> None:
+        manager = extensions_module.ExtensionJobManager()
+        finished = threading.Event()
+
+        class StubbornProcess:
+            stdin = None
+            stdout = None
+            stderr = None
+
+            def wait(self, timeout=None):
+                raise extensions_module.subprocess.TimeoutExpired(cmd="worker", timeout=timeout)
+
+            def poll(self):
+                return None
+
+            def kill(self):
+                return None
+
+        job = extensions_module._ExtensionJob(
+            job_id="a" * 32,
+            extension_id="example",
+            action_name="mutate",
+            workspace_root=str(self.workspace_root),
+            timeout_seconds=1,
+            process=StubbornProcess(),
+            stdout=mock.Mock(),
+            stderr=mock.Mock(),
+            started_at=time.time(),
+            secrets=(),
+            on_finish=finished.set,
+        )
+        with manager._lock:
+            manager._jobs[job.job_id] = job
+        with mock.patch.object(extensions_module, "terminate_owned_process_tree"), mock.patch.object(
+            extensions_module, "_close_worker_streams", return_value=""
+        ):
+            manager._monitor(job, mock.Mock(), mock.Mock(), Workspace(self.workspace_root))
+
+        self.assertFalse(finished.is_set())
+        self.assertEqual(job.status, "termination_pending")
+        self.assertIsNone(job.finished_at)
+        self.assertIsNone(job.process.poll())
+        # This deliberately unkillable fake must not leak into the manager's
+        # atexit callback after the safety assertion has completed.
+        with manager._lock:
+            manager._jobs.pop(job.job_id, None)
+
+    def test_pending_termination_reconciles_when_worker_later_exits(self) -> None:
+        manager = extensions_module.ExtensionJobManager()
+        finished = threading.Event()
+
+        class LaterExitProcess:
+            stdin = None
+            stdout = None
+            stderr = None
+
+            def __init__(self) -> None:
+                self.alive = True
+
+            def wait(self, timeout=None):
+                if self.alive:
+                    raise extensions_module.subprocess.TimeoutExpired(cmd="worker", timeout=timeout)
+                return 137
+
+            def poll(self):
+                return None if self.alive else 137
+
+            def kill(self):
+                return None
+
+        process = LaterExitProcess()
+        job = extensions_module._ExtensionJob(
+            job_id="b" * 32,
+            extension_id="example",
+            action_name="mutate",
+            workspace_root=str(self.workspace_root),
+            timeout_seconds=1,
+            process=process,
+            stdout=mock.Mock(),
+            stderr=mock.Mock(),
+            started_at=time.time(),
+            secrets=(),
+            on_finish=finished.set,
+        )
+        with manager._lock:
+            manager._jobs[job.job_id] = job
+        with mock.patch.object(extensions_module, "terminate_owned_process_tree"), mock.patch.object(
+            extensions_module, "_close_worker_streams", return_value=""
+        ):
+            manager._monitor(job, mock.Mock(), mock.Mock(), Workspace(self.workspace_root))
+            self.assertEqual(job.status, "termination_pending")
+            self.assertFalse(finished.is_set())
+            process.alive = False
+            status = manager.status(job.job_id, workspace=Workspace(self.workspace_root))
+
+        self.assertEqual(status["status"], "timed_out")
+        self.assertTrue(finished.is_set())
+        self.assertIsNotNone(status["finished_at"])
+
+    def test_pending_job_auto_reconciles_after_worker_later_exits_without_status_poll(self) -> None:
+        manager = extensions_module.ExtensionJobManager()
+        finished = threading.Event()
+        exited = threading.Event()
+
+        class LaterExitProcess:
+            stdin = None
+            stdout = None
+            stderr = None
+
+            def wait(self, timeout=None):
+                if timeout is None:
+                    exited.wait(timeout=1)
+                    return 137 if exited.is_set() else None
+                if not exited.is_set():
+                    raise extensions_module.subprocess.TimeoutExpired(cmd="worker", timeout=timeout)
+                return 137
+
+            def poll(self):
+                return 137 if exited.is_set() else None
+
+            def kill(self):
+                return None
+
+        process = LaterExitProcess()
+        job = extensions_module._ExtensionJob(
+            job_id="c" * 32,
+            extension_id="example",
+            action_name="mutate",
+            workspace_root=str(self.workspace_root),
+            timeout_seconds=1,
+            process=process,
+            stdout=mock.Mock(),
+            stderr=mock.Mock(),
+            started_at=time.time(),
+            secrets=(),
+            on_finish=finished.set,
+        )
+        with manager._lock:
+            manager._jobs[job.job_id] = job
+        with mock.patch.object(extensions_module, "_close_worker_streams", return_value=""):
+            manager._set_termination_pending(
+                job,
+                terminal_status="timed_out",
+                terminal_error={"code": "EXTENSION_JOB_TIMEOUT", "message": "timeout"},
+                code="EXTENSION_JOB_TERMINATION_PENDING",
+                message="still alive",
+            )
+            self.assertFalse(finished.is_set())
+            exited.set()
+            self.assertTrue(finished.wait(timeout=1))
+            status = manager.status(job.job_id, workspace=Workspace(self.workspace_root))
+        self.assertEqual(status["status"], "timed_out")
 
     def test_job_manager_rejects_unbounded_concurrency_before_spawning(self) -> None:
         path = self.make_extension()
@@ -604,6 +916,60 @@ class ExtensionTests(unittest.TestCase):
         finally:
             self.registry.jobs._starting_jobs = 0
         self.assertEqual(raised.exception.code, "EXTENSION_JOB_LIMIT")
+
+    def test_job_startup_send_failure_pending_path_also_auto_reaps(self) -> None:
+        manager = extensions_module.ExtensionJobManager()
+        finished = threading.Event()
+        exited = threading.Event()
+
+        class LaterExitProcess:
+            stdin = None
+            stdout = None
+            stderr = None
+
+            def wait(self, timeout=None):
+                if timeout is None:
+                    exited.wait(timeout=1)
+                    return 137 if exited.is_set() else None
+                if not exited.is_set():
+                    raise extensions_module.subprocess.TimeoutExpired(cmd="worker", timeout=timeout)
+                return 137
+
+            def poll(self):
+                return 137 if exited.is_set() else None
+
+            def kill(self):
+                return None
+
+        process = LaterExitProcess()
+        original_error = ToolError("EXTENSION_PROTOCOL_ERROR", "send failed")
+        record = mock.Mock()
+        record.manifest.extension_id = "example"
+        action = mock.Mock()
+        action.name = "mutate"
+        action.timeout_seconds = 1
+        with mock.patch.object(extensions_module, "_worker_request", return_value=(b"{}", {}, ())), mock.patch.object(
+            extensions_module,
+            "_start_worker_process",
+            side_effect=extensions_module._WorkerLaunchTerminationPending(process, mock.Mock(), mock.Mock(), original_error),
+        ), mock.patch.object(extensions_module, "_action_timeout", return_value=1), mock.patch.object(
+            extensions_module, "_close_worker_streams", return_value=""
+        ):
+            started = manager.start(
+                record,
+                action,
+                {},
+                workspace=Workspace(self.workspace_root),
+                read_only=False,
+                on_finish=finished.set,
+            )
+            self.assertEqual(started["status"], "termination_pending")
+            self.assertFalse(finished.is_set())
+            exited.set()
+            self.assertTrue(finished.wait(timeout=1))
+            status = manager.status(started["job_id"], workspace=Workspace(self.workspace_root))
+        self.assertEqual(status["status"], "failed")
+        self.assertEqual(status["error"]["code"], "EXTENSION_PROTOCOL_ERROR")
 
     def test_job_admission_reservation_is_held_until_job_is_registered(self) -> None:
         path = self.make_extension(

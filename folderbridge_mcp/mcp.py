@@ -2,8 +2,17 @@ from __future__ import annotations
 
 import json
 import sys
+import threading
 from typing import Any, BinaryIO
 
+from .concurrency import (
+    CONTROL_MAX_INFLIGHT,
+    CONTROL_WORKERS,
+    DATA_MAX_INFLIGHT,
+    DATA_WORKERS,
+    SERVER_BUSY_CODE,
+    BoundedExecutorLane,
+)
 from .tools import ToolRuntime
 
 
@@ -17,6 +26,7 @@ SERVER_META = "io.modelcontextprotocol/serverInfo"
 class McpServer:
     def __init__(self, runtime: ToolRuntime) -> None:
         self.runtime = runtime
+        self._write_lock = threading.Lock()
 
     def dispatch(self, request: Any) -> dict[str, Any] | None:
         if not isinstance(request, dict) or request.get("jsonrpc") != "2.0":
@@ -91,28 +101,61 @@ class McpServer:
     def serve(self, source: BinaryIO | None = None, destination: BinaryIO | None = None) -> None:
         source = source or sys.stdin.buffer
         destination = destination or sys.stdout.buffer
-        while True:
-            line = source.readline(MAX_MESSAGE_BYTES + 1)
-            if not line:
-                return
-            if len(line) > MAX_MESSAGE_BYTES:
-                if not line.endswith(b"\n"):
-                    _discard_line(source)
-                self._write(destination, _rpc_error(None, -32700, "Message exceeds 1 MiB"))
-                continue
+        control = BoundedExecutorLane(
+            workers=CONTROL_WORKERS,
+            max_inflight=CONTROL_MAX_INFLIGHT,
+            thread_name_prefix="folderbridge-control",
+        )
+        data = BoundedExecutorLane(
+            workers=DATA_WORKERS,
+            max_inflight=DATA_MAX_INFLIGHT,
+            thread_name_prefix="folderbridge-data",
+        )
+        try:
+            while True:
+                line = source.readline(MAX_MESSAGE_BYTES + 1)
+                if not line:
+                    break
+                if len(line) > MAX_MESSAGE_BYTES:
+                    if not line.endswith(b"\n"):
+                        _discard_line(source)
+                    self._write(destination, _rpc_error(None, -32700, "Message exceeds 1 MiB"))
+                    continue
+                try:
+                    request = json.loads(line, parse_constant=_reject_json_constant)
+                except (UnicodeDecodeError, json.JSONDecodeError, ValueError):
+                    self._write(destination, _rpc_error(None, -32700, "Parse error"))
+                    continue
+                lane = control if _request_lane(request) == "control" else data
+                if not lane.submit(lambda request=request: self._dispatch_and_write(request, destination)):
+                    if isinstance(request, dict) and "id" in request:
+                        self._write(destination, _rpc_error(request.get("id"), SERVER_BUSY_CODE, "Server busy"))
+        finally:
             try:
-                request = json.loads(line, parse_constant=_reject_json_constant)
-            except (UnicodeDecodeError, json.JSONDecodeError, ValueError):
-                self._write(destination, _rpc_error(None, -32700, "Parse error"))
-                continue
-            response = self.dispatch(request)
-            if response is not None:
-                self._write(destination, response)
+                begin_shutdown = getattr(self.runtime, "begin_shutdown", None)
+                if callable(begin_shutdown):
+                    begin_shutdown()
+            finally:
+                control.close()
+                data.close()
+                close_runtime = getattr(self.runtime, "close", None)
+                if callable(close_runtime):
+                    close_runtime()
 
-    @staticmethod
-    def _write(destination: BinaryIO, response: dict[str, Any]) -> None:
-        destination.write(json.dumps(response, ensure_ascii=False, separators=(",", ":")).encode("utf-8") + b"\n")
-        destination.flush()
+    def _dispatch_and_write(self, request: Any, destination: BinaryIO) -> None:
+        try:
+            response = self.dispatch(request)
+        except Exception:
+            request_id = request.get("id") if isinstance(request, dict) else None
+            response = _rpc_error(request_id, -32603, "Internal error")
+        if response is not None:
+            self._write(destination, response)
+
+    def _write(self, destination: BinaryIO, response: dict[str, Any]) -> None:
+        encoded = json.dumps(response, ensure_ascii=False, separators=(",", ":")).encode("utf-8") + b"\n"
+        with self._write_lock:
+            destination.write(encoded)
+            destination.flush()
 
 
 class RpcFailure(RuntimeError):
@@ -120,6 +163,36 @@ class RpcFailure(RuntimeError):
         super().__init__(message)
         self.code = code
         self.data = data
+
+
+def _request_lane(request: Any) -> str:
+    if not isinstance(request, dict):
+        return "control"
+    method = request.get("method")
+    if method in {
+        "initialize",
+        "ping",
+        "server/discover",
+        "tools/list",
+        "notifications/initialized",
+        "notifications/cancelled",
+    }:
+        return "control"
+    if method != "tools/call":
+        return "control"
+    params = request.get("params")
+    if not isinstance(params, dict):
+        return "control"
+    name = params.get("name")
+    arguments = params.get("arguments")
+    arguments = arguments if isinstance(arguments, dict) else {}
+    if name == "server_info":
+        return "control"
+    if name == "extension" and arguments.get("action") in {"list", "info", "job_status", "job_cancel"}:
+        return "control"
+    if name == "write_file" and arguments.get("action") in {"status", "abort"}:
+        return "control"
+    return "data"
 
 
 def _is_modern(params: dict[str, Any]) -> bool:

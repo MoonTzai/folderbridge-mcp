@@ -47,7 +47,7 @@ def file_info(workspace: Workspace, raw: str) -> dict[str, Any]:
     if stat_result.st_size > MAX_BINARY_FILE_BYTES:
         raise ToolError(
             "FILE_TOO_LARGE",
-            f"Binary metadata hashing is limited to {MAX_BINARY_FILE_BYTES} bytes.",
+            f"Whole-file metadata hashing is limited to {MAX_BINARY_FILE_BYTES} bytes.",
             path=raw,
             size=stat_result.st_size,
         )

@@ -2,6 +2,17 @@
 
 All notable changes to FolderBridge MCP are documented here.
 
+## 0.8.0 — 2026-08-24
+
+- Reworked the UTF-8 write layer so existing files up to 128 MiB can use SHA-locked exact replacement; files above 1 MiB obtain their whole-file SHA through `file_info` while the MCP single-message ceiling remains 1 MiB. Release regression coverage mechanically exercises 100 MiB exact edits plus 100 MiB transactional create and replace paths.
+- Added the fixed `write_file` transaction (`begin` / `append` / `status` / `commit` / `abort`) for whole-file UTF-8 creates or replacements up to 512 MiB. Chunks are limited to 128 KiB so even worst-case JSON escaping fits under the unchanged MCP envelope.
+- Transaction staging is host-owned outside the workspace, bounded to 16 active transactions, process-local, cleaned on graceful shutdown, and stale after 24 hours. Commit revalidates UTF-8, size, new SHA, workspace/link policy, and replacement baseline, then publishes from a fully written same-directory temporary file.
+- Hardened both old and new write paths against clobber/TOCTOU cases: create publication is no-clobber, existing exact edits recheck SHA immediately before publication, transactional copy recomputes staged size/SHA, and POSIX staging uses private permissions with parent-directory fsync after publication where supported.
+- Added bounded concurrent MCP request dispatch with independent control/data lanes (2/6 workers, 8/12 in-flight defaults), fail-fast `-32001 Server busy` admission, and serialized complete JSONL response writes so long data operations do not block control/status calls or create unbounded queues.
+- Added resource-aware mutation coordination: same-file core writes serialize while different files may overlap; opaque task/capability/non-read-only Extension mutations exclude core writes for that workspace. Both foreground non-read-only Extension actions and non-read-only Jobs retain the workspace mutation lease until the host confirms process exit; failed termination enters `termination_pending` with host-owned reapers instead of releasing protection early. Job and foreground lifecycle budgets are independently bounded at 16 each.
+- Removed an Extension hot-reload TOCTOU by preparing one immutable `record + action + SHA-256` execution contract and using that same contract for mutation-lock policy, authorization, and worker launch; the worker still verifies a private execution snapshot against the prepared hash.
+- Made stdio shutdown concurrency-safe: close workspace-mutation admission and wake queued mutation waiters first, retry termination of owned Extension workers without pretending a still-live process released its lease, then drain bounded MCP workers and clean process-local transactional staging.
+
 ## 0.7.4 — 2026-08-24
 
 - Fixed the four OpenAI Secure MCP Tunnel text fields (`tunnel-client`, Profile, Tunnel ID, Runtime API Key) on Windows Per-Monitor DPI changes. They no longer depend on the native Vista `ttk.Entry` element, whose runtime geometry can remain at the old monitor scale; FolderBridge now uses one explicit DPI-managed text-entry seam and recalculates font, focus border, caret width, and grid internal padding whenever monitor DPI changes.

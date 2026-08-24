@@ -32,7 +32,7 @@ FolderBridge MCP 是一个零第三方依赖的 Python MCP 服务器和桌面启
 - **第一方外部进程统一纳入 owned-process 语义：** 核心 Git 检查、bundled Git Publisher 的 Git/GCM、Office PowerShell 渲染都具备进程树超时清理；Git 安全检查一旦输出被截断会直接失败，不把不完整结果当作完整检查。
 - **补充资源与生命周期保护：** ComfyUI 启动流程持有稳定的本地 process handle，避免与 shutdown 竞态；核心 PPTX 检查在 XML 解析前增加 256 MiB 的 XML/relationship 总未压缩体积上限。
 - **修复跨屏 DPI 字体缩放：** Windows Per-Monitor V2 环境下，FolderBridge 在窗口移动到不同缩放比例的显示器时，会根据新的 `GetDpiForWindow` 结果明确重算 named font 的像素尺寸。ttk 标签/按钮/输入框/Treeview、运行日志、主启动/停止按钮以及连接向导正文都会随当前屏幕重新缩放，不再依赖 Tk 对已有控件运行时 `tk scaling` 更新的未定义行为。
-- **新增长任务 Extension Job：** action 可声明 `run_mode=job`，`extension(action="run")` 会立即返回 FolderBridge 托管的 `job_id`，随后继续用同一个 `extension` 网关查询状态或取消；不新增 MCP tool 名称。超时可配置到 24 小时，`0` 表示关闭自动超时终止。每个 FolderBridge 进程最多同时处于 starting/running 的 Job 为 16 个，并只保留最近 128 条已结束 Job 记录。
+- **新增长任务 Extension Job：** action 可声明 `run_mode=job`，`extension(action="run")` 会立即返回 FolderBridge 托管的 `job_id`，随后继续用同一个 `extension` 网关查询状态或取消；不新增 MCP tool 名称。超时可配置到 24 小时，`0` 表示关闭自动超时终止。每个 FolderBridge 进程最多同时保有 16 个活跃 Job（包括 `termination_pending`），并只保留最近 128 条已结束 Job 记录；前台 Extension worker 另有独立的 16-worker 生命周期预算。
 - **明确环境变量/密钥边界：** Extension 仍从清理后的环境启动，只有 manifest 精确声明的 `environment.inherit:变量名` 才会被复制进去；`CONTROL_PLANE_API_KEY` 与 FolderBridge/control-plane 内部变量永远禁止继承。通过 key/token/secret/password/auth 类变量名继承的值，会在插件返回结果、日志和对外错误中递归脱敏，避免把 API Key 带回模型侧。
 - **新增外部 HTTPS 权限声明：** 需要调用公网 API 的插件可声明 `network.outbound:https`，让用户在精确 hash 批准时明确看到公网依赖。该权限与其它 Extension permission 一样属于授权契约，不是内核级网络沙箱。
 - **宿主校验工作区产物：** 插件可返回 `workspace_artifacts`；FolderBridge 会重新按工作区路径策略解析，并附加 size/SHA-256 后才把结果暴露给模型。
@@ -247,20 +247,24 @@ JSON 示例采用许多桌面客户端使用的 `mcpServers` 约定：
 
 - `server_info`：报告可用工作区的名称、稳定 `workspace_id`、内建/全局能力和安全边界；
 - `workspace`：在指定 `workspace_id` 内列出、读取、搜索文件，并查看有界的 Git status/diff；
-- `file_info`：读取二进制文件的有界元数据与 SHA-256；
+- `file_info`：读取普通文件的有界元数据与整文件 SHA-256；编辑超过 1 MiB 的文本前，用它取得当前 SHA；
 - `pptx_inspect`：安全解析 PPTX 文本、OOXML 图关系和 SmartArt 数据，不执行 Office 内容；
 - `image_open`：把工作区中的 PNG/JPEG/GIF/WebP（包括 ZIP 内精确成员）作为 MCP 图像内容返回；
 - `extension`：固定的 `list` / `info` / `run` 插件网关；以后安装更多插件不会继续增加 MCP tool 名称；
-- `edit_file`：读写模式下，在指定工作区创建 UTF-8 文件，或执行原子化、唯一精确替换。
+- `edit_file`：读写模式下创建小型内联 UTF-8 文件，或精确编辑不超过 128 MiB 的已有 UTF-8 文本；编辑已有文件必须携带当前整文件 SHA-256，大文件整文件新建使用 `write_file`；
+- `write_file`：读写模式下提供 `begin`、`append`、`status`、`commit`、`abort` 五个固定事务动作，用于最大 512 MiB 的整文件 UTF-8 新建或替换，同时保持 MCP 单消息上限仍为 1 MiB。
 
 只有一个工作区时，旧客户端可以继续省略 `workspace_id`。存在多个工作区时，所有工作区作用域工具都必须携带 `server_info` 返回的 `workspace_id`；缺失或未知 ID 会被拒绝。重复目录、父子重叠目录和超过 8 项的列表也会在启动前被拒绝。
 
-典型安全编辑循环：
+做局部精确替换时：先列出/搜索并读取所需片段，保留当前整文件 SHA-256，再调用 `edit_file`，最后检查 Git diff。`workspace(read)` 会为不超过 1 MiB 的文件返回整文件 SHA；更大的文件改用 `file_info`。新建文件采用 no-clobber 发布；已有文件会在原子发布前再次复核预期 SHA。如果底层文件系统不能提供安全的原子 no-clobber 发布，新建会安全失败，而不会退化成覆盖已有文件。
 
-1. 列出或搜索文件；
-2. 读取文件并保留返回的 SHA-256；
-3. 携带该哈希提交精确替换；
-4. 检查 Git diff。
+做大文件整文件新建或替换时使用 `write_file`：先 `begin`（`replace` 还要携带 `file_info` 得到的旧 SHA），再按精确的 UTF-8 字节 offset 连续 `append`，可用 `status` 查看当前 offset，最后带完整新文件字节数和 SHA-256 执行 `commit`，或用 `abort` 放弃。单块最多 128 KiB，确保最坏 JSON 转义后仍低于不变的 1 MiB MCP 单消息上限。事务只在当前服务器进程内存在，暂存文件位于工作区之外，整文件上限 512 MiB；超过 24 小时的陈旧暂存文件会在后续启动时清理。提交前会再次校验 UTF-8、大小、新 SHA、工作区/链接策略和替换目标旧 SHA，再从同目录完整临时文件原子发布；新建模式不会覆盖 `begin` 后突然出现的目标。
+
+### 有界 MCP 并发
+
+FolderBridge 0.8.0 将请求拆成两个有界 lane，让长时间的数据面任务不会拖死控制/状态请求。当前默认是 2 个 control worker、最多 8 个 control in-flight，以及 6 个 data worker、最多 12 个 data in-flight。达到上限时不会继续无界排队，而是直接返回 JSON-RPC `-32001` / `Server busy`。并发响应允许按 request id 乱序完成（JSON-RPC 本身允许），但 FolderBridge 会串行写出完整 JSONL，因此不同响应的字节不会交叉。
+
+控制面包括初始化/ping/工具目录、`server_info`、Extension list/info/job status/cancel，以及事务写入的 status/abort。读取与互不冲突的数据任务可以在其他数据任务运行时继续执行。同一目标文件的核心写入会串行，不同目标文件可以并行；task、build/package/capability 以及非只读 Extension action 被视为无法预知写入范围的 workspace mutation，在同一工作区内不会与核心文件写入并发。无论是前台非只读 Extension action 还是非只读 Extension Job，都会一直持有工作区 mutation lease，直到宿主确认 worker 进程已经退出；如果终止暂时无法确认，就进入宿主管理的 `termination_pending`，继续持锁，并由有界 daemon reaper 在进程后续退出时自动收口。16 个 Job 与 16 个前台 worker 的生命周期预算彼此独立，也与 MCP request worker 预算分离。stdio 关闭时会先关闭 mutation admission 并唤醒排队中的 mutation waiter，再重试终止宿主拥有的 Extension worker，然后 drain 有界 request worker，最后清理事务暂存。
 
 MCP 不能删除或移动文件。绝对路径、`..`、符号链接、junction/reparse point、版本控制内部文件、常见依赖/构建目录和疑似凭据文件名都会被拒绝。
 

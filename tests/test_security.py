@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import os
 import shutil
 import subprocess
@@ -8,7 +9,7 @@ import unittest
 from pathlib import Path
 
 from folderbridge_mcp.config import CONFIG_NAME
-from folderbridge_mcp.security import ToolError, Workspace, sha256_bytes
+from folderbridge_mcp.security import ToolError, Workspace, _atomic_create, _atomic_replace, sha256_bytes
 
 
 class WorkspaceSecurityTests(unittest.TestCase):
@@ -74,6 +75,44 @@ class WorkspaceSecurityTests(unittest.TestCase):
         self.assertEqual(path.read_text(encoding="utf-8"), "value = 2\n")
         self.assertFalse(result["created"])
 
+    def test_invalid_utf8_surrogate_is_rejected_as_input_error(self) -> None:
+        with self.assertRaisesRegex(ToolError, "UTF-8") as raised:
+            self.workspace.edit_file(
+                "invalid.txt",
+                expected_sha256=None,
+                replacements=None,
+                create_content="\ud800",
+            )
+        self.assertEqual(raised.exception.code, "NOT_UTF8")
+        self.assertFalse((self.root / "invalid.txt").exists())
+
+    def test_exact_edit_supports_utf8_files_at_one_hundred_mib(self) -> None:
+        path = self.root / "large.md"
+        digest = hashlib.sha256()
+        with path.open("wb") as handle:
+            header = b"header\n"
+            handle.write(header)
+            digest.update(header)
+            block = b"A" * (1024 * 1024)
+            for _ in range(100):
+                handle.write(block)
+                digest.update(block)
+            tail = b"\nneedle\n"
+            handle.write(tail)
+            digest.update(tail)
+        self.assertGreater(path.stat().st_size, 100 * 1024 * 1024)
+        result = self.workspace.edit_file(
+            "large.md",
+            expected_sha256=digest.hexdigest(),
+            replacements=[{"old": "needle", "new": "replacement"}],
+            create_content=None,
+        )
+        self.assertEqual(result["size"], path.stat().st_size)
+        with path.open("rb") as handle:
+            handle.seek(-64, os.SEEK_END)
+            tail_bytes = handle.read()
+        self.assertTrue(tail_bytes.endswith(b"\nreplacement\n"))
+
     def test_utf8_pagination_does_not_split_a_code_point(self) -> None:
         (self.root / "unicode.txt").write_text("A你B", encoding="utf-8")
         first = self.workspace.read_text("unicode.txt", limit=2)
@@ -99,6 +138,23 @@ class WorkspaceSecurityTests(unittest.TestCase):
         result = self.workspace.git_view("diff")
         self.assertTrue(result["truncated"])
         self.assertLessEqual(len(result["output"].encode("utf-8")), 2 * 64 * 1024)
+
+    def test_atomic_create_never_clobbers_an_existing_target(self) -> None:
+        path = self.root / "race.txt"
+        path.write_text("winner", encoding="utf-8")
+        with self.assertRaisesRegex(ToolError, "already exists"):
+            _atomic_create(path, b"loser")
+        self.assertEqual(path.read_text(encoding="utf-8"), "winner")
+
+    def test_atomic_replace_rechecks_expected_sha_immediately_before_publish(self) -> None:
+        path = self.root / "race.txt"
+        original = b"original"
+        path.write_bytes(original)
+        expected = sha256_bytes(original)
+        path.write_bytes(b"changed elsewhere")
+        with self.assertRaisesRegex(ToolError, "changed"):
+            _atomic_replace(path, b"replacement", expected_sha256=expected)
+        self.assertEqual(path.read_bytes(), b"changed elsewhere")
 
     def test_rejects_ambiguous_replacement(self) -> None:
         path = self.root / "app.py"

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import os
+import threading
 from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
@@ -15,10 +17,31 @@ from .capabilities import (
     run_capability,
 )
 from .config import ProjectConfig, canonical_workspaces, config_is_trusted, load_config, workspace_id
-from .extensions import MAX_RETAINED_FINISHED_JOBS, MAX_RUNNING_EXTENSION_JOBS, ExtensionRegistry
-from .security import ToolError, Workspace
+from .concurrency import (
+    CONTROL_MAX_INFLIGHT,
+    CONTROL_WORKERS,
+    DATA_MAX_INFLIGHT,
+    DATA_WORKERS,
+    MutationGateClosed,
+    ResourceLockTable,
+    WorkspaceMutationGate,
+)
+from .extensions import (
+    MAX_FOREGROUND_EXTENSION_WORKERS,
+    MAX_RETAINED_FINISHED_JOBS,
+    MAX_RUNNING_EXTENSION_JOBS,
+    ExtensionRegistry,
+)
+from .security import MAX_EDIT_TEXT_BYTES, ToolError, Workspace
 from .skills import SkillEngine
 from .task_runner import run_task
+from .text_writes import (
+    MAX_ACTIVE_TEXT_TRANSACTIONS,
+    MAX_TRANSACTION_CHUNK_BYTES,
+    MAX_TRANSACTION_TEXT_BYTES,
+    TRANSACTION_TTL_SECONDS,
+    TextWriteManager,
+)
 
 
 @dataclass(frozen=True)
@@ -101,10 +124,34 @@ class ToolRuntime:
         )
         self.extensions = ExtensionRegistry()
         self.skills = SkillEngine()
+        self.text_writes: TextWriteManager | None = None
+        self._text_writes_init_lock = threading.Lock()
+        self._write_locks = ResourceLockTable()
+        self._workspace_mutations = WorkspaceMutationGate()
+        self._shutdown_lock = threading.Lock()
+        self._shutting_down = False
 
     @property
     def identity(self) -> dict[str, str]:
         return {"name": "folderbridge", "title": "FolderBridge MCP", "version": __version__}
+
+    def begin_shutdown(self) -> None:
+        with self._shutdown_lock:
+            if self._shutting_down:
+                return
+            self._shutting_down = True
+        # Stop new workspace mutations and wake requests still waiting for a
+        # lease before attempting to terminate background workers. Existing
+        # holders remain protected until they really release their leases.
+        self._workspace_mutations.close()
+        self.extensions.jobs.close()
+
+    def close(self) -> None:
+        self.begin_shutdown()
+        with self._text_writes_init_lock:
+            manager = self.text_writes
+        if manager is not None:
+            manager.close()
 
     @property
     def instructions(self) -> str:
@@ -120,9 +167,10 @@ class ToolRuntime:
         )
         base = (
             f"This server exposes {len(self._targets)} explicitly selected local {mode} workspace(s). {selection_note}"
-            f"Use workspace(read) before edit_file so edits carry "
-            f"the current SHA-256. Credential-like files, links, dependencies, and VCS internals are hidden. "
-            f"Exact replacements are atomic; arbitrary shell commands are unavailable; {task_note}; {capability_note}. "
+            f"Use workspace(read) before edit_file for small files; for files above 1 MiB use file_info to obtain the full SHA-256. "
+            f"Use write_file begin/append/status/commit/abort for large whole-file creates or replacements without enlarging MCP messages. "
+            f"Credential-like files, links, dependencies, and VCS internals are hidden. Exact replacements and committed transactional writes are atomic; "
+            f"arbitrary shell commands are unavailable; {task_note}; {capability_note}. "
             "For software architecture, module/interface design, debugging, test-first implementation, or code-review work, "
             "use the bundled 'skill-engine' through extension(run): call action 'match' with the task before acting, then "
             "call action 'get' with the returned skill_ref and sha256 for each methodology you choose. If match returns no "
@@ -133,7 +181,7 @@ class ToolRuntime:
     def list_tools(self) -> list[dict[str, Any]]:
         tools = [SERVER_INFO_TOOL, WORKSPACE_TOOL, FILE_INFO_TOOL, PPTX_INSPECT_TOOL, IMAGE_OPEN_TOOL, EXTENSION_TOOL]
         if not self.read_only:
-            tools.append(EDIT_FILE_TOOL)
+            tools.extend((EDIT_FILE_TOOL, WRITE_FILE_TOOL))
         if self.execution_capabilities:
             tools.append(RUN_CAPABILITY_TOOL)
         if self.allow_tasks:
@@ -144,7 +192,7 @@ class ToolRuntime:
                 tool["inputSchema"]["properties"]["name"]["enum"] = list(self.execution_capabilities)
         if len(self._targets) > 1:
             for tool in rendered:
-                if tool["name"] in {"workspace", "file_info", "pptx_inspect", "image_open", "edit_file", "run_capability", "run_task"}:
+                if tool["name"] in {"workspace", "file_info", "pptx_inspect", "image_open", "edit_file", "write_file", "run_capability", "run_task"}:
                     tool["inputSchema"]["required"] = [
                         "workspace_id",
                         *tool["inputSchema"].get("required", []),
@@ -162,6 +210,7 @@ class ToolRuntime:
         }
         if not self.read_only:
             handlers["edit_file"] = self._edit_file
+            handlers["write_file"] = self._write_file
         if self.execution_capabilities:
             handlers["run_capability"] = self._run_capability
         if self.allow_tasks:
@@ -173,6 +222,8 @@ class ToolRuntime:
             return success_result(handler(arguments))
         except ToolError as exc:
             return error_result(exc.code, str(exc), exc.details)
+        except MutationGateClosed:
+            return error_result("SERVER_SHUTTING_DOWN", "FolderBridge is shutting down; new workspace mutations are disabled.")
         except Exception as exc:  # keep protocol stdout clean while returning bounded diagnostics
             return error_result("INTERNAL_ERROR", f"Unexpected local tool failure: {type(exc).__name__}")
 
@@ -189,14 +240,35 @@ class ToolRuntime:
             "arbitrary_shell": False,
             "task_execution_enabled": self.allow_tasks,
             "global_capabilities_enabled": list(self.capabilities),
-            "builtin_tools": ["workspace", "file_info", "pptx_inspect", "image_open", "extension"],
+            "builtin_tools": [
+                "workspace", "file_info", "pptx_inspect", "image_open", "extension",
+                *([] if self.read_only else ["edit_file", "write_file"]),
+            ],
             "extensions": self._extension_summary(None),
             "skill_engine": self._skill_summary(),
+            "mcp_concurrency": {
+                "control_workers": CONTROL_WORKERS,
+                "control_max_inflight": CONTROL_MAX_INFLIGHT,
+                "data_workers": DATA_WORKERS,
+                "data_max_inflight": DATA_MAX_INFLIGHT,
+                "busy_policy": "fail-fast",
+                "stdout_serialized": True,
+                "write_serialization": "per-target-resource",
+                "shutdown_mutation_admission": "close-and-wake-waiters",
+            },
+            "extension_workers": {
+                "max_foreground": MAX_FOREGROUND_EXTENSION_WORKERS,
+                "holds_workspace_lease_until_process_exit": True,
+                "termination_pending_status": "termination_pending",
+                "process_local": True,
+                "survives_server_restart": False,
+            },
             "extension_jobs": {
                 "max_running": MAX_RUNNING_EXTENSION_JOBS,
                 "max_retained_finished": MAX_RETAINED_FINISHED_JOBS,
                 "process_local": True,
                 "survives_server_restart": False,
+                "independent_from_mcp_request_workers": True,
             },
             "security": {
                 "workspace_confined": True,
@@ -205,10 +277,22 @@ class ToolRuntime:
                 "links_denied": True,
                 "sensitive_names_denied": True,
                 "edit_requires_sha256": True,
+                "exact_edit_max_bytes": MAX_EDIT_TEXT_BYTES,
+                "transactional_text_writes": {
+                    "max_active": MAX_ACTIVE_TEXT_TRANSACTIONS,
+                    "max_chunk_bytes": MAX_TRANSACTION_CHUNK_BYTES,
+                    "max_file_bytes": MAX_TRANSACTION_TEXT_BYTES,
+                    "staging_outside_workspace": True,
+                    "atomic_commit": True,
+                    "process_local": True,
+                    "survives_server_restart": False,
+                    "stale_cleanup_seconds": TRANSACTION_TTL_SECONDS,
+                    "mcp_message_limit_unchanged": True,
+                },
                 "config_protected_from_mcp": True,
                 "task_warning": "Approved tasks and build/package capabilities execute repository code with the current OS user's permissions.",
                 "git_push_policy": "GitHub HTTPS origin only; current branch only; no force push; local pre-push hook bypassed.",
-                "extension_policy": "Extensions are hot-scanned, exact-hash approved, permission-declared, and executed out of process with bounded I/O. Only explicitly declared environment variables may cross the cleaned-environment boundary; the control-plane key is never inheritable. Host-owned job mode is available for long actions and FolderBridge terminates owned worker process trees on timeout/cancel/shutdown. External plugin code is not an OS sandbox; use a VM/container for untrusted code.",
+                "extension_policy": "Extensions are hot-scanned, exact-hash approved, permission-declared, and executed out of process with bounded I/O. Only explicitly declared environment variables may cross the cleaned-environment boundary; the control-plane key is never inheritable. Foreground workers and host-owned Jobs retain workspace mutation protection until their worker process is confirmed exited; failed termination is exposed as termination_pending and reconciled by host-owned reapers. External plugin code is not an OS sandbox; use a VM/container for untrusted code.",
                 "skill_policy": "Skill Packs are bounded read-only methodology text. Bundled packs are release-trusted; external packs remain model-invisible until exact-hash local approval. Skill text is never executed, but it can influence model behavior.",
             },
         }
@@ -425,24 +509,38 @@ class ToolRuntime:
             raise ToolError("INVALID_ARGUMENT", "extension_action is required for run")
         if not isinstance(params, dict):
             raise ToolError("INVALID_ARGUMENT", "params must be an object")
-        record = self.extensions.get(extension_id)
-        action_spec = record.manifest.actions.get(extension_action)
-        if action_spec is None:
-            raise ToolError(
-                "EXTENSION_ACTION_NOT_FOUND",
-                "Extension action does not exist.",
-                extension_id=extension_id,
-                available=sorted(record.manifest.actions),
-            )
-        if target is None and action_spec.requires_workspace:
+        contract = self.extensions.prepare_action(extension_id, extension_action)
+        if target is None and contract.action.requires_workspace:
             target = self._select_target(None)
-        result = self.extensions.run(
-            extension_id,
-            extension_action,
+        prepared = self.extensions.prepare_run(
+            contract,
             params,
             workspace=target.workspace if target is not None else None,
             read_only=self.read_only,
         )
+        action_spec = prepared.action
+
+        def invoke_extension(*, on_job_finish: Callable[[], None] | None = None) -> dict[str, Any]:
+            return self.extensions.execute_prepared(prepared, on_job_finish=on_job_finish)
+
+        if action_spec.run_mode == "job":
+            lease = None
+            if target is not None and not action_spec.read_only:
+                lease = self._workspace_mutations.acquire_exclusive(target.workspace_id)
+            try:
+                with self._shutdown_lock:
+                    if self._shutting_down:
+                        raise ToolError("SERVER_SHUTTING_DOWN", "FolderBridge is shutting down; new extension jobs are disabled.")
+                    result = invoke_extension(on_job_finish=lease.release if lease is not None else None)
+            except Exception:
+                if lease is not None:
+                    lease.release()
+                raise
+        elif target is not None and not action_spec.read_only:
+            lease = self._workspace_mutations.acquire_exclusive(target.workspace_id)
+            result = invoke_extension(on_job_finish=lease.release)
+        else:
+            result = invoke_extension()
         return self._scope_result(result, target) if target is not None else result
 
     def _edit_file(self, arguments: dict[str, Any]) -> dict[str, Any]:
@@ -451,12 +549,79 @@ class ToolRuntime:
         path = arguments.get("path")
         if not isinstance(path, str) or not path:
             raise ToolError("INVALID_ARGUMENT", "path is required")
-        return self._scope_result(target.workspace.edit_file(
-            path,
-            expected_sha256=arguments.get("expected_sha256"),
-            replacements=arguments.get("replacements"),
-            create_content=arguments.get("create_content"),
-        ), target)
+        resolved = target.workspace.resolve(path, for_write=True)
+        resource_key = _write_resource_key(target, resolved)
+        with self._workspace_mutations.shared(target.workspace_id):
+            with self._write_locks.hold(resource_key):
+                result = target.workspace.edit_file(
+                    path,
+                    expected_sha256=arguments.get("expected_sha256"),
+                    replacements=arguments.get("replacements"),
+                    create_content=arguments.get("create_content"),
+                )
+        return self._scope_result(result, target)
+
+    def _write_file(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        _require_only(
+            arguments,
+            {
+                "workspace_id", "action", "path", "mode", "expected_target_sha256",
+                "transaction_id", "offset", "chunk", "expected_size", "expected_sha256",
+            },
+        )
+        target = self._select_target(arguments.get("workspace_id"))
+        if self.read_only:
+            raise ToolError("READ_ONLY", "Transactional text writes are disabled in read-only mode.")
+        action = arguments.get("action")
+        if action not in {"begin", "append", "status", "commit", "abort"}:
+            raise ToolError("INVALID_ARGUMENT", "action must be begin, append, status, commit, or abort")
+        manager = self.text_writes
+        if manager is None:
+            if action != "begin":
+                raise ToolError("UNKNOWN_TRANSACTION", "Text write transaction was not found or has ended.")
+            with self._text_writes_init_lock:
+                manager = self.text_writes
+                if manager is None:
+                    manager = TextWriteManager()
+                    self.text_writes = manager
+        if action == "begin":
+            path = arguments.get("path")
+            mode = arguments.get("mode")
+            if not isinstance(path, str) or not path:
+                raise ToolError("INVALID_ARGUMENT", "path is required for begin")
+            if not isinstance(mode, str):
+                raise ToolError("INVALID_ARGUMENT", "mode is required for begin")
+            result = manager.begin(
+                target.workspace,
+                path,
+                mode=mode,
+                expected_target_sha256=arguments.get("expected_target_sha256"),
+            )
+        elif action == "append":
+            result = manager.append(
+                target.workspace,
+                arguments.get("transaction_id"),
+                offset=arguments.get("offset"),
+                chunk=arguments.get("chunk"),
+            )
+        elif action == "status":
+            result = manager.status(target.workspace, arguments.get("transaction_id"))
+        elif action == "commit":
+            transaction_id = arguments.get("transaction_id")
+            transaction = manager.status(target.workspace, transaction_id)
+            resolved = target.workspace.resolve(transaction["path"], for_write=True)
+            resource_key = _write_resource_key(target, resolved)
+            with self._workspace_mutations.shared(target.workspace_id):
+                with self._write_locks.hold(resource_key):
+                    result = manager.commit(
+                        target.workspace,
+                        transaction_id,
+                        expected_size=arguments.get("expected_size"),
+                        expected_sha256=arguments.get("expected_sha256"),
+                    )
+        elif action == "abort":
+            result = manager.abort(target.workspace, arguments.get("transaction_id"))
+        return self._scope_result(result, target)
 
     def _run_capability(self, arguments: dict[str, Any]) -> dict[str, Any]:
         _require_only(arguments, {"workspace_id", "name"})
@@ -470,7 +635,9 @@ class ToolRuntime:
                 "This execution capability is not globally pre-authorized in the FolderBridge launcher.",
                 enabled=list(self.execution_capabilities),
             )
-        return self._scope_result(run_capability(target.root, name), target)
+        with self._workspace_mutations.exclusive(target.workspace_id):
+            result = run_capability(target.root, name)
+        return self._scope_result(result, target)
 
     def _run_task(self, arguments: dict[str, Any]) -> dict[str, Any]:
         _require_only(arguments, {"workspace_id", "name"})
@@ -486,7 +653,13 @@ class ToolRuntime:
         task = target.config.tasks.get(name)
         if task is None:
             raise ToolError("UNKNOWN_TASK", "Only locally approved named tasks can run.", available=sorted(target.config.tasks))
-        return self._scope_result(run_task(target.root, task), target)
+        with self._workspace_mutations.exclusive(target.workspace_id):
+            result = run_task(target.root, task)
+        return self._scope_result(result, target)
+
+
+def _write_resource_key(target: _WorkspaceTarget, resolved: Path) -> tuple[str, str]:
+    return target.workspace_id, os.path.normcase(str(resolved))
 
 
 def _require_only(arguments: dict[str, Any], allowed: set[str]) -> None:
@@ -577,9 +750,9 @@ WORKSPACE_TOOL = {
 
 FILE_INFO_TOOL = {
     "name": "file_info",
-    "title": "Inspect binary file metadata",
+    "title": "Inspect file metadata and SHA-256",
     "description": (
-        "Return bounded metadata and SHA-256 for a regular file without exposing its bytes. "
+        "Return bounded metadata and whole-file SHA-256 for a regular file without exposing its bytes; use this SHA before editing large text files. "
         "Uses the same workspace confinement, link denial, and sensitive-path policy as text tools."
     ),
     "inputSchema": {
@@ -667,8 +840,9 @@ EDIT_FILE_TOOL = {
     "name": "edit_file",
     "title": "Create or exactly edit one file",
     "description": (
-        "Atomically create a UTF-8 file, or edit one using unique exact replacements and the SHA-256 returned by workspace(read). "
-        "When multiple workspaces are configured, pass the same workspace_id used for the read. "
+        "Atomically create a UTF-8 file, or edit one using unique exact replacements and a current whole-file SHA-256. "
+        "workspace(read) returns that SHA for small files; use file_info for larger files. "
+        "When multiple workspaces are configured, pass the same workspace_id used for inspection. "
         "Cannot delete files, edit the local task config, follow links, or access credential-like paths."
     ),
     "inputSchema": {
@@ -691,6 +865,34 @@ EDIT_FILE_TOOL = {
             "create_content": {"type": "string", "description": "Used only when creating a new file."},
         },
         "required": ["path"],
+        "additionalProperties": False,
+    },
+    "annotations": {"readOnlyHint": False, "destructiveHint": True, "idempotentHint": False, "openWorldHint": False},
+}
+
+WRITE_FILE_TOOL = {
+    "name": "write_file",
+    "title": "Transactionally write a large UTF-8 file",
+    "description": (
+        "Host-owned five-action transaction for large whole-file creates or replacements without increasing the MCP message limit. "
+        "Use begin, then one or more append calls with the exact next UTF-8 byte offset, optionally status, then commit with the complete expected size and SHA-256; abort discards staging. "
+        "Staging stays outside the workspace, replace mode rechecks the original target SHA at commit, and successful commit uses a same-directory fsync + atomic replace."
+    ),
+    "inputSchema": {
+        "type": "object",
+        "properties": {
+            "workspace_id": {"type": "string", "description": "Required when server_info lists multiple workspaces."},
+            "action": {"type": "string", "enum": ["begin", "append", "status", "commit", "abort"]},
+            "path": {"type": "string", "description": "Required only for begin."},
+            "mode": {"type": "string", "enum": ["create", "replace"], "description": "Required only for begin."},
+            "expected_target_sha256": {"type": "string", "minLength": 64, "maxLength": 64, "description": "Required for begin in replace mode; obtain with file_info."},
+            "transaction_id": {"type": "string", "minLength": 1, "maxLength": 128, "description": "Returned by begin; required by append/status/commit/abort."},
+            "offset": {"type": "integer", "minimum": 0, "description": "Required for append; exact next UTF-8 byte offset, making retries non-duplicating."},
+            "chunk": {"type": "string", "description": f"Required for append; runtime-enforced maximum is {MAX_TRANSACTION_CHUNK_BYTES // 1024} KiB of UTF-8 bytes so even worst-case JSON escaping stays below the 1 MiB MCP message limit."},
+            "expected_size": {"type": "integer", "minimum": 0, "maximum": MAX_TRANSACTION_TEXT_BYTES, "description": "Required for commit; complete UTF-8 byte length."},
+            "expected_sha256": {"type": "string", "minLength": 64, "maxLength": 64, "description": "Required for commit; SHA-256 of complete new UTF-8 bytes."},
+        },
+        "required": ["action"],
         "additionalProperties": False,
     },
     "annotations": {"readOnlyHint": False, "destructiveHint": True, "idempotentHint": False, "openWorldHint": False},
