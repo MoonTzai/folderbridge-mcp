@@ -507,6 +507,25 @@ class ExtensionTests(unittest.TestCase):
         listed = runtime.call("extension", {"action": "list"})["structuredContent"]
         self.assertEqual(listed["extensions"][0]["id"], "example")
 
+    def test_extension_catalog_is_compact_and_pageable(self) -> None:
+        for index in range(5):
+            self.make_extension(f"example-{index}")
+        runtime = ToolRuntime(self.workspace_root, load_config(self.workspace_root))
+        runtime.extensions = self.registry
+
+        first = runtime.call("extension", {"action": "list", "offset": 0, "limit": 2})["structuredContent"]
+        self.assertEqual(first["total"], 5)
+        self.assertEqual(first["next_offset"], 2)
+        self.assertTrue(first["truncated"])
+        self.assertEqual([item["id"] for item in first["extensions"]], ["example-0", "example-1"])
+        self.assertEqual(first["extensions"][0]["actions"], ["echo"])
+
+        second = runtime.call("extension", {"action": "list", "offset": 2, "limit": 2})["structuredContent"]
+        self.assertEqual([item["id"] for item in second["extensions"]], ["example-2", "example-3"])
+        info = runtime.call("extension", {"action": "info", "extension_id": "example-0"})["structuredContent"]
+        self.assertIsInstance(info["extension"]["actions"][0], dict)
+        self.assertIn("input_schema", info["extension"]["actions"][0])
+
     def test_only_declared_environment_crosses_worker_boundary(self) -> None:
         self.make_extension(
             permissions=["workspace.read", "extension.state", "environment.inherit:JUDGE_API_TOKEN"],

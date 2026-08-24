@@ -304,13 +304,33 @@ class ExtensionRegistry:
             raise ToolError("EXTENSION_NOT_FOUND", "Extension is not installed.", extension_id=extension_id)
         return record
 
-    def describe(self, workspace: Path | None = None) -> dict[str, Any]:
+    def describe(
+        self,
+        workspace: Path | None = None,
+        *,
+        include_action_schemas: bool = True,
+    ) -> dict[str, Any]:
         records, errors = self.scan()
         rendered: list[dict[str, Any]] = []
         for extension_id in sorted(records):
             record = records[extension_id]
             trust = self.trust_store.status(record)
             applicable = _workspace_applicable(record.manifest.workspace_adapter, workspace)
+            if include_action_schemas:
+                actions: list[Any] = [
+                    {
+                        "name": action.name,
+                        "read_only": action.read_only,
+                        "requires_workspace": action.requires_workspace,
+                        "authorization": action.authorization,
+                        "input_schema": action.input_schema,
+                        "run_mode": action.run_mode,
+                        "timeout_seconds": _action_timeout(record, action),
+                    }
+                    for action in record.manifest.actions.values()
+                ]
+            else:
+                actions = sorted(record.manifest.actions)
             rendered.append(
                 {
                     "id": extension_id,
@@ -320,18 +340,7 @@ class ExtensionRegistry:
                     "bundled": record.bundled,
                     "sha256": record.sha256,
                     "permissions": list(record.manifest.permissions),
-                    "actions": [
-                        {
-                            "name": action.name,
-                            "read_only": action.read_only,
-                            "requires_workspace": action.requires_workspace,
-                            "authorization": action.authorization,
-                            "input_schema": action.input_schema,
-                            "run_mode": action.run_mode,
-                            "timeout_seconds": _action_timeout(record, action),
-                        }
-                        for action in record.manifest.actions.values()
-                    ],
+                    "actions": actions,
                     "workspace_adapter": record.manifest.workspace_adapter,
                     "applicable": applicable,
                     **trust,

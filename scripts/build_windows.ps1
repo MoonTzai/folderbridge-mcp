@@ -57,8 +57,25 @@ try {
         throw "Built executable smoke test failed."
     }
     $extensionSmoke = (& $executable extensions --json 2>&1 | Out-String).Trim()
-    if ($LASTEXITCODE -ne 0 -or $extensionSmoke -notmatch '"id"\s*:\s*"comfyui"' -or $extensionSmoke -notmatch '"id"\s*:\s*"office"' -or $extensionSmoke -notmatch '"id"\s*:\s*"git-publisher"' -or $extensionSmoke -notmatch '"id"\s*:\s*"skill-engine"') {
-        throw "Built executable extension smoke test failed: all bundled extensions must be discovered."
+    if ($LASTEXITCODE -ne 0) {
+        throw "Built executable extension catalog smoke test failed."
+    }
+    try {
+        $extensionCatalog = $extensionSmoke | ConvertFrom-Json
+    }
+    catch {
+        throw "Built executable extension catalog smoke test returned invalid JSON."
+    }
+    $extensionIds = @($extensionCatalog.extensions | ForEach-Object { $_.id })
+    foreach ($requiredExtension in @("comfyui", "office", "git-publisher", "skill-engine")) {
+        if ($extensionIds -notcontains $requiredExtension) {
+            throw "Built executable extension smoke test failed: missing $requiredExtension."
+        }
+    }
+    $gitPublisherExtension = $extensionCatalog.extensions | Where-Object { $_.id -eq "git-publisher" } | Select-Object -First 1
+    $officeExtension = $extensionCatalog.extensions | Where-Object { $_.id -eq "office" } | Select-Object -First 1
+    if ($gitPublisherExtension.version -ne "1.1.0" -or $officeExtension.version -ne "1.1.0") {
+        throw "Built executable extension smoke test failed: expected Git Publisher 1.1.0 and Office 1.1.0."
     }
     $skillSmoke = (& $executable skills --json 2>&1 | Out-String).Trim()
     $requiredSkillPatterns = @(

@@ -246,11 +246,11 @@ See the [client compatibility research](docs/client-compatibility-research.md) f
 The built-in server tools do not depend on per-workspace task configuration:
 
 - `server_info`: reports each available workspace name, stable `workspace_id`, built-in/global capabilities, and safety boundary;
-- `workspace`: lists, reads, searches, and shows bounded Git status/diff output inside the selected `workspace_id`;
+- `workspace`: lists and reads files, streams literal search across UTF-8 files up to 512 MiB, and exposes pageable/path-scoped Git status/diff output inside the selected `workspace_id`;
 - `file_info`: returns bounded metadata and a whole-file SHA-256 for regular files; use it to obtain the current SHA before editing text above 1 MiB;
 - `pptx_inspect`: inspects PPTX text, OOXML diagram relationships, and SmartArt data without executing Office content;
 - `image_open`: returns bounded PNG/JPEG/GIF/WebP image content to the MCP client, including exact image members inside ZIP files;
-- `extension`: the stable `list` / `info` / `run` gateway for hot-loaded extensions; installing more plugins does not add MCP tool names;
+- `extension`: the stable gateway for hot-loaded extensions; `list` returns a compact pageable catalog, `info` returns one extension's full action schemas, and `run` invokes the selected action without adding MCP tool names;
 - `edit_file`: in read/write mode, creates small inline UTF-8 files and exactly edits existing UTF-8 text up to 128 MiB; existing-file edits require a current whole-file SHA-256, while large whole-file creation uses `write_file`;
 - `write_file`: in read/write mode, provides `begin`, `append`, `status`, `commit`, and `abort` for transactional whole-file UTF-8 creates or replacements up to 512 MiB while the MCP single-message limit remains 1 MiB.
 
@@ -259,6 +259,10 @@ With one workspace, existing clients may continue omitting `workspace_id`. With 
 For local exact replacements, list/search the file, inspect the relevant range, retain the current whole-file SHA-256, call `edit_file`, then inspect the Git diff. `workspace(read)` returns the whole-file SHA for files up to 1 MiB; use `file_info` for larger files. New-file publication is no-clobber, and existing-file edits recheck the expected SHA immediately before atomic publication. If the underlying filesystem cannot provide safe atomic no-clobber publication, creation fails safely instead of falling back to an overwrite.
 
 For a large whole-file create or replacement, use `write_file`: call `begin` (`replace` also requires the old SHA from `file_info`), send `append` chunks at the exact next UTF-8 byte offset, optionally call `status`, then `commit` with the complete new byte size and SHA-256 or `abort`. Each chunk is capped at 128 KiB so worst-case JSON escaping stays below the unchanged 1 MiB MCP message ceiling. Transactions are process-local, stage outside the workspace, support files up to 512 MiB, and clean stale staging older than 24 hours on a later startup. Commit revalidates UTF-8, size, new SHA, workspace/link policy, and replacement baseline before a fully written same-directory temporary file is atomically published; create mode never overwrites a path that appeared after `begin`.
+
+Large-file inspection no longer falls back to a small-file search ceiling. Literal search scans UTF-8 content as a stream up to 512 MiB per file and reports binary/non-UTF-8/oversized/I/O skips separately; list and search results use result offsets, while Git status/diff use byte offsets and may be scoped to one workspace-relative path. These are bounded pages, not whole-response expansion: the 1 MiB MCP envelope remains unchanged.
+
+Skill routing follows the same scaling rule. Initialization carries a compact 64 KiB round-robin routing index rather than embedding Skill bodies; if enabled Skills do not fit, the index says how many were omitted and `skill-engine match` remains the complete task-specific discovery path. Extension `list` similarly stays compact and pageable, with full schemas deferred to `extension(info)`.
 
 ### Bounded MCP concurrency
 

@@ -20,7 +20,7 @@ from folderbridge_mcp.process_control import owned_process_group_kwargs, termina
 
 MAX_OFFICE_BYTES = 512 * 1024 * 1024
 MAX_ZIP_MEMBERS = 20_000
-MAX_XML_BYTES = 32 * 1024 * 1024
+MAX_XML_BYTES = 128 * 1024 * 1024
 MAX_UNCOMPRESSED_BYTES = 1024 * 1024 * 1024
 MAX_RENDER_FILES = 10_000
 DENIED_PARTS = {
@@ -206,8 +206,9 @@ def _read_xml(archive: zipfile.ZipFile, name: str, *, required: bool = True) -> 
     if info.file_size > MAX_XML_BYTES:
         raise RuntimeError(f"OOXML XML part is too large: {name}")
     try:
-        return ET.fromstring(archive.read(info))
-    except ET.ParseError as exc:
+        with archive.open(info, "r") as stream:
+            return ET.parse(stream).getroot()
+    except (OSError, zipfile.BadZipFile, ET.ParseError) as exc:
         raise RuntimeError(f"invalid OOXML XML part: {name}") from exc
 
 

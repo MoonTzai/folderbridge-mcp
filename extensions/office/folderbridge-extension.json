@@ -2,7 +2,7 @@
   "schema_version": 1,
   "id": "office",
   "name": "Microsoft Office Native",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Safely inspect DOCX/XLSX OOXML and use installed Microsoft Office plus the Windows PDF renderer for native PPTX/DOCX/XLSX visual exports.",
   "entrypoint": "plugin.py",
   "permissions": [

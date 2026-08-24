@@ -17,7 +17,7 @@ from .security import ToolError, Workspace
 MAX_BINARY_FILE_BYTES = 2 * 1024 * 1024 * 1024
 MAX_PPTX_BYTES = 512 * 1024 * 1024
 MAX_ZIP_MEMBERS = 20_000
-MAX_XML_MEMBER_BYTES = 16 * 1024 * 1024
+MAX_XML_MEMBER_BYTES = 128 * 1024 * 1024
 MAX_PPTX_XML_TOTAL_BYTES = 256 * 1024 * 1024
 MAX_SMARTART_ITEMS = 5_000
 MAX_PPTX_PAGE_SPAN = 100
@@ -406,8 +406,8 @@ def _read_xml_member(archive: zipfile.ZipFile, name: str) -> ET.Element:
             size=info.file_size,
         )
     try:
-        data = archive.read(info)
-        return ET.fromstring(data)
+        with archive.open(info, "r") as stream:
+            return ET.parse(stream).getroot()
     except (OSError, zipfile.BadZipFile, ET.ParseError) as exc:
         raise ToolError("INVALID_OOXML", "Could not parse OOXML XML part.", part=name) from exc
 

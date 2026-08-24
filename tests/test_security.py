@@ -121,7 +121,37 @@ class WorkspaceSecurityTests(unittest.TestCase):
         second = self.workspace.read_text("unicode.txt", offset=first["next_offset"], limit=4)
         self.assertEqual(second["text"], "你B")
 
-    def test_git_diff_output_is_bounded(self) -> None:
+    def test_literal_search_streams_utf8_files_beyond_128_mib(self) -> None:
+        path = self.root / "large-search.txt"
+        block = b"A" * (1024 * 1024)
+        with path.open("wb") as handle:
+            for _ in range(129):
+                handle.write(block)
+            handle.write("\nTaRgEt-你\n".encode("utf-8"))
+        self.assertGreater(path.stat().st_size, 128 * 1024 * 1024)
+
+        result = self.workspace.search_text("target-你", raw="large-search.txt", case_sensitive=False, max_results=10)
+        self.assertEqual([(item["line"], item["text"]) for item in result["matches"]], [(2, "TaRgEt-你")])
+        self.assertFalse(result["truncated"])
+        self.assertEqual(result["skipped_large_files"], 0)
+        self.assertGreaterEqual(result["max_file_bytes"], path.stat().st_size)
+
+    def test_literal_search_and_list_support_result_pagination(self) -> None:
+        for index in range(8):
+            (self.root / f"item-{index}.txt").write_text(f"needle {index}\n", encoding="utf-8")
+
+        first = self.workspace.search_text("needle", max_results=3, offset=0)
+        second = self.workspace.search_text("needle", max_results=3, offset=first["next_offset"])
+        self.assertEqual([item["path"] for item in first["matches"]], ["item-0.txt", "item-1.txt", "item-2.txt"])
+        self.assertEqual([item["path"] for item in second["matches"]], ["item-3.txt", "item-4.txt", "item-5.txt"])
+        self.assertEqual(first["next_offset"], 3)
+        self.assertEqual(second["next_offset"], 6)
+
+        listed = self.workspace.list_files(pattern="item-*.txt", max_results=3, offset=3)
+        self.assertEqual(listed["files"], ["item-3.txt", "item-4.txt", "item-5.txt"])
+        self.assertEqual(listed["next_offset"], 6)
+
+    def test_git_diff_output_is_bounded_and_pageable(self) -> None:
         git = shutil.which("git")
         if not git:
             self.skipTest("git unavailable")
@@ -135,9 +165,16 @@ class WorkspaceSecurityTests(unittest.TestCase):
             check=True,
         )
         path.write_text("".join(f"new-{index:05d}\n" for index in range(10000)), encoding="utf-8")
-        result = self.workspace.git_view("diff")
-        self.assertTrue(result["truncated"])
-        self.assertLessEqual(len(result["output"].encode("utf-8")), 2 * 64 * 1024)
+        first = self.workspace.git_view("diff", raw="large.txt", limit=4096)
+        self.assertTrue(first["truncated"])
+        self.assertEqual(first["offset"], 0)
+        self.assertEqual(first["next_offset"], first["returned_bytes"])
+        self.assertLessEqual(first["returned_bytes"], 4096)
+
+        second = self.workspace.git_view("diff", raw="large.txt", offset=first["next_offset"], limit=4096)
+        self.assertEqual(second["offset"], first["next_offset"])
+        self.assertNotEqual(second["output"], first["output"])
+        self.assertEqual(second["path"], "large.txt")
 
     def test_atomic_create_never_clobbers_an_existing_target(self) -> None:
         path = self.root / "race.txt"

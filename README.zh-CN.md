@@ -246,11 +246,11 @@ JSON 示例采用许多桌面客户端使用的 `mcpServers` 约定：
 这些内建工具不依赖每个工作区自己的 task 配置：
 
 - `server_info`：报告可用工作区的名称、稳定 `workspace_id`、内建/全局能力和安全边界；
-- `workspace`：在指定 `workspace_id` 内列出、读取、搜索文件，并查看有界的 Git status/diff；
+- `workspace`：在指定 `workspace_id` 内列出和读取文件，对最大 512 MiB 的 UTF-8 文件进行流式 literal search，并以可分页、可按相对路径收窄的方式查看 Git status/diff；
 - `file_info`：读取普通文件的有界元数据与整文件 SHA-256；编辑超过 1 MiB 的文本前，用它取得当前 SHA；
 - `pptx_inspect`：安全解析 PPTX 文本、OOXML 图关系和 SmartArt 数据，不执行 Office 内容；
 - `image_open`：把工作区中的 PNG/JPEG/GIF/WebP（包括 ZIP 内精确成员）作为 MCP 图像内容返回；
-- `extension`：固定的 `list` / `info` / `run` 插件网关；以后安装更多插件不会继续增加 MCP tool 名称；
+- `extension`：固定的插件网关；`list` 返回紧凑且可分页的目录，`info` 返回单个插件的完整 action schema，`run` 执行选定 action；以后安装更多插件不会继续增加 MCP tool 名称；
 - `edit_file`：读写模式下创建小型内联 UTF-8 文件，或精确编辑不超过 128 MiB 的已有 UTF-8 文本；编辑已有文件必须携带当前整文件 SHA-256，大文件整文件新建使用 `write_file`；
 - `write_file`：读写模式下提供 `begin`、`append`、`status`、`commit`、`abort` 五个固定事务动作，用于最大 512 MiB 的整文件 UTF-8 新建或替换，同时保持 MCP 单消息上限仍为 1 MiB。
 
@@ -259,6 +259,10 @@ JSON 示例采用许多桌面客户端使用的 `mcpServers` 约定：
 做局部精确替换时：先列出/搜索并读取所需片段，保留当前整文件 SHA-256，再调用 `edit_file`，最后检查 Git diff。`workspace(read)` 会为不超过 1 MiB 的文件返回整文件 SHA；更大的文件改用 `file_info`。新建文件采用 no-clobber 发布；已有文件会在原子发布前再次复核预期 SHA。如果底层文件系统不能提供安全的原子 no-clobber 发布，新建会安全失败，而不会退化成覆盖已有文件。
 
 做大文件整文件新建或替换时使用 `write_file`：先 `begin`（`replace` 还要携带 `file_info` 得到的旧 SHA），再按精确的 UTF-8 字节 offset 连续 `append`，可用 `status` 查看当前 offset，最后带完整新文件字节数和 SHA-256 执行 `commit`，或用 `abort` 放弃。单块最多 128 KiB，确保最坏 JSON 转义后仍低于不变的 1 MiB MCP 单消息上限。事务只在当前服务器进程内存在，暂存文件位于工作区之外，整文件上限 512 MiB；超过 24 小时的陈旧暂存文件会在后续启动时清理。提交前会再次校验 UTF-8、大小、新 SHA、工作区/链接策略和替换目标旧 SHA，再从同目录完整临时文件原子发布；新建模式不会覆盖 `begin` 后突然出现的目标。
+
+大文件检查链路不再退回“小文件搜索”上限。literal search 会以流式方式扫描单个最大 512 MiB 的 UTF-8 文件，并分别报告 binary、非 UTF-8、超限和 I/O 跳过；list/search 使用结果 offset 分页，Git status/diff 使用字节 offset 分页，并可按一个工作区相对路径收窄。这里扩展的是可继续取下一页的能力，而不是放大单次响应；MCP 1 MiB envelope 保持不变。
+
+Skill 路由也采用同样的规模化策略。初始化只携带 64 KiB 的紧凑 round-robin 路由索引，不嵌入 Skill 正文；如果启用的 Skill 放不下，会明确报告遗漏数量，而 `skill-engine match` 始终保留为完整的任务级发现入口。Extension `list` 同样保持紧凑可分页，完整 schema 延后到 `extension(info)` 获取。
 
 ### 有界 MCP 并发
 

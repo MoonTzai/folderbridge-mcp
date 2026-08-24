@@ -14,7 +14,10 @@ from folderbridge_mcp.process_control import owned_process_group_kwargs, termina
 
 
 MAX_OUTPUT = 32_000
-MAX_COMMIT_FILE_BYTES = 64 * 1024 * 1024
+MAX_COMMIT_FILE_BYTES = 100 * 1024 * 1024
+MAX_COMMIT_PATHS = 128
+MAX_STATUS_PAGE = 500
+DEFAULT_STATUS_PAGE = 200
 DENIED_PARTS = {
     ".git", ".svn", ".hg", ".venv", "venv", "node_modules", "__pycache__",
     "build", "dist", "target", "vendor", ".idea", ".vscode",
@@ -31,7 +34,11 @@ BRANCH_RE = re.compile(r"^[A-Za-z0-9._/-]{1,240}$")
 def handle(action: str, params: dict[str, Any], context: dict[str, Any]) -> dict[str, Any]:
     root = _workspace_root(context)
     if action == "status":
-        return _status(root)
+        return _status(
+            root,
+            offset=params.get("offset", 0),
+            limit=params.get("limit", DEFAULT_STATUS_PAGE),
+        )
     if bool(context.get("workspace_read_only")):
         raise RuntimeError("FolderBridge is read-only; Git Publisher mutations are unavailable.")
     if action == "connect":
@@ -212,18 +219,21 @@ def _gcm_status(root: Path) -> dict[str, Any]:
     }
 
 
-def _status_entries(root: Path) -> list[dict[str, str]]:
+def _status_page(root: Path, *, offset: Any = 0, limit: Any = DEFAULT_STATUS_PAGE) -> dict[str, Any]:
+    if not isinstance(offset, int) or isinstance(offset, bool) or offset < 0:
+        raise RuntimeError("status offset must be a non-negative integer")
+    if not isinstance(limit, int) or isinstance(limit, bool) or not 1 <= limit <= MAX_STATUS_PAGE:
+        raise RuntimeError(f"status limit must be between 1 and {MAX_STATUS_PAGE}")
     completed = _run_git(root, "-c", "core.fsmonitor=false", "status", "--porcelain=v1", "-z", "--untracked-files=all")
     raw = completed.stdout.decode("utf-8", errors="replace")
     pieces = raw.split("\x00")
-    entries: list[dict[str, str]] = []
+    changes: list[dict[str, str]] = []
+    total = 0
     index = 0
     while index < len(pieces):
         record = pieces[index]
         index += 1
-        if not record:
-            continue
-        if len(record) < 4:
+        if not record or len(record) < 4:
             continue
         code = record[:2]
         path = record[3:]
@@ -231,10 +241,18 @@ def _status_entries(root: Path) -> list[dict[str, str]]:
         if ("R" in code or "C" in code) and index < len(pieces) and pieces[index]:
             item["original_path"] = pieces[index]
             index += 1
-        entries.append(item)
-        if len(entries) >= 500:
-            break
-    return entries
+        if total >= offset and len(changes) < limit:
+            changes.append(item)
+        total += 1
+    next_offset = offset + len(changes) if offset + len(changes) < total else None
+    return {
+        "changes": changes,
+        "change_count": total,
+        "offset": offset,
+        "limit": limit,
+        "truncated": next_offset is not None,
+        "next_offset": next_offset,
+    }
 
 
 def _staged_paths(root: Path) -> list[str]:
@@ -242,16 +260,17 @@ def _staged_paths(root: Path) -> list[str]:
     return [item for item in completed.stdout.decode("utf-8", errors="replace").split("\x00") if item]
 
 
-def _status(root: Path) -> dict[str, Any]:
+def _status(root: Path, *, offset: Any = 0, limit: Any = DEFAULT_STATUS_PAGE) -> dict[str, Any]:
     repo = _repo_info(root)
     name = _text(_run_git(root, "config", "user.name", check=False))
     email = _text(_run_git(root, "config", "user.email", check=False))
     head = _text(_run_git(root, "rev-parse", "HEAD", check=False))
+    page = _status_page(root, offset=offset, limit=limit)
     return {
         **repo,
         "head": head or None,
         "identity": {"name": name or None, "email": email or None, "ready": bool(name and email)},
-        "changes": _status_entries(root),
+        **page,
         "staged_paths": _staged_paths(root),
         "credential_manager": _gcm_status(root),
         "auth_model": "browser OAuth via Git Credential Manager; credentials remain in Windows Credential Manager",
@@ -327,7 +346,10 @@ def _clean_commit_path(root: Path, raw: Any) -> str:
     if not resolved.is_file() or resolved.is_symlink() or _is_reparse(resolved):
         raise RuntimeError("Git Publisher commits only explicit regular files; directories/deletions are not supported")
     if resolved.stat().st_size > MAX_COMMIT_FILE_BYTES:
-        raise RuntimeError(f"commit file exceeds the {MAX_COMMIT_FILE_BYTES}-byte safety limit")
+        raise RuntimeError(
+            f"commit file exceeds GitHub's regular-Git {MAX_COMMIT_FILE_BYTES}-byte file limit; "
+            "use Git LFS or a Release asset for larger files"
+        )
     normalized = resolved.relative_to(root).as_posix()
     _reject_transforming_attributes(root, normalized)
     tracked = _run_git(root, "ls-files", "--error-unmatch", "--", normalized, check=False).returncode == 0
@@ -361,6 +383,8 @@ def _commit(root: Path, raw_paths: Any, raw_message: Any) -> dict[str, Any]:
     _run_git(root, "rev-parse", "--verify", "HEAD")
     if not isinstance(raw_paths, list) or not raw_paths:
         raise RuntimeError("paths must contain at least one explicit file")
+    if len(raw_paths) > MAX_COMMIT_PATHS:
+        raise RuntimeError(f"paths may contain at most {MAX_COMMIT_PATHS} explicit files per commit")
     if not isinstance(raw_message, str) or not raw_message.strip() or "\x00" in raw_message:
         raise RuntimeError("commit message must be non-empty")
     message = raw_message.strip()
@@ -395,13 +419,17 @@ def _commit(root: Path, raw_paths: Any, raw_message: Any) -> dict[str, Any]:
         _rollback_stage(root, paths)
         raise
     commit_sha = _text(_run_git(root, "rev-parse", "HEAD"))
+    remaining = _status_page(root, offset=0, limit=DEFAULT_STATUS_PAGE)
     return {
         **repo,
         "commit": commit_sha,
         "paths": paths,
         "message": message,
         "git_output": _redact((completed.stdout + completed.stderr).decode("utf-8", errors="replace").strip())[:4000],
-        "remaining_changes": _status_entries(root),
+        "remaining_changes": remaining["changes"],
+        "remaining_change_count": remaining["change_count"],
+        "remaining_changes_truncated": remaining["truncated"],
+        "remaining_changes_next_offset": remaining["next_offset"],
         "safety": {
             "explicit_file_allowlist": True,
             "preexisting_staged_changes_rejected": True,

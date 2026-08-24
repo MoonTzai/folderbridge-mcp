@@ -2,6 +2,14 @@
 
 All notable changes to FolderBridge MCP are documented here.
 
+## 0.8.1 — 2026-08-25
+
+- Removed the remaining small-file search bottleneck: literal UTF-8 search now streams files up to 512 MiB instead of skipping everything above 256 KiB, keeps bounded file/time budgets, reports skip reasons explicitly, and supports result pagination. File listing is pageable as well.
+- Made Git inspection reviewable at scale: `workspace(status/diff)` supports byte pagination and optional workspace-relative path scoping, so a large diff no longer becomes an irrecoverably truncated 64 KiB preview.
+- Scaled model discovery without inflating the fixed MCP catalog: Extension `list` is now compact and pageable while `info` returns one full action schema; Skill initialization uses a 64 KiB compact round-robin routing index, explicitly reports omitted Skills, and keeps task-specific `skill-engine match` as the complete discovery path. Skill Pack capacity now consistently supports the declared 128 Skills and up to 128 packs per root.
+- Raised legacy OOXML single-part ceilings to 128 MiB for core PPTX and the bundled Office inspector while parsing ZIP members as streams; aggregate package/XML/member-count limits remain in place.
+- Updated Git Publisher to 1.1.0: status is pageable, explicit commits accept up to 128 paths while staying bounded by the unchanged 1 MiB MCP envelope, and the per-file regular-Git ceiling now matches GitHub's 100 MiB limit instead of stopping at 64 MiB. The bundled Office Extension is also 1.1.0.
+
 ## 0.8.0 — 2026-08-24
 
 - Reworked the UTF-8 write layer so existing files up to 128 MiB can use SHA-locked exact replacement; files above 1 MiB obtain their whole-file SHA through `file_info` while the MCP single-message ceiling remains 1 MiB. Release regression coverage mechanically exercises 100 MiB exact edits plus 100 MiB transactional create and replace paths.

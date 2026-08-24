@@ -19,9 +19,14 @@ from .process_control import owned_process_group_kwargs, terminate_owned_process
 MAX_READ_BYTES = 256 * 1024
 MAX_INLINE_EDIT_HASH_BYTES = 1024 * 1024
 MAX_EDIT_TEXT_BYTES = 128 * 1024 * 1024
+MAX_SEARCH_TEXT_BYTES = 512 * 1024 * 1024
 MAX_RESULTS = 200
-MAX_FILES_SCANNED = 5000
-MAX_SCAN_SECONDS = 5.0
+MAX_LIST_FILES_SCANNED = 50_000
+MAX_SEARCH_FILES_SCANNED = 50_000
+MAX_LIST_SCAN_SECONDS = 10.0
+MAX_SEARCH_SCAN_SECONDS = 30.0
+SEARCH_LINE_SEGMENT_CHARS = 256 * 1024
+SEARCH_OVERLAP_CHARS = 4096
 IGNORED_DIRS = {
     ".git",
     ".hg",
@@ -189,28 +194,53 @@ class Workspace:
                     continue
                 yield candidate
 
-    def list_files(self, raw: str = ".", *, pattern: str = "*", max_results: int = 100) -> dict[str, Any]:
+    def list_files(
+        self,
+        raw: str = ".",
+        *,
+        pattern: str = "*",
+        max_results: int = 100,
+        offset: int = 0,
+    ) -> dict[str, Any]:
         if not isinstance(pattern, str) or not pattern or len(pattern) > 500:
             raise ToolError("INVALID_ARGUMENT", "pattern must contain 1 to 500 characters")
         cap = _result_cap(max_results)
+        result_offset = _result_offset(offset)
         matches: list[str] = []
+        matching_seen = 0
         scanned = 0
-        deadline = time.monotonic() + MAX_SCAN_SECONDS
-        truncated = False
+        deadline = time.monotonic() + MAX_LIST_SCAN_SECONDS
+        scan_budget_exhausted = False
+        more_results = False
         for path in self.iter_files(raw):
             scanned += 1
-            if scanned > MAX_FILES_SCANNED or time.monotonic() > deadline:
-                truncated = True
+            if scanned > MAX_LIST_FILES_SCANNED or time.monotonic() > deadline:
+                scan_budget_exhausted = True
                 break
             relative = path.relative_to(self.root).as_posix()
             if not fnmatch.fnmatch(relative, pattern) and not fnmatch.fnmatch(path.name, pattern):
                 continue
+            if matching_seen < result_offset:
+                matching_seen += 1
+                continue
             if len(matches) < cap:
                 matches.append(relative)
-            else:
-                truncated = True
-                break
-        return {"files": matches, "count": len(matches), "truncated": truncated, "scanned_files": scanned, "pattern": pattern}
+                matching_seen += 1
+                continue
+            more_results = True
+            break
+        truncated = more_results or scan_budget_exhausted
+        return {
+            "files": matches,
+            "count": len(matches),
+            "offset": result_offset,
+            "next_offset": result_offset + len(matches) if more_results else None,
+            "truncated": truncated,
+            "scan_budget_exhausted": scan_budget_exhausted,
+            "scanned_files": scanned,
+            "max_scanned_files": MAX_LIST_FILES_SCANNED,
+            "pattern": pattern,
+        }
 
     def search_text(
         self,
@@ -219,46 +249,133 @@ class Workspace:
         raw: str = ".",
         case_sensitive: bool = False,
         max_results: int = 100,
+        offset: int = 0,
     ) -> dict[str, Any]:
         if not isinstance(query, str) or not query or len(query) > 500:
             raise ToolError("INVALID_ARGUMENT", "query must contain 1 to 500 characters")
         if not isinstance(case_sensitive, bool):
             raise ToolError("INVALID_ARGUMENT", "case_sensitive must be a boolean")
         cap = _result_cap(max_results)
+        result_offset = _result_offset(offset)
         needle = query if case_sensitive else query.casefold()
         matches: list[dict[str, Any]] = []
-        skipped = 0
+        valid_matches_seen = 0
+        skipped_large = 0
+        skipped_binary = 0
+        skipped_non_utf8 = 0
+        skipped_io = 0
         scanned = 0
-        deadline = time.monotonic() + MAX_SCAN_SECONDS
+        deadline = time.monotonic() + MAX_SEARCH_SCAN_SECONDS
+        scan_budget_exhausted = False
+        more_results = False
+
         for path in self.iter_files(raw):
             scanned += 1
-            if scanned > MAX_FILES_SCANNED or time.monotonic() > deadline:
-                return {"matches": matches, "truncated": True, "skipped_files": skipped, "scanned_files": scanned}
+            if scanned > MAX_SEARCH_FILES_SCANNED or time.monotonic() > deadline:
+                scan_budget_exhausted = True
+                break
             try:
-                if path.stat().st_size > MAX_READ_BYTES:
-                    skipped += 1
-                    continue
-                data = _bounded_file_bytes(path, MAX_READ_BYTES)
-                if b"\x00" in data:
-                    skipped += 1
-                    continue
-                text = data.decode("utf-8")
-            except (OSError, UnicodeDecodeError, ToolError):
-                skipped += 1
+                size = path.stat().st_size
+            except OSError:
+                skipped_io += 1
                 continue
-            for line_number, line in enumerate(text.splitlines(), start=1):
-                haystack = line if case_sensitive else line.casefold()
-                if needle in haystack:
-                    if len(matches) >= cap:
-                        return {"matches": matches, "truncated": True, "skipped_files": skipped, "scanned_files": scanned}
-                    matches.append(
-                        {
-                            "path": path.relative_to(self.root).as_posix(),
-                            "line": line_number,
-                            "text": line[:1000],
-                        }
-                    )
-        return {"matches": matches, "truncated": False, "skipped_files": skipped, "scanned_files": scanned}
+            if size > MAX_SEARCH_TEXT_BYTES:
+                skipped_large += 1
+                continue
+
+            skip_in_file = max(0, result_offset - valid_matches_seen)
+            needed_in_file = cap - len(matches)
+            file_match_count = 0
+            selected: list[dict[str, Any]] = []
+            invalid_kind: str | None = None
+            timed_out = False
+            relative = path.relative_to(self.root).as_posix()
+            line_number = 1
+            line_prefix = ""
+            overlap = ""
+            line_matched = False
+            line_open = False
+
+            try:
+                with path.open("r", encoding="utf-8", errors="strict", newline=None) as handle:
+                    while True:
+                        if time.monotonic() > deadline:
+                            timed_out = True
+                            break
+                        segment = handle.readline(SEARCH_LINE_SEGMENT_CHARS)
+                        if segment == "":
+                            if line_open and line_matched:
+                                file_match_count += 1
+                                if file_match_count > skip_in_file and len(selected) <= needed_in_file:
+                                    selected.append({"path": relative, "line": line_number, "text": line_prefix})
+                            break
+                        line_open = True
+                        if "\x00" in segment:
+                            invalid_kind = "binary"
+                            break
+                        ends_line = segment.endswith("\n")
+                        body = segment[:-1] if ends_line else segment
+                        if len(line_prefix) < 1000:
+                            line_prefix += body[: 1000 - len(line_prefix)]
+                        if not line_matched:
+                            combined = overlap + body
+                            haystack = combined if case_sensitive else combined.casefold()
+                            if needle in haystack:
+                                line_matched = True
+                            if not ends_line:
+                                overlap = combined[-SEARCH_OVERLAP_CHARS:]
+                        if ends_line:
+                            if line_matched:
+                                file_match_count += 1
+                                if file_match_count > skip_in_file and len(selected) <= needed_in_file:
+                                    selected.append({"path": relative, "line": line_number, "text": line_prefix})
+                            line_number += 1
+                            line_prefix = ""
+                            overlap = ""
+                            line_matched = False
+                            line_open = False
+            except UnicodeDecodeError:
+                invalid_kind = "non_utf8"
+            except OSError:
+                invalid_kind = "io"
+
+            if timed_out:
+                scan_budget_exhausted = True
+                break
+            if invalid_kind is not None:
+                if invalid_kind == "binary":
+                    skipped_binary += 1
+                elif invalid_kind == "non_utf8":
+                    skipped_non_utf8 += 1
+                else:
+                    skipped_io += 1
+                continue
+
+            valid_matches_seen += file_match_count
+            if selected:
+                room = cap - len(matches)
+                matches.extend(selected[:room])
+                if len(selected) > room or valid_matches_seen > result_offset + cap:
+                    more_results = True
+                    break
+
+        skipped = skipped_large + skipped_binary + skipped_non_utf8 + skipped_io
+        truncated = more_results or scan_budget_exhausted
+        return {
+            "matches": matches,
+            "offset": result_offset,
+            "next_offset": result_offset + len(matches) if more_results else None,
+            "truncated": truncated,
+            "scan_budget_exhausted": scan_budget_exhausted,
+            "skipped_files": skipped,
+            "skipped_large_files": skipped_large,
+            "skipped_binary_files": skipped_binary,
+            "skipped_non_utf8_files": skipped_non_utf8,
+            "skipped_io_files": skipped_io,
+            "scanned_files": scanned,
+            "max_scanned_files": MAX_SEARCH_FILES_SCANNED,
+            "max_file_bytes": MAX_SEARCH_TEXT_BYTES,
+        }
 
     def edit_file(
         self,
@@ -330,27 +447,58 @@ class Workspace:
             "sha256": sha256_bytes(encoded),
         }
 
-    def git_view(self, action: str) -> dict[str, Any]:
+    def git_view(
+        self,
+        action: str,
+        *,
+        raw: str = ".",
+        offset: int = 0,
+        limit: int = 64 * 1024,
+    ) -> dict[str, Any]:
+        if not isinstance(offset, int) or isinstance(offset, bool) or offset < 0:
+            raise ToolError("INVALID_ARGUMENT", "offset must be a non-negative integer")
+        if not isinstance(limit, int) or isinstance(limit, bool) or not 1 <= limit <= MAX_READ_BYTES:
+            raise ToolError("INVALID_ARGUMENT", f"limit must be between 1 and {MAX_READ_BYTES}")
+        pathspec: list[str] = []
+        rendered_path = "."
+        if raw != ".":
+            resolved = self.resolve(raw, allow_directory=True)
+            rendered_path = resolved.relative_to(self.root).as_posix()
+            pathspec = ["--", rendered_path]
         if action == "status":
-            argv = ["status", "--short", "--branch", "--untracked-files=all"]
+            argv = ["status", "--short", "--branch", "--untracked-files=all", *pathspec]
         elif action == "diff":
-            argv = ["diff", "--no-ext-diff", "--no-textconv", "--stat", "--patch"]
+            argv = ["diff", "--no-ext-diff", "--no-textconv", "--stat", "--patch", *pathspec]
         else:
             raise ToolError("INVALID_ARGUMENT", "git action must be status or diff")
         git = _trusted_executable("git", self.root)
         env = _git_env(self.root)
         try:
-            completed = _run_bounded_process(
+            completed = _run_paged_process(
                 [git, "-c", "core.fsmonitor=false", "-c", "diff.external=", *argv],
                 cwd=self.root,
                 env=env,
                 timeout=15,
-                output_limit=64 * 1024,
+                stdout_offset=offset,
+                stdout_limit=limit,
+                stderr_limit=64 * 1024,
             )
         except OSError as exc:
             raise ToolError("GIT_FAILED", f"Could not run git: {exc}") from exc
-        output = (completed[1] + completed[2]).decode("utf-8", errors="replace")
-        return {"action": action, "exit_code": completed[0], "output": output, "truncated": completed[3]}
+        exit_code, output_bytes, stderr_bytes, stdout_total, diagnostics_truncated = completed
+        next_offset = offset + len(output_bytes) if stdout_total > offset + len(output_bytes) else None
+        return {
+            "action": action,
+            "path": rendered_path,
+            "exit_code": exit_code,
+            "output": output_bytes.decode("utf-8", errors="replace"),
+            "stderr": stderr_bytes.decode("utf-8", errors="replace"),
+            "offset": offset,
+            "returned_bytes": len(output_bytes),
+            "total_output_bytes": stdout_total,
+            "next_offset": next_offset,
+            "truncated": next_offset is not None or diagnostics_truncated,
+        }
 
 
 def _encode_utf8_text(value: str) -> bytes:
@@ -363,6 +511,12 @@ def _encode_utf8_text(value: str) -> bytes:
 def _result_cap(value: int) -> int:
     if not isinstance(value, int) or isinstance(value, bool) or not 1 <= value <= MAX_RESULTS:
         raise ToolError("INVALID_ARGUMENT", f"max_results must be between 1 and {MAX_RESULTS}")
+    return value
+
+
+def _result_offset(value: int) -> int:
+    if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+        raise ToolError("INVALID_ARGUMENT", "offset must be a non-negative integer")
     return value
 
 
@@ -391,6 +545,80 @@ class _PipeCapture(threading.Thread):
             room = self.limit - len(self.data)
             if room > 0:
                 self.data.extend(chunk[:room])
+
+
+class _PagedPipeCapture(threading.Thread):
+    def __init__(self, stream: Any, offset: int, limit: int) -> None:
+        super().__init__(daemon=True)
+        self.stream = stream
+        self.offset = offset
+        self.limit = limit
+        self.total = 0
+        self.data = bytearray()
+
+    def run(self) -> None:
+        page_end = self.offset + self.limit
+        while True:
+            chunk = self.stream.read(8192)
+            if not chunk:
+                return
+            chunk_start = self.total
+            chunk_end = chunk_start + len(chunk)
+            self.total = chunk_end
+            capture_start = max(self.offset, chunk_start)
+            capture_end = min(page_end, chunk_end)
+            if capture_start < capture_end:
+                self.data.extend(chunk[capture_start - chunk_start:capture_end - chunk_start])
+
+
+def _run_paged_process(
+    argv: list[str],
+    *,
+    cwd: Path,
+    env: dict[str, str],
+    timeout: int,
+    stdout_offset: int,
+    stdout_limit: int,
+    stderr_limit: int,
+) -> tuple[int, bytes, bytes, int, bool]:
+    process = subprocess.Popen(
+        argv,
+        cwd=cwd,
+        env=env,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        shell=False,
+        close_fds=True,
+        **owned_process_group_kwargs(hide_window=True),
+    )
+    assert process.stdout is not None and process.stderr is not None
+    stdout = _PagedPipeCapture(process.stdout, stdout_offset, stdout_limit)
+    stderr = _PipeCapture(process.stderr, stderr_limit)
+    stdout.start()
+    stderr.start()
+    timed_out = False
+    try:
+        exit_code = process.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        timed_out = True
+        terminate_owned_process_tree(process, hide_window=True)
+        try:
+            exit_code = process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            exit_code = process.wait(timeout=5)
+    stdout.join(timeout=5)
+    stderr.join(timeout=5)
+    process.stdout.close()
+    process.stderr.close()
+    return (
+        exit_code,
+        bytes(stdout.data),
+        bytes(stderr.data),
+        stdout.total,
+        timed_out or stderr.total > stderr_limit,
+    )
 
 
 def _run_bounded_process(

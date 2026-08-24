@@ -39,6 +39,7 @@ class GitPublisherManifestTests(unittest.TestCase):
     def test_manifest_is_explicit_and_does_not_accept_tokens(self) -> None:
         record = load_extension(EXT_DIR, bundled=True)
         self.assertEqual(record.manifest.extension_id, "git-publisher")
+        self.assertEqual(record.manifest.version, "1.1.0")
         self.assertEqual(set(record.manifest.actions), {"status", "connect", "commit", "push"})
         self.assertTrue(record.manifest.actions["status"].read_only)
         self.assertEqual(record.manifest.actions["status"].authorization, "none")
@@ -52,6 +53,13 @@ class GitPublisherManifestTests(unittest.TestCase):
         for action in record.manifest.actions.values():
             properties = action.input_schema.get("properties", {})
             self.assertTrue({"token", "password", "pat"}.isdisjoint({str(key).lower() for key in properties}))
+        status_schema = record.manifest.actions["status"].input_schema
+        self.assertEqual(status_schema["properties"]["offset"]["minimum"], 0)
+        self.assertEqual(status_schema["properties"]["limit"]["maximum"], 500)
+        commit_schema = record.manifest.actions["commit"].input_schema
+        self.assertEqual(commit_schema["properties"]["paths"]["maxItems"], 128)
+        plugin = load_plugin()
+        self.assertEqual(plugin.MAX_COMMIT_FILE_BYTES, 100 * 1024 * 1024)
         plugin_text = (EXT_DIR / "plugin.py").read_text(encoding="utf-8")
         self.assertIn("owned_process_group_kwargs", plugin_text)
         self.assertIn("terminate_owned_process_tree", plugin_text)
@@ -102,6 +110,40 @@ class GitPublisherRuntimeTests(unittest.TestCase):
         committed = git(root, "show", "--pretty=", "--name-only", "HEAD").splitlines()
         self.assertEqual(committed, ["tracked.txt"])
         self.assertEqual(git(root, "diff", "--cached", "--name-only"), "")
+
+    def test_status_pages_large_change_sets_without_hiding_the_remainder(self) -> None:
+        plugin = load_plugin()
+        temp, root = self.make_repo()
+        self.addCleanup(temp.cleanup)
+        for index in range(37):
+            (root / f"change-{index:03d}.txt").write_text(f"{index}\n", encoding="utf-8")
+
+        first = plugin.handle(
+            "status",
+            {"offset": 0, "limit": 10},
+            {"workspace_root": str(root), "workspace_read_only": True},
+        )
+        second = plugin.handle(
+            "status",
+            {"offset": first["next_offset"], "limit": 10},
+            {"workspace_root": str(root), "workspace_read_only": True},
+        )
+        last = plugin.handle(
+            "status",
+            {"offset": 30, "limit": 10},
+            {"workspace_root": str(root), "workspace_read_only": True},
+        )
+
+        self.assertEqual(first["change_count"], 37)
+        self.assertEqual(len(first["changes"]), 10)
+        self.assertTrue(first["truncated"])
+        self.assertEqual(first["next_offset"], 10)
+        self.assertEqual(len(second["changes"]), 10)
+        self.assertEqual(last["change_count"], 37)
+        self.assertEqual(len(last["changes"]), 7)
+        self.assertFalse(last["truncated"])
+        self.assertIsNone(last["next_offset"])
+        self.assertTrue(set(item["path"] for item in first["changes"]).isdisjoint(item["path"] for item in second["changes"]))
 
     def test_commit_refuses_preexisting_staged_changes(self) -> None:
         plugin = load_plugin()

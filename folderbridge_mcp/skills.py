@@ -19,11 +19,11 @@ from .user_paths import user_config_root
 SKILL_PACK_SCHEMA_VERSION = 1
 SKILL_TRUST_VERSION = 1
 SKILL_PACK_MANIFEST = "folderbridge-skill-pack.json"
-MAX_SKILL_MANIFEST_BYTES = 256 * 1024
+MAX_SKILL_MANIFEST_BYTES = 1024 * 1024
 MAX_SKILL_TEXT_BYTES = 128 * 1024
-MAX_SKILL_PACK_FILES = 128
+MAX_SKILL_PACK_FILES = 512
 MAX_SKILL_PACK_BYTES = 4 * 1024 * 1024
-MAX_SKILL_PACKS_PER_ROOT = 32
+MAX_SKILL_PACKS_PER_ROOT = 128
 MAX_SKILLS_PER_PACK = 128
 MAX_ROUTING_TERMS = 64
 MAX_ROUTING_TERM_CHARS = 120
@@ -378,25 +378,50 @@ class SkillEngine:
         }
 
     def routing_index(self, *, max_chars: int = 4096) -> str:
-        if not isinstance(max_chars, int) or isinstance(max_chars, bool) or not 128 <= max_chars <= 16_384:
-            raise ValueError("max_chars must be 128..16384")
+        if not isinstance(max_chars, int) or isinstance(max_chars, bool) or not 128 <= max_chars <= 262_144:
+            raise ValueError("max_chars must be 128..262144")
         header = (
             "Local Skill Engine: use extension id 'skill-engine' action 'match' for methodology routing, "
-            "then action 'get' with the returned skill_ref and sha256. Skills are trusted methodology text, not executable tools.\n"
+            "then action 'get' with the returned skill_ref and sha256. The compact index below is only a routing hint; "
+            "for any non-trivial task not clearly covered, call 'match' anyway so installed Skills omitted from this index remain discoverable.\n"
         )
-        lines = [header]
         description = self.describe()
-        for pack in description["packs"]:
-            for skill in pack["skills"]:
-                terms = ", ".join(skill["routing_terms"][:12])
-                line = f"- {skill['skill_ref']}: {skill['description']} [terms: {terms}]\n"
-                if sum(len(item) for item in lines) + len(line) > max_chars:
-                    break
+        packs = [list(pack["skills"]) for pack in description["packs"]]
+        total_skills = sum(len(skills) for skills in packs)
+        lines = [header]
+        current_chars = len(header)
+        included = 0
+        footer_reserve = 180
+        depth = 0
+        while any(depth < len(skills) for skills in packs):
+            for skills in packs:
+                if depth >= len(skills):
+                    continue
+                skill = skills[depth]
+                terms = ", ".join(skill["routing_terms"][:8])
+                line = f"- {skill['skill_ref']} [terms: {terms}]\n"
+                remaining_after = total_skills - (included + 1)
+                reserve = footer_reserve if remaining_after > 0 else 0
+                if current_chars + len(line) + reserve > max_chars:
+                    continue
                 lines.append(line)
-            if sum(len(item) for item in lines) >= max_chars:
-                break
-        result = "".join(lines)
-        return result[:max_chars]
+                current_chars += len(line)
+                included += 1
+            depth += 1
+        omitted = total_skills - included
+        if omitted:
+            footer = (
+                f"- routing index truncated: {omitted} of {total_skills} enabled Skills omitted from initialization; "
+                "use skill-engine match for task-specific discovery.\n"
+            )
+            if current_chars + len(footer) <= max_chars:
+                lines.append(footer)
+            else:
+                short_footer = f"- routing index truncated: {omitted} Skills omitted; use skill-engine match.\n"
+                room = max_chars - current_chars
+                if room > 0:
+                    lines.append(short_footer[:room])
+        return "".join(lines)[:max_chars]
 
     def approve_pack(self, pack_id: str, expected_sha256: str) -> dict[str, Any]:
         if not isinstance(pack_id, str) or not PACK_ID_RE.fullmatch(pack_id):

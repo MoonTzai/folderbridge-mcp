@@ -85,7 +85,9 @@ class SkillEngineExtensionTests(unittest.TestCase):
         self.assertIn('"skill_packs") + ";skill_packs"', script)
         self.assertIn("skills --json", script)
         self.assertIn('"id"\\s*:\\s*"folderbridge-engineering"', script)
-        self.assertIn('"id"\\s*:\\s*"skill-engine"', script)
+        self.assertIn('foreach ($requiredExtension in @("comfyui", "office", "git-publisher", "skill-engine"))', script)
+        self.assertIn('$gitPublisherExtension.version -ne "1.1.0"', script)
+        self.assertIn('$officeExtension.version -ne "1.1.0"', script)
         for skill_id in (
             "codebase-design",
             "improve-codebase-architecture",

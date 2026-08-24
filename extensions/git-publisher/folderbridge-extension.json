@@ -2,7 +2,7 @@
   "schema_version": 1,
   "id": "git-publisher",
   "name": "Git Publisher",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Safely connect GitHub in a browser through Git Credential Manager, commit only explicitly selected files, and push only the current branch to a credential-free GitHub HTTPS origin.",
   "entrypoint": "plugin.py",
   "permissions": [
@@ -28,7 +28,10 @@
       "authorization": "none",
       "input_schema": {
         "type": "object",
-        "properties": {},
+        "properties": {
+          "offset": {"type": "integer", "minimum": 0, "default": 0},
+          "limit": {"type": "integer", "minimum": 1, "maximum": 500, "default": 200}
+        },
         "additionalProperties": false
       }
     },
@@ -56,7 +59,7 @@
             "type": "array",
             "items": {"type": "string", "minLength": 1, "maxLength": 1024},
             "minItems": 1,
-            "maxItems": 100
+            "maxItems": 128
           },
           "message": {"type": "string", "minLength": 1, "maxLength": 1000}
         },

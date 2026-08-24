@@ -32,7 +32,7 @@ from .extensions import (
     MAX_RUNNING_EXTENSION_JOBS,
     ExtensionRegistry,
 )
-from .security import MAX_EDIT_TEXT_BYTES, ToolError, Workspace
+from .security import MAX_EDIT_TEXT_BYTES, MAX_SEARCH_TEXT_BYTES, ToolError, Workspace
 from .skills import SkillEngine
 from .task_runner import run_task
 from .text_writes import (
@@ -176,7 +176,7 @@ class ToolRuntime:
             "call action 'get' with the returned skill_ref and sha256 for each methodology you choose. If match returns no "
             "results, continue normally. Skill text is trusted methodology data, not executable tooling.\n"
         )
-        return base + self.skills.routing_index(max_chars=3500)
+        return base + self.skills.routing_index(max_chars=64 * 1024)
 
     def list_tools(self) -> list[dict[str, Any]]:
         tools = [SERVER_INFO_TOOL, WORKSPACE_TOOL, FILE_INFO_TOOL, PPTX_INSPECT_TOOL, IMAGE_OPEN_TOOL, EXTENSION_TOOL]
@@ -278,6 +278,8 @@ class ToolRuntime:
                 "sensitive_names_denied": True,
                 "edit_requires_sha256": True,
                 "exact_edit_max_bytes": MAX_EDIT_TEXT_BYTES,
+                "literal_search_max_file_bytes": MAX_SEARCH_TEXT_BYTES,
+                "literal_search_streaming": True,
                 "transactional_text_writes": {
                     "max_active": MAX_ACTIVE_TEXT_TRANSACTIONS,
                     "max_chunk_bytes": MAX_TRANSACTION_CHUNK_BYTES,
@@ -323,7 +325,7 @@ class ToolRuntime:
         }
 
     def _extension_summary(self, workspace: Path | None) -> dict[str, Any]:
-        description = self.extensions.describe(workspace)
+        description = self.extensions.describe(workspace, include_action_schemas=False)
         return {
             "installed": [
                 {
@@ -407,6 +409,7 @@ class ToolRuntime:
                 path,
                 pattern=arguments.get("pattern", "*"),
                 max_results=arguments.get("max_results", 100),
+                offset=arguments.get("offset", 0),
             ), target)
         if action == "read":
             return self._scope_result(target.workspace.read_text(
@@ -420,11 +423,15 @@ class ToolRuntime:
                 raw=path,
                 case_sensitive=arguments.get("case_sensitive", False),
                 max_results=arguments.get("max_results", 100),
+                offset=arguments.get("offset", 0),
             ), target)
         if action in {"status", "diff"}:
-            if path != ".":
-                raise ToolError("INVALID_ARGUMENT", "status and diff apply to the workspace root")
-            return self._scope_result(target.workspace.git_view(action), target)
+            return self._scope_result(target.workspace.git_view(
+                action,
+                raw=path,
+                offset=arguments.get("offset", 0),
+                limit=arguments.get("limit", 64 * 1024),
+            ), target)
         raise ToolError("INVALID_ARGUMENT", "action must be list, read, search, status, or diff")
 
     def _file_info(self, arguments: dict[str, Any]) -> dict[str, Any]:
@@ -469,7 +476,7 @@ class ToolRuntime:
         )
 
     def _extension(self, arguments: dict[str, Any]) -> dict[str, Any]:
-        _require_only(arguments, {"workspace_id", "action", "extension_id", "extension_action", "params", "job_id"})
+        _require_only(arguments, {"workspace_id", "action", "extension_id", "extension_action", "params", "job_id", "offset", "limit"})
         operation = arguments.get("action")
         if operation not in {"list", "info", "run", "job_status", "job_cancel"}:
             raise ToolError("INVALID_ARGUMENT", "action must be list, info, run, job_status, or job_cancel")
@@ -477,7 +484,28 @@ class ToolRuntime:
         target = self._select_target(raw_workspace_id) if raw_workspace_id is not None else None
 
         if operation == "list":
-            return self.extensions.describe(target.root if target is not None else None)
+            offset = arguments.get("offset", 0)
+            limit = arguments.get("limit", 100)
+            if not isinstance(offset, int) or isinstance(offset, bool) or offset < 0:
+                raise ToolError("INVALID_ARGUMENT", "offset must be a non-negative integer")
+            if not isinstance(limit, int) or isinstance(limit, bool) or not 1 <= limit <= 200:
+                raise ToolError("INVALID_ARGUMENT", "limit must be between 1 and 200")
+            description = self.extensions.describe(
+                target.root if target is not None else None,
+                include_action_schemas=False,
+            )
+            items = description["extensions"]
+            page = items[offset:offset + limit]
+            next_offset = offset + len(page) if offset + len(page) < len(items) else None
+            return {
+                "extension_root": description["extension_root"],
+                "extensions": page,
+                "total": len(items),
+                "offset": offset,
+                "next_offset": next_offset,
+                "truncated": next_offset is not None,
+                "errors": description["errors"],
+            }
 
         if operation in {"job_status", "job_cancel"}:
             job_id = arguments.get("job_id")
@@ -725,7 +753,7 @@ WORKSPACE_TOOL = {
     "name": "workspace",
     "title": "Inspect the local workspace",
     "description": (
-        "List files, read UTF-8 text, perform bounded literal search, or view git status/diff. "
+        "List files, page through UTF-8 text, stream literal search across large UTF-8 files, or page through git status/diff output. "
         "When multiple workspaces are configured, pass a workspace_id returned by server_info. "
         "All paths are relative; links, credentials, dependencies, and VCS internals are denied."
     ),
@@ -739,8 +767,8 @@ WORKSPACE_TOOL = {
             "pattern": {"type": "string", "default": "*", "description": "Glob for list."},
             "case_sensitive": {"type": "boolean", "default": False},
             "max_results": {"type": "integer", "minimum": 1, "maximum": 200, "default": 100},
-            "offset": {"type": "integer", "minimum": 0, "default": 0},
-            "limit": {"type": "integer", "minimum": 1, "maximum": 262144, "default": 65536},
+            "offset": {"type": "integer", "minimum": 0, "default": 0, "description": "Byte offset for read/status/diff; result offset for list/search."},
+            "limit": {"type": "integer", "minimum": 1, "maximum": 262144, "default": 65536, "description": "Returned byte page size for read/status/diff."},
         },
         "required": ["action"],
         "additionalProperties": False,
@@ -813,8 +841,8 @@ EXTENSION_TOOL = {
     "name": "extension",
     "title": "Use FolderBridge extensions",
     "description": (
-        "Stable extension gateway. action=list discovers installed/hot-reloaded extensions and their action schemas; "
-        "action=info inspects one extension; action=run invokes one declared extension action. Job-mode actions return a host-owned job_id; "
+        "Stable extension gateway. action=list returns a compact pageable catalog of installed/hot-reloaded extensions and action names; "
+        "action=info returns the full schema for one extension; action=run invokes one declared extension action. Job-mode actions return a host-owned job_id; "
         "use action=job_status to inspect completion/results and action=job_cancel to terminate the owned worker process tree. "
         "Installing more extensions does not add MCP tool names. External extension code requires exact-hash local approval; "
         "globally authorized actions must also be enabled in the FolderBridge extension sidebar. "
@@ -829,6 +857,8 @@ EXTENSION_TOOL = {
             "extension_action": {"type": "string", "description": "Required for run; choose an action declared by extension info/list."},
             "params": {"type": "object", "description": "Action parameters validated against the extension's declared input_schema."},
             "job_id": {"type": "string", "description": "Required for job_status/job_cancel; returned by a run_mode=job action."},
+            "offset": {"type": "integer", "minimum": 0, "default": 0, "description": "Catalog result offset for action=list."},
+            "limit": {"type": "integer", "minimum": 1, "maximum": 200, "default": 100, "description": "Catalog page size for action=list."},
         },
         "required": ["action"],
         "additionalProperties": False,

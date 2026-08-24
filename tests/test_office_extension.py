@@ -34,6 +34,7 @@ class OfficeExtensionTests(unittest.TestCase):
     def test_bundled_manifest_declares_safe_office_actions(self) -> None:
         record = load_extension(OFFICE_DIR, bundled=True)
         self.assertEqual(record.manifest.extension_id, "office")
+        self.assertEqual(record.manifest.version, "1.1.0")
         self.assertEqual(set(record.manifest.actions), {"status", "inspect_docx", "inspect_xlsx", "render"})
         self.assertTrue(record.manifest.actions["status"].read_only)
         self.assertTrue(record.manifest.actions["inspect_docx"].read_only)
