@@ -2,8 +2,8 @@
   "schema_version": 1,
   "id": "git-publisher",
   "name": "Git Publisher",
-  "version": "1.1.0",
-  "description": "Safely connect GitHub in a browser through Git Credential Manager, commit only explicitly selected files, and push only the current branch to a credential-free GitHub HTTPS origin.",
+  "version": "1.2.0",
+  "description": "Safely connect GitHub in a browser, commit explicit files, push only the current branch, and publish the current FolderBridge version as a locked GitHub Release.",
   "entrypoint": "plugin.py",
   "permissions": [
     "workspace.read",
@@ -11,7 +11,8 @@
     "git.commit-selected-files",
     "git.push-current-branch",
     "github.web-auth",
-    "process.execute:git.exe"
+    "process.execute:git.exe",
+    "process.execute:gh.exe"
   ],
   "execution": {
     "mode": "isolated-process",
@@ -68,6 +69,16 @@
       }
     },
     "push": {
+      "read_only": false,
+      "requires_workspace": true,
+      "authorization": "global",
+      "input_schema": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false
+      }
+    },
+    "release": {
       "read_only": false,
       "requires_workspace": true,
       "authorization": "global",

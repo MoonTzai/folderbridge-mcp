@@ -39,17 +39,18 @@ class GitPublisherManifestTests(unittest.TestCase):
     def test_manifest_is_explicit_and_does_not_accept_tokens(self) -> None:
         record = load_extension(EXT_DIR, bundled=True)
         self.assertEqual(record.manifest.extension_id, "git-publisher")
-        self.assertEqual(record.manifest.version, "1.1.0")
-        self.assertEqual(set(record.manifest.actions), {"status", "connect", "commit", "push"})
+        self.assertEqual(record.manifest.version, "1.2.0")
+        self.assertEqual(set(record.manifest.actions), {"status", "connect", "commit", "push", "release"})
         self.assertTrue(record.manifest.actions["status"].read_only)
         self.assertEqual(record.manifest.actions["status"].authorization, "none")
-        for name in ("connect", "commit", "push"):
+        for name in ("connect", "commit", "push", "release"):
             self.assertFalse(record.manifest.actions[name].read_only)
             self.assertEqual(record.manifest.actions[name].authorization, "global")
         self.assertIn("git.commit-selected-files", record.manifest.permissions)
         self.assertIn("git.push-current-branch", record.manifest.permissions)
         self.assertIn("github.web-auth", record.manifest.permissions)
         self.assertIn("process.execute:git.exe", record.manifest.permissions)
+        self.assertIn("process.execute:gh.exe", record.manifest.permissions)
         for action in record.manifest.actions.values():
             properties = action.input_schema.get("properties", {})
             self.assertTrue({"token", "password", "pat"}.isdisjoint({str(key).lower() for key in properties}))
@@ -58,12 +59,28 @@ class GitPublisherManifestTests(unittest.TestCase):
         self.assertEqual(status_schema["properties"]["limit"]["maximum"], 500)
         commit_schema = record.manifest.actions["commit"].input_schema
         self.assertEqual(commit_schema["properties"]["paths"]["maxItems"], 128)
+        release_schema = record.manifest.actions["release"].input_schema
+        self.assertEqual(release_schema["properties"], {})
         plugin = load_plugin()
         self.assertEqual(plugin.MAX_COMMIT_FILE_BYTES, 100 * 1024 * 1024)
         plugin_text = (EXT_DIR / "plugin.py").read_text(encoding="utf-8")
         self.assertIn("owned_process_group_kwargs", plugin_text)
         self.assertIn("terminate_owned_process_tree", plugin_text)
         self.assertNotIn("subprocess.run(", plugin_text)
+
+    def test_release_version_and_assets_are_project_locked(self) -> None:
+        plugin = load_plugin()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            (root / "pyproject.toml").write_text('[project]\nname = "demo"\nversion = "1.2.3"\n', encoding="utf-8")
+            release_dir = root / "release" / "windows-x64"
+            release_dir.mkdir(parents=True)
+            exe = release_dir / "FolderBridge.exe"
+            checksum = release_dir / "FolderBridge.exe.sha256"
+            exe.write_bytes(b"exe")
+            checksum.write_text("00 *FolderBridge.exe\n", encoding="utf-8")
+            self.assertEqual(plugin._project_release_version(root), "1.2.3")
+            self.assertEqual(plugin._release_asset_paths(root), (exe, checksum))
 
     def test_origin_validator_rejects_embedded_credentials_and_non_github(self) -> None:
         plugin = load_plugin()

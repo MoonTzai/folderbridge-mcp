@@ -353,9 +353,9 @@ Artifacts and a SHA-256 file are written to `release\windows-x64`.
 
 ### Publish a GitHub Release
 
-Repository `main` pushes and GitHub Releases are intentionally distinct. A normal commit/push updates source only. To publish a release, the final commit title must be exactly `Release FolderBridge <version>`, where `<version>` is the stable `x.y.z` value in `pyproject.toml` (for example, `Release FolderBridge 0.8.3`). The `.github/workflows/release-windows.yml` workflow then re-reads that version, runs the complete tests on Windows/Python 3.11, builds and re-verifies `FolderBridge.exe`, creates or validates tag `v<version>`, and creates or repairs the GitHub Release with `FolderBridge.exe` plus `FolderBridge.exe.sha256`. The workflow exposes no manual version/tag input, so the release identifier cannot drift from project metadata.
+Repository `main` pushes and GitHub Releases are intentionally distinct. Git Publisher 1.2.0 adds a parameterless `release` action for the current FolderBridge repository: it reads the stable `x.y.z` version only from `pyproject.toml`, requires branch `main`, a clean tracked working tree, and `origin/main` at the current HEAD, then creates or validates only tag `v<version>` and uploads only `release/windows-x64/FolderBridge.exe` plus `FolderBridge.exe.sha256`. It uses Git Credential Manager for Git operations and the locally installed GitHub CLI (`gh.exe`) for Release creation/upload; no arbitrary repository, tag, version, asset path, token, or `gh` argument is accepted from the model.
 
-If a release run fails after its tag was created, rerunning the same Actions job is safe: the workflow accepts an existing tag only when it resolves to the same release commit and will re-upload the two assets with clobber semantics before marking that Release latest.
+The repository-side `.github/workflows/release-windows.yml` remains a second publication path for commits titled exactly `Release FolderBridge <version>`. It independently re-reads the version, runs the full Windows tests, builds and verifies the EXE, and creates or repairs the matching Release. Existing tags are accepted only when they resolve to the same release commit, and existing Releases can be repaired by re-uploading the two fixed assets and marking that version Latest.
 
 ## License
 

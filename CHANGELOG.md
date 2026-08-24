@@ -2,6 +2,12 @@
 
 All notable changes to FolderBridge MCP are documented here.
 
+## 0.8.4 — 2026-08-25
+
+- Updated bundled Git Publisher to 1.2.0 with a parameterless, project-locked `release` action. It publishes only the stable version declared in `pyproject.toml`, only from `main`, only when tracked files are clean and `origin/main` matches the current HEAD, and only with tag `v<version>` plus the fixed `release/windows-x64/FolderBridge.exe` and `.sha256` assets.
+- Release publishing uses the existing credential-free GitHub HTTPS origin validation and Git Credential Manager for Git operations, plus the locally installed GitHub CLI (`gh.exe`) for GitHub Release creation/upload. No arbitrary tag, version, asset path, repository, or `gh` argument is exposed to the model.
+- Existing version tags are accepted only when they resolve to the current release commit; existing Releases are repaired with asset clobber and re-marked Latest, while new Releases are created only after the matching tag exists remotely.
+
 ## 0.8.3 — 2026-08-25
 
 - Added a persistent Chinese/English launcher UI switch (`中文 / EN`) immediately to the left of the connection guide. Main-window labels, live connection/service status, Extension/Skill controls, setup-guide content, file dialogs, confirmation/error dialogs, and launcher logs share one localization layer; language changes do not alter the Tunnel configuration fingerprint or require a reconnect.

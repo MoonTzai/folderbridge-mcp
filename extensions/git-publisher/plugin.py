@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import hashlib
 import os
 import re
 import shutil
 import stat
 import subprocess
 import sys
+import tomllib
 from pathlib import Path, PurePosixPath
 from typing import Any
 from urllib.parse import urlsplit
@@ -47,6 +49,8 @@ def handle(action: str, params: dict[str, Any], context: dict[str, Any]) -> dict
         return _commit(root, params.get("paths"), params.get("message"))
     if action == "push":
         return _push(root)
+    if action == "release":
+        return _release(root)
     raise RuntimeError(f"unsupported action: {action}")
 
 
@@ -67,6 +71,15 @@ def _git_executable() -> str:
     if not git:
         raise RuntimeError("git.exe was not found on the trusted PATH; install Git for Windows first.")
     return str(Path(git).resolve(strict=True))
+
+
+def _gh_executable() -> str:
+    if sys.platform != "win32":
+        raise RuntimeError("Git Publisher Release publishing currently requires Windows GitHub CLI.")
+    gh = shutil.which("gh.exe")
+    if not gh:
+        raise RuntimeError("gh.exe was not found on the trusted PATH; install GitHub CLI first.")
+    return str(Path(gh).resolve(strict=True))
 
 
 def _redact(text: str) -> str:
@@ -130,6 +143,43 @@ def _run_git(
 
 def _text(completed: subprocess.CompletedProcess[bytes]) -> str:
     return _redact(completed.stdout.decode("utf-8", errors="replace").strip())
+
+
+def _run_gh(root: Path, *args: str, timeout: int = 300, check: bool = True) -> subprocess.CompletedProcess[bytes]:
+    gh = _gh_executable()
+    env = os.environ.copy()
+    env["GH_PROMPT_DISABLED"] = "1"
+    env["GH_PAGER"] = "cat"
+    try:
+        process = subprocess.Popen(
+            [gh, *args],
+            cwd=root,
+            env=env,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            shell=False,
+            close_fds=True,
+            **owned_process_group_kwargs(hide_window=True),
+        )
+    except OSError as exc:
+        raise RuntimeError(f"could not execute gh: {exc}") from exc
+    try:
+        stdout, stderr = process.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired as exc:
+        terminate_owned_process_tree(process, hide_window=True)
+        try:
+            stdout, stderr = process.communicate(timeout=5)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            stdout, stderr = process.communicate(timeout=5)
+        raise RuntimeError(f"gh operation exceeded {timeout} seconds") from exc
+    completed = subprocess.CompletedProcess([gh, *args], process.returncode, stdout, stderr)
+    if check and completed.returncode != 0:
+        stderr_text = _redact(completed.stderr.decode("utf-8", errors="replace").strip())
+        stdout_text = _redact(completed.stdout.decode("utf-8", errors="replace").strip())
+        raise RuntimeError(stderr_text or stdout_text or f"gh command failed with exit code {completed.returncode}")
+    return completed
 
 
 def _repo_info(root: Path) -> dict[str, str]:
@@ -466,5 +516,158 @@ def _push(root: Path) -> dict[str, Any]:
             "pre_push_hooks_disabled": True,
             "credential_helper_forced_to_gcm": True,
             "interactive_prompt_disabled": True,
+        },
+    }
+
+
+def _project_release_version(root: Path) -> str:
+    path = root / "pyproject.toml"
+    _reject_links(root, path)
+    try:
+        with path.open("rb") as stream:
+            raw = tomllib.load(stream)
+    except (OSError, tomllib.TOMLDecodeError) as exc:
+        raise RuntimeError(f"could not read project version from pyproject.toml: {exc}") from exc
+    version = raw.get("project", {}).get("version") if isinstance(raw.get("project"), dict) else None
+    if not isinstance(version, str) or not re.fullmatch(r"\d+\.\d+\.\d+", version):
+        raise RuntimeError("pyproject.toml project.version must be a stable numeric x.y.z version")
+    return version
+
+
+def _release_asset_paths(root: Path) -> tuple[Path, Path]:
+    release_dir = root / "release" / "windows-x64"
+    exe = release_dir / "FolderBridge.exe"
+    checksum = release_dir / "FolderBridge.exe.sha256"
+    for path in (exe, checksum):
+        _reject_links(root, path)
+        try:
+            resolved = path.resolve(strict=True)
+            resolved.relative_to(root)
+        except (OSError, ValueError) as exc:
+            raise RuntimeError(f"required Release asset is missing or unsafe: {path.relative_to(root).as_posix()}") from exc
+        if not resolved.is_file() or resolved.is_symlink() or _is_reparse(resolved):
+            raise RuntimeError(f"required Release asset is not a regular file: {path.relative_to(root).as_posix()}")
+    return exe, checksum
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        while True:
+            chunk = stream.read(1024 * 1024)
+            if not chunk:
+                break
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _release(root: Path) -> dict[str, Any]:
+    repo = _repo_info(root)
+    if repo["branch"] != "main":
+        raise RuntimeError("Release publishing is locked to the main branch")
+    if _staged_paths(root):
+        raise RuntimeError("Release publishing requires no staged changes")
+    tracked = _run_git(root, "-c", "core.fsmonitor=false", "status", "--porcelain=v1", "--untracked-files=no")
+    if tracked.stdout.strip():
+        raise RuntimeError("Release publishing requires a clean tracked working tree; untracked local files are allowed")
+
+    version = _project_release_version(root)
+    tag = f"v{version}"
+    head = _text(_run_git(root, "rev-parse", "HEAD"))
+    title = _text(_run_git(root, "log", "-1", "--pretty=%s"))
+    expected_title = f"Release FolderBridge {version}"
+    if title != expected_title:
+        raise RuntimeError(f"HEAD commit title must be exactly '{expected_title}'")
+
+    remote = _run_git(root, "ls-remote", "origin", "refs/heads/main", timeout=120, gcm_only=True)
+    remote_line = _text(remote).splitlines()
+    remote_head = remote_line[0].split("\t", 1)[0] if remote_line else ""
+    if remote_head != head:
+        raise RuntimeError("origin/main does not match current HEAD; push the release commit first")
+
+    exe, checksum = _release_asset_paths(root)
+    actual_sha = _sha256_file(exe)
+    try:
+        checksum_text = checksum.read_text(encoding="utf-8", errors="strict").strip()
+    except (OSError, UnicodeError) as exc:
+        raise RuntimeError(f"could not read Release checksum file: {exc}") from exc
+    declared_sha = checksum_text.split()[0].lower() if checksum_text else ""
+    if declared_sha != actual_sha:
+        raise RuntimeError("FolderBridge.exe.sha256 does not match FolderBridge.exe")
+
+    local_tag = _run_git(root, "rev-parse", "--verify", f"refs/tags/{tag}^{{}}", check=False)
+    if local_tag.returncode == 0 and _text(local_tag) != head:
+        raise RuntimeError(f"local tag {tag} already points to a different commit")
+
+    remote_tags = _run_git(
+        root,
+        "ls-remote", "--tags", "origin", f"refs/tags/{tag}", f"refs/tags/{tag}^{{}}",
+        timeout=120,
+        gcm_only=True,
+    )
+    lines = [line for line in _text(remote_tags).splitlines() if line.strip()]
+    remote_tag_target = ""
+    for line in lines:
+        sha, ref = line.split("\t", 1)
+        if ref.endswith("^{}"):
+            remote_tag_target = sha
+            break
+    if not remote_tag_target and lines:
+        remote_tag_target = lines[0].split("\t", 1)[0]
+    if remote_tag_target and remote_tag_target != head:
+        raise RuntimeError(f"remote tag {tag} already points to a different commit")
+
+    if not lines:
+        if local_tag.returncode != 0:
+            _run_git(
+                root,
+                "-c", "core.hooksPath=NUL",
+                "-c", "tag.gpgSign=false",
+                "tag", "-a", tag, "-m", f"FolderBridge {version}", head,
+            )
+        _run_git(
+            root,
+            "-c", "core.hooksPath=NUL",
+            "push", "--porcelain", "--no-verify", "origin", f"refs/tags/{tag}:refs/tags/{tag}",
+            timeout=300,
+            gcm_only=True,
+        )
+
+    _run_gh(root, "auth", "status", "--hostname", "github.com", timeout=60)
+    repo_name = f"{repo['owner']}/{repo['repo']}"
+    existing = _run_gh(root, "release", "view", tag, "--repo", repo_name, check=False)
+    if existing.returncode == 0:
+        _run_gh(
+            root,
+            "release", "upload", tag, str(exe), str(checksum), "--clobber", "--repo", repo_name,
+            timeout=300,
+        )
+        _run_gh(root, "release", "edit", tag, "--title", f"FolderBridge {version}", "--latest", "--repo", repo_name)
+    else:
+        _run_gh(
+            root,
+            "release", "create", tag, str(exe), str(checksum),
+            "--verify-tag", "--generate-notes", "--title", f"FolderBridge {version}", "--latest", "--repo", repo_name,
+            timeout=300,
+        )
+    verified = _run_gh(root, "release", "view", tag, "--repo", repo_name, "--json", "tagName,url")
+    return {
+        **repo,
+        "released": True,
+        "version": version,
+        "tag": tag,
+        "head": head,
+        "exe_sha256": actual_sha,
+        "release": _text(verified),
+        "assets": ["release/windows-x64/FolderBridge.exe", "release/windows-x64/FolderBridge.exe.sha256"],
+        "safety": {
+            "main_branch_only": True,
+            "version_from_pyproject_only": True,
+            "tag_from_version_only": True,
+            "current_head_only": True,
+            "origin_main_must_match_head": True,
+            "fixed_release_assets_only": True,
+            "untracked_local_files_ignored": True,
+            "force_push": False,
         },
     }

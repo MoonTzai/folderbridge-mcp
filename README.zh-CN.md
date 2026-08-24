@@ -355,9 +355,9 @@ python -m venv .build-venv
 
 ### 发布 GitHub Release
 
-仓库 `main` 的 push 与 GitHub Release 现在明确分离：普通 commit/push 只更新源码，不会误发版本。正式发布时，最终 commit 第一行必须严格写成 `Release FolderBridge <version>`，其中 `<version>` 必须等于 `pyproject.toml` 中稳定的 `x.y.z` 版本（例如 `Release FolderBridge 0.8.3`）。随后 `.github/workflows/release-windows.yml` 会在 Windows / Python 3.11 上重新读取并核对版本、运行完整测试、构建并再次验证 `FolderBridge.exe`、创建或验证 `v<version>` 标签，并创建或修复对应 GitHub Release，上传 `FolderBridge.exe` 与 `FolderBridge.exe.sha256`。工作流不提供手工 version/tag 输入，因此 Release 版本不会再与项目元数据脱节。
+仓库 `main` 的 push 与 GitHub Release 明确分离。Git Publisher 1.2.0 新增一个零参数的 `release` 动作：版本只允许从 `pyproject.toml` 读取稳定的 `x.y.z`，只允许在 `main`、tracked 工作树干净且 `origin/main` 已与当前 HEAD 一致时发布；标签固定为 `v<version>`，资产固定为 `release/windows-x64/FolderBridge.exe` 与 `FolderBridge.exe.sha256`。Git 操作继续使用 Git Credential Manager，GitHub Release 创建／上传使用本机 `gh.exe`；模型不能传入任意仓库、tag、version、asset 路径、token 或 `gh` 参数。
 
-如果工作流在已经创建 tag 之后失败，直接对同一次 Actions run 执行 rerun 即可：已有 tag 只有在确实指向同一个 release commit 时才会被接受，两个 release asset 会以 clobber 方式重新上传，并重新标记该版本为 Latest。
+仓库端 `.github/workflows/release-windows.yml` 仍保留为第二条发布路径：当最终 commit 标题严格为 `Release FolderBridge <version>` 时，它会独立重新读取版本、执行完整 Windows 测试、构建并验证 EXE，然后创建或修复对应 Release。已有 tag 只有在确实指向同一个 release commit 时才会被接受；已有 Release 可以重新上传两个固定资产并重新标记为 Latest。
 
 ## 许可证
 
