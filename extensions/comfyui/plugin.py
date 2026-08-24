@@ -25,5 +25,6 @@ def handle(action: str, params: dict[str, Any], context: dict[str, Any]) -> dict
         params["workflow_path"],
         overrides=params.get("overrides"),
         save_directory=save_directory,
-        timeout_seconds=params.get("timeout_seconds", 180),
+        timeout_seconds=params.get("timeout_seconds", 2 * 60 * 60),
+        include_image_data=False,
     )

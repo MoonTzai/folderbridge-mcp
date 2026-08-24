@@ -2,8 +2,8 @@
   "schema_version": 1,
   "id": "comfyui",
   "name": "Local ComfyUI",
-  "version": "1.0.0",
-  "description": "Connect to a local ComfyUI API fixed to 127.0.0.1:8188 and return generated images to the model.",
+  "version": "1.1.0",
+  "description": "Connect to local ComfyUI at 127.0.0.1:8188. Long workflow runs execute as host-owned jobs and return bounded artifact paths/metadata instead of embedding generated media in the MCP response.",
   "entrypoint": "plugin.py",
   "permissions": [
     "network.loopback:127.0.0.1:8188",
@@ -33,6 +33,8 @@
       "read_only": true,
       "requires_workspace": true,
       "authorization": "global",
+      "run_mode": "job",
+      "timeout_seconds": 0,
       "input_schema": {
         "type": "object",
         "properties": {
@@ -55,9 +57,9 @@
           },
           "timeout_seconds": {
             "type": "integer",
-            "minimum": 1,
-            "maximum": 600,
-            "default": 180
+            "minimum": 0,
+            "maximum": 86400,
+            "default": 7200
           }
         },
         "required": ["workflow_path"],

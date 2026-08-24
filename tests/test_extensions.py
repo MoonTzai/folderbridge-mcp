@@ -1128,6 +1128,13 @@ class ExtensionTests(unittest.TestCase):
         self.assertEqual(record.manifest.extension_id, "comfyui")
         self.assertIn("status", record.manifest.actions)
         self.assertIn("run", record.manifest.actions)
+        run_action = record.manifest.actions["run"]
+        self.assertEqual(run_action.run_mode, "job")
+        self.assertEqual(run_action.timeout_seconds, 0)
+        timeout_schema = run_action.input_schema["properties"]["timeout_seconds"]
+        self.assertEqual(timeout_schema["default"], 2 * 60 * 60)
+        self.assertEqual(timeout_schema["minimum"], 0)
+        self.assertGreaterEqual(timeout_schema["maximum"], 2 * 60 * 60)
         self.assertIn("network.loopback:127.0.0.1:8188", record.manifest.permissions)
 
 

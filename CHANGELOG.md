@@ -2,6 +2,13 @@
 
 All notable changes to FolderBridge MCP are documented here.
 
+## 0.8.9 — 2026-08-25
+
+- Hardened bundled ComfyUI workflow execution for long-running image/video generation: `run` now uses a host-owned Extension Job instead of a foreground MCP request, with a 2-hour workflow timeout by default, explicit `0` for no automatic workflow timeout, and the existing job status/cancel control lane remaining responsive while generation runs.
+- Fixed ComfyUI video outputs being misclassified as images when nodes expose MP4/WebM/MOV/MKV descriptors through legacy `images` fields. Generated media is no longer fetched or embedded into MCP responses; the bundled extension returns bounded artifact references, verified local paths when resolvable, workspace-relative paths when applicable, and file sizes instead.
+- Bounded ComfyUI artifact metadata to 64 returned entries with an explicit truncation flag, preserved explicit image `save_directory` copying without inline Base64 in job results, and fail-closed when a relative ComfyUI `main.py` cannot be safely resolved instead of fabricating an absolute output path.
+- Added regression coverage for path-only image results, explicit image saving without inline media, video path reporting without `/view` binary fetches, bounded large output sets, relative-main path safety, and the bundled ComfyUI 1.1.0 job/timeout contract.
+
 ## 0.8.8 — 2026-08-25
 
 - Fixed two false positives found by real-workspace verification of the new built-in `test`/`build` providers: UTF-8 JSON files with a BOM are now decoded as `utf-8-sig`, and conventional diagnostic output files (`err.txt`, `error.txt`, `stderr.txt`, `stdout.txt`) are excluded from source/content validation.

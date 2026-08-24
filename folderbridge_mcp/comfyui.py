@@ -5,7 +5,7 @@ import hashlib
 import json
 import time
 import uuid
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
@@ -20,8 +20,13 @@ MAX_WORKFLOW_BYTES = 4 * 1024 * 1024
 MAX_JSON_RESPONSE_BYTES = 8 * 1024 * 1024
 MAX_IMAGE_BYTES = 8 * 1024 * 1024
 MAX_OUTPUT_IMAGES = 4
+MAX_OUTPUT_ARTIFACTS = 64
 MAX_TOTAL_IMAGE_BYTES = 16 * 1024 * 1024
-MAX_TIMEOUT_SECONDS = 600
+DEFAULT_TIMEOUT_SECONDS = 2 * 60 * 60
+MAX_TIMEOUT_SECONDS = 24 * 60 * 60
+IMAGE_SUFFIXES = frozenset({".png", ".jpg", ".jpeg", ".gif", ".webp"})
+VIDEO_SUFFIXES = frozenset({".mp4", ".webm", ".mov", ".mkv", ".avi", ".m4v"})
+AUDIO_SUFFIXES = frozenset({".wav", ".flac", ".mp3", ".opus", ".ogg", ".m4a", ".aac"})
 
 
 class _NoRedirect(HTTPRedirectHandler):
@@ -56,11 +61,14 @@ def run_workflow(
     *,
     overrides: dict[str, Any] | None = None,
     save_directory: str | None = None,
-    timeout_seconds: int = 180,
+    timeout_seconds: int = DEFAULT_TIMEOUT_SECONDS,
     port: int = COMFYUI_PORT,
+    include_image_data: bool = True,
 ) -> dict[str, Any]:
-    if not isinstance(timeout_seconds, int) or isinstance(timeout_seconds, bool) or not 1 <= timeout_seconds <= MAX_TIMEOUT_SECONDS:
-        raise ToolError("INVALID_ARGUMENT", f"timeout_seconds must be between 1 and {MAX_TIMEOUT_SECONDS}.")
+    if not isinstance(timeout_seconds, int) or isinstance(timeout_seconds, bool) or not 0 <= timeout_seconds <= MAX_TIMEOUT_SECONDS:
+        raise ToolError("INVALID_ARGUMENT", f"timeout_seconds must be between 0 and {MAX_TIMEOUT_SECONDS}; 0 disables automatic timeout.")
+    if not isinstance(include_image_data, bool):
+        raise ToolError("INVALID_ARGUMENT", "include_image_data must be boolean.")
     workflow = _load_workflow(workspace, workflow_path)
     _apply_overrides(workflow, overrides)
 
@@ -79,9 +87,9 @@ def run_workflow(
     if isinstance(node_errors, dict) and node_errors:
         raise ToolError("COMFYUI_NODE_ERROR", "ComfyUI rejected one or more workflow nodes.", node_errors=node_errors)
 
-    deadline = time.monotonic() + timeout_seconds
+    deadline = None if timeout_seconds == 0 else time.monotonic() + timeout_seconds
     history_entry: dict[str, Any] | None = None
-    while time.monotonic() < deadline:
+    while deadline is None or time.monotonic() < deadline:
         history = _json_request("GET", f"/history/{prompt_id}", port=port, timeout=10)
         if isinstance(history, dict):
             candidate = history.get(prompt_id)
@@ -96,12 +104,20 @@ def run_workflow(
     if isinstance(status, dict) and status.get("status_str") == "error":
         raise ToolError("COMFYUI_EXECUTION_ERROR", "ComfyUI reported workflow execution failure.", status=status)
 
-    descriptors = _output_image_descriptors(history_entry)
-    selected = descriptors[:MAX_OUTPUT_IMAGES]
+    descriptors = _output_artifact_descriptors(history_entry)
+    storage_roots = _comfyui_storage_roots(port=port, workspace=workspace)
+    artifact_descriptors = descriptors[:MAX_OUTPUT_ARTIFACTS]
+    artifacts = [
+        _artifact_metadata(descriptor, storage_roots=storage_roots, workspace=workspace, index=index)
+        for index, descriptor in enumerate(artifact_descriptors, start=1)
+    ]
+    image_descriptors = [descriptor for descriptor in descriptors if descriptor["kind"] == "image"]
+    save_root = _prepare_save_directory(workspace, save_directory) if save_directory else None
+    should_fetch_images = include_image_data or save_root is not None
+    selected = image_descriptors[:MAX_OUTPUT_IMAGES] if should_fetch_images else []
     rendered: list[dict[str, Any]] = []
     image_content: list[dict[str, str]] = []
     total_bytes = 0
-    save_root = _prepare_save_directory(workspace, save_directory) if save_directory else None
 
     for index, descriptor in enumerate(selected, start=1):
         data = _image_request(descriptor, port=port)
@@ -128,14 +144,19 @@ def run_workflow(
                 "saved_path": saved_path,
             }
         )
-        image_content.append({"type": "image", "data": base64.b64encode(data).decode("ascii"), "mimeType": mime_type})
+        if include_image_data:
+            image_content.append({"type": "image", "data": base64.b64encode(data).decode("ascii"), "mimeType": mime_type})
 
     metadata = {
         "online": True,
         "endpoint": f"http://{COMFYUI_HOST}:{port}",
         "workflow_path": workflow_path,
         "prompt_id": prompt_id,
-        "images_found": len(descriptors),
+        "artifacts_found": len(descriptors),
+        "artifacts_returned": len(artifacts),
+        "artifacts_truncated": len(descriptors) > len(artifacts),
+        "artifacts": artifacts,
+        "images_found": len(image_descriptors),
         "images_returned": len(rendered),
         "images": rendered,
         "status": status,
@@ -202,25 +223,146 @@ def _prepare_save_directory(workspace: Workspace, raw: str) -> Path:
     return path
 
 
-def _output_image_descriptors(history_entry: dict[str, Any]) -> list[dict[str, str]]:
+def _output_artifact_descriptors(history_entry: dict[str, Any]) -> list[dict[str, str]]:
     outputs = history_entry.get("outputs")
     if not isinstance(outputs, dict):
         return []
     result: list[dict[str, str]] = []
-    for node_output in outputs.values():
+    seen: set[tuple[str, str, str]] = set()
+    for node_id, node_output in outputs.items():
         if not isinstance(node_output, dict):
             continue
-        images = node_output.get("images")
-        if not isinstance(images, list):
-            continue
-        for item in images:
-            if not isinstance(item, dict):
+        for output_key, values in node_output.items():
+            if not isinstance(values, list):
                 continue
-            filename = item.get("filename")
-            subfolder = item.get("subfolder", "")
-            output_type = item.get("type", "output")
-            if all(isinstance(value, str) for value in (filename, subfolder, output_type)) and filename:
-                result.append({"filename": filename, "subfolder": subfolder, "type": output_type})
+            for item in values:
+                if not isinstance(item, dict):
+                    continue
+                filename = item.get("filename")
+                subfolder = item.get("subfolder", "")
+                output_type = item.get("type", "output")
+                if not all(isinstance(value, str) for value in (filename, subfolder, output_type)) or not filename:
+                    continue
+                _validate_artifact_reference(filename, subfolder, output_type)
+                identity = (filename, subfolder, output_type)
+                if identity in seen:
+                    continue
+                seen.add(identity)
+                result.append(
+                    {
+                        "filename": filename,
+                        "subfolder": subfolder,
+                        "type": output_type,
+                        "node_id": str(node_id),
+                        "output_key": str(output_key),
+                        "kind": _artifact_kind(filename, str(output_key)),
+                    }
+                )
+    return result
+
+
+def _artifact_kind(filename: str, output_key: str) -> str:
+    suffix = Path(filename).suffix.lower()
+    if suffix in IMAGE_SUFFIXES:
+        return "image"
+    if suffix in VIDEO_SUFFIXES:
+        return "video"
+    if suffix in AUDIO_SUFFIXES or output_key == "audio":
+        return "audio"
+    return "file"
+
+
+def _validate_artifact_reference(filename: str, subfolder: str, output_type: str) -> None:
+    if "/" in filename or "\\" in filename or filename in {".", ".."}:
+        raise ToolError("COMFYUI_INVALID_RESPONSE", "ComfyUI returned an unsafe artifact filename.")
+    if "\\" in subfolder:
+        raise ToolError("COMFYUI_INVALID_RESPONSE", "ComfyUI returned an unsafe artifact subfolder.")
+    relative = PurePosixPath(subfolder)
+    if relative.is_absolute() or ".." in relative.parts:
+        raise ToolError("COMFYUI_INVALID_RESPONSE", "ComfyUI returned an unsafe artifact subfolder.")
+    if output_type not in {"output", "input", "temp"}:
+        raise ToolError("COMFYUI_INVALID_RESPONSE", "ComfyUI returned an unknown artifact storage type.")
+
+
+def _argv_option(argv: list[str], name: str) -> str | None:
+    prefix = name + "="
+    for index, value in enumerate(argv):
+        if value == name and index + 1 < len(argv):
+            return argv[index + 1]
+        if value.startswith(prefix):
+            return value[len(prefix):]
+    return None
+
+
+def _comfyui_storage_roots(*, port: int, workspace: Workspace) -> dict[str, Path]:
+    try:
+        stats = _json_request("GET", "/system_stats", port=port, timeout=3)
+    except ToolError:
+        return {}
+    system = stats.get("system") if isinstance(stats, dict) else None
+    argv = system.get("argv") if isinstance(system, dict) else None
+    if not isinstance(argv, list) or not argv or not all(isinstance(item, str) for item in argv):
+        return {}
+    main_path = Path(argv[0])
+    if not main_path.is_absolute():
+        candidate = (workspace.root / main_path).resolve(strict=False)
+        if not candidate.is_file():
+            return {}
+        main_path = candidate
+    if main_path.suffix.lower() != ".py":
+        return {}
+    base = main_path.parent
+    roots: dict[str, Path] = {}
+    for output_type, option_name, default_name in (
+        ("output", "--output-directory", "output"),
+        ("input", "--input-directory", "input"),
+        ("temp", "--temp-directory", "temp"),
+    ):
+        raw = _argv_option(argv, option_name)
+        path = Path(raw) if raw else base / default_name
+        if raw and not path.is_absolute():
+            path = base / path
+        roots[output_type] = path.resolve(strict=False)
+    return roots
+
+
+def _artifact_metadata(
+    descriptor: dict[str, str],
+    *,
+    storage_roots: dict[str, Path],
+    workspace: Workspace,
+    index: int,
+) -> dict[str, Any]:
+    output_type = descriptor["type"]
+    relative_parts = list(PurePosixPath(descriptor["subfolder"]).parts) if descriptor["subfolder"] else []
+    reference = "/".join([output_type, *relative_parts, descriptor["filename"]])
+    result: dict[str, Any] = {
+        "index": index,
+        "kind": descriptor["kind"],
+        "source": descriptor,
+        "comfyui_reference": reference,
+        "path": None,
+        "workspace_path": None,
+        "size": None,
+    }
+    root = storage_roots.get(output_type)
+    if root is None:
+        return result
+    candidate = root.joinpath(*relative_parts, descriptor["filename"]).resolve(strict=False)
+    try:
+        candidate.relative_to(root)
+    except ValueError as exc:
+        raise ToolError("COMFYUI_INVALID_RESPONSE", "ComfyUI artifact path escaped its declared storage root.") from exc
+    result["path"] = str(candidate)
+    try:
+        result["workspace_path"] = candidate.relative_to(workspace.root).as_posix()
+    except ValueError:
+        pass
+    try:
+        if candidate.is_file():
+            result["size"] = candidate.stat().st_size
+    except OSError:
+        pass
     return result
 
 
