@@ -7,7 +7,6 @@ import shutil
 import stat
 import subprocess
 import sys
-import tomllib
 from pathlib import Path, PurePosixPath
 from typing import Any
 from urllib.parse import urlsplit
@@ -524,14 +523,26 @@ def _project_release_version(root: Path) -> str:
     path = root / "pyproject.toml"
     _reject_links(root, path)
     try:
-        with path.open("rb") as stream:
-            raw = tomllib.load(stream)
-    except (OSError, tomllib.TOMLDecodeError) as exc:
+        if path.stat().st_size > 64 * 1024:
+            raise RuntimeError("pyproject.toml is unexpectedly large")
+        text = path.read_text(encoding="utf-8", errors="strict")
+    except (OSError, UnicodeError) as exc:
         raise RuntimeError(f"could not read project version from pyproject.toml: {exc}") from exc
-    version = raw.get("project", {}).get("version") if isinstance(raw.get("project"), dict) else None
-    if not isinstance(version, str) or not re.fullmatch(r"\d+\.\d+\.\d+", version):
-        raise RuntimeError("pyproject.toml project.version must be a stable numeric x.y.z version")
-    return version
+    in_project = False
+    versions: list[str] = []
+    for line in text.splitlines():
+        section = re.fullmatch(r"\s*\[([^\]]+)\]\s*(?:#.*)?", line)
+        if section:
+            in_project = section.group(1).strip() == "project"
+            continue
+        if not in_project:
+            continue
+        match = re.fullmatch(r'\s*version\s*=\s*"(\d+\.\d+\.\d+)"\s*(?:#.*)?', line)
+        if match:
+            versions.append(match.group(1))
+    if len(versions) != 1:
+        raise RuntimeError("pyproject.toml [project] must declare exactly one stable numeric version = \"x.y.z\"")
+    return versions[0]
 
 
 def _release_asset_paths(root: Path) -> tuple[Path, Path]:

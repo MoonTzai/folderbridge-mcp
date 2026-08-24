@@ -41,6 +41,13 @@ class I18nTests(unittest.TestCase):
         self.assertEqual(translate_text("工作区", "en"), "Workspace")
         self.assertEqual(translate_text("权限", "en"), "Permissions")
 
+    def test_close_action_is_not_translated_as_disabled_state(self) -> None:
+        self.assertEqual(translate_text("关闭", "en"), "Close")
+        self.assertEqual(
+            translate_text("服务：离线 · 自动启动已关闭", "en"),
+            "Service: offline · auto-start disabled",
+        )
+
     def test_all_launcher_chinese_literals_have_complete_english_rendering(self) -> None:
         uncovered: list[tuple[str, str]] = []
         for path in UI_SOURCE_FILES:

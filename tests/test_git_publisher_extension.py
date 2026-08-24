@@ -67,6 +67,7 @@ class GitPublisherManifestTests(unittest.TestCase):
         self.assertIn("owned_process_group_kwargs", plugin_text)
         self.assertIn("terminate_owned_process_tree", plugin_text)
         self.assertNotIn("subprocess.run(", plugin_text)
+        self.assertNotIn("tomllib", plugin_text)
 
     def test_release_version_and_assets_are_project_locked(self) -> None:
         plugin = load_plugin()

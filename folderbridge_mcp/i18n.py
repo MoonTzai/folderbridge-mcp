@@ -199,7 +199,7 @@ EN_TRANSLATIONS: dict[str, str] = {
     "无法保存自动启动设置：": "Unable to save auto-start setting: ",
     "ComfyUI 自动启动已": "ComfyUI auto-start is now ",
     "开启": "enabled",
-    "关闭": "disabled",
+    "关闭": "Close",
     "ComfyUI 尚未配置安装目录；自动启动会等待首次选择。请在右侧 Extensions 中选择 Portable 或源码安装根目录。": "ComfyUI has no install directory configured yet; auto-start will wait for the first selection. Choose the Portable or source install root in the Extensions sidebar.",
     "托管服务自动启动未执行：": "Managed-service auto-start did not run: ",
     " Extension 当前未加载；请确认已批准并启用该 Extension。": " Extension is not currently loaded; confirm it is approved and enabled.",

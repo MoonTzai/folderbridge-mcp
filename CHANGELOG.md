@@ -2,6 +2,11 @@
 
 All notable changes to FolderBridge MCP are documented here.
 
+## 0.8.5 — 2026-08-25
+
+- Fixed the English connection-guide close button: the action label `关闭` now renders as `Close` instead of the state word `disabled`. Auto-start/service state messages continue to use `disabled` where appropriate.
+- Added a regression test that distinguishes the close action from disabled-state translations.
+
 ## 0.8.4 — 2026-08-25
 
 - Updated bundled Git Publisher to 1.2.0 with a parameterless, project-locked `release` action. It publishes only the stable version declared in `pyproject.toml`, only from `main`, only when tracked files are clean and `origin/main` matches the current HEAD, and only with tag `v<version>` plus the fixed `release/windows-x64/FolderBridge.exe` and `.sha256` assets.
