@@ -2,6 +2,12 @@
 
 All notable changes to FolderBridge MCP are documented here.
 
+## 0.8.11 — 2026-08-26
+
+- Added a repository-declared packaging seam for globally authorized `package-windows` and `package-android`: Node-based workspaces may expose fixed `package:windows` / `package:android` scripts in `package.json`, which FolderBridge discovers dynamically and executes only through fixed `npm run <script>` argv.
+- Kept existing Windows PowerShell/PyInstaller and Android Gradle/Flutter discovery as compatibility fallbacks, so current projects continue to work while nonstandard repository layouts no longer need FolderBridge-specific directory hardcoding.
+- Unified npm-script capability discovery behind one helper shared by `test`, `build`, Windows packaging, and Android packaging, and added regression coverage proving both packaging capabilities are discoverable and that package script bodies are never copied into a shell command.
+
 ## 0.8.10 — 2026-08-25
 
 - Updated bundled Git Publisher to 1.3.1 with a generic `release-assets` action while preserving the existing parameterless FolderBridge-only `release` compatibility path. The generic action publishes only explicit regular files from the selected GitHub HTTPS workspace repository, uses GitHub-stable ASCII download names with optional user-facing display labels, requires the current branch to be fully pushed and tracked content clean, rejects tag movement/force push and credential-like paths, snapshots and SHA-256 verifies assets before remote mutation, verifies Release asset name/size/label plus Latest/tag postconditions, and runs long uploads as a host-owned two-hour Job.

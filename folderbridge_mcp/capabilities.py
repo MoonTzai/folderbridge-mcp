@@ -130,10 +130,17 @@ def run_capability(workspace: Path, name: str) -> dict[str, object]:
     return result
 
 
-def _test_task(root: Path) -> Task | None:
+def _npm_script_task(root: Path, script_name: str, task_name: str, timeout_seconds: int) -> Task | None:
     scripts = _package_json_scripts(root)
-    if "test" in scripts:
-        return Task("capability-test", ("npm", "run", "test"), 300)
+    if script_name not in scripts:
+        return None
+    return Task(task_name, ("npm", "run", script_name), timeout_seconds)
+
+
+def _test_task(root: Path) -> Task | None:
+    declared = _npm_script_task(root, "test", "capability-test", 300)
+    if declared is not None:
+        return declared
     tests = root / "tests"
     if _safe_directory(root, "tests") and any(
         path.is_file() and not path.is_symlink() for path in tests.glob("test_*.py")
@@ -149,13 +156,13 @@ def _test_task(root: Path) -> Task | None:
 
 
 def _build_task(root: Path) -> Task | None:
-    scripts = _package_json_scripts(root)
-    if "build" in scripts:
-        return Task("capability-build", ("npm", "run", "build"), 600)
-    return None
+    return _npm_script_task(root, "build", "capability-build", 600)
 
 
 def _windows_package_task(root: Path) -> Task | None:
+    declared = _npm_script_task(root, "package:windows", "capability-package-windows", 600)
+    if declared is not None:
+        return declared
     candidates = (
         "scripts/build_windows.ps1",
         "scripts/package_windows.ps1",
@@ -192,6 +199,10 @@ def _windows_package_task(root: Path) -> Task | None:
 
 
 def _android_package_task(root: Path) -> Task | None:
+    declared = _npm_script_task(root, "package:android", "capability-package-android", 900)
+    if declared is not None:
+        return declared
+
     wrapper_candidates = ("gradlew.bat", "android/gradlew.bat") if os.name == "nt" else ("gradlew", "android/gradlew")
     for relative in wrapper_candidates:
         if not _safe_file(root, relative):

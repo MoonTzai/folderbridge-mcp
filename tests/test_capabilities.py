@@ -177,6 +177,41 @@ class CapabilityTests(unittest.TestCase):
         self.assertEqual(by_name["build"]["provider"], "project-task")
         self.assertIn("npm", by_name["build"]["source"])
 
+    def test_declared_packaging_scripts_are_discovered_generically(self) -> None:
+        (self.root / "package.json").write_text(
+            '{"scripts":{"package:windows":"node scripts/package-windows.cjs","package:android":"node scripts/package-android.cjs"}}',
+            encoding="utf-8",
+        )
+        runtime = ToolRuntime(
+            self.root,
+            load_config(self.root),
+            capabilities=["package-windows", "package-android"],
+        )
+
+        info = runtime.call("server_info", {})["structuredContent"]
+        by_name = {item["name"]: item for item in info["capabilities"]}
+
+        self.assertTrue(by_name["package-windows"]["available"])
+        self.assertEqual(by_name["package-windows"]["provider"], "project-task")
+        self.assertIn("npm run package:windows", by_name["package-windows"]["source"])
+        self.assertTrue(by_name["package-android"]["available"])
+        self.assertEqual(by_name["package-android"]["provider"], "project-task")
+        self.assertIn("npm run package:android", by_name["package-android"]["source"])
+
+    def test_declared_packaging_scripts_use_fixed_npm_run_argv(self) -> None:
+        (self.root / "package.json").write_text(
+            '{"scripts":{"package:windows":"node scripts/package-windows.cjs --dangerous-looking-body","package:android":"node scripts/package-android.cjs --dangerous-looking-body"}}',
+            encoding="utf-8",
+        )
+
+        windows_task = capabilities_module._windows_package_task(self.root)
+        android_task = capabilities_module._android_package_task(self.root)
+
+        self.assertIsNotNone(windows_task)
+        self.assertEqual(windows_task.argv, ("npm", "run", "package:windows"))
+        self.assertIsNotNone(android_task)
+        self.assertEqual(android_task.argv, ("npm", "run", "package:android"))
+
     def test_git_push_rejects_unsafe_repository_local_helpers(self) -> None:
         git = shutil.which("git")
         if not git:
