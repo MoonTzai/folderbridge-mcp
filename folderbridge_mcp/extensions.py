@@ -904,7 +904,7 @@ def _worker_context_and_environment(
 ) -> tuple[dict[str, Any], dict[str, str]]:
     workspace_root = workspace.root if workspace is not None else None
     state_dir: str | None = None
-    if record.manifest.workspace_adapter.get("state") == "profile":
+    if "extension.state" in record.manifest.permissions:
         suffix = workspace_id(workspace_root) if workspace_root is not None else "global"
         state_path = extension_state_root() / record.manifest.extension_id / suffix
         try:

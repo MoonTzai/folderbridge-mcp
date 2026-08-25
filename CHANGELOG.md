@@ -2,6 +2,13 @@
 
 All notable changes to FolderBridge MCP are documented here.
 
+## 0.8.13 — 2026-08-26
+
+- Fixed Extension ABI state provisioning so declaring `extension.state` is sufficient for FolderBridge to create and inject `context.state_dir`, even when `workspace_adapter.mode=none` and `workspace_adapter.state=none`; plugins no longer need a fake profile adapter just to obtain private persistent state.
+- Preserved the permission boundary and isolation contract: extensions without `extension.state` receive `state_dir=null`, workspace-bound state remains isolated by extension/workspace ID, workspace-less actions use the extension's `global` state directory, and foreground/Job actions share the same context builder.
+- Clarified the public Extension specification and LLM authoring guidance, and added regression coverage for permission gating, real directory creation, workspace isolation, global state, profile-permission validation, and Job-mode parity.
+- Rebuilt the single-file Windows package and re-ran the packaged smoke test successfully as `folderbridge-mcp 0.8.13` before release.
+
 ## 0.8.12 — 2026-08-26
 
 - Added globally authorized `release-sync` as a repository-declared delivery handoff seam. Node-based workspaces may expose a fixed `release:sync` script in `package.json`; FolderBridge discovers it dynamically and executes only `npm run release:sync`, without exposing arbitrary command text or shell arguments through MCP.

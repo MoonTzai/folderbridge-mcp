@@ -12,7 +12,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from unittest import mock
 
-from folderbridge_mcp.config import load_config
+from folderbridge_mcp.config import load_config, workspace_id
 import folderbridge_mcp.extension_worker as extension_worker_module
 import folderbridge_mcp.extensions as extensions_module
 from folderbridge_mcp.extensions import (
@@ -493,6 +493,146 @@ class ExtensionTests(unittest.TestCase):
         self.assertTrue(result["state_dir"])
         self.assertEqual(result["extension_id"], "example")
         self.assertEqual(result["extension_action"], "echo")
+
+    def test_extension_state_permission_provides_state_dir_without_profile_adapter(self) -> None:
+        self.make_extension(
+            adapter={"mode": "none", "state": "none"},
+            permissions=["workspace.read", "extension.state"],
+        )
+        record = self.registry.get("example")
+        self.trust.approve(record, enabled=True)
+        state_root = self.base / "extension-state"
+        with mock.patch.object(extensions_module, "extension_state_root", return_value=state_root):
+            result = self.registry.run(
+                "example",
+                "echo",
+                {"value": "hello"},
+                workspace=Workspace(self.workspace_root),
+                read_only=True,
+            )
+
+        expected = state_root / "example" / workspace_id(self.workspace_root)
+        self.assertEqual(Path(result["state_dir"]), expected)
+        self.assertTrue(expected.is_dir())
+
+    def test_extension_without_state_permission_gets_no_state_dir(self) -> None:
+        self.make_extension(
+            adapter={"mode": "none", "state": "none"},
+            permissions=["workspace.read"],
+        )
+        record = self.registry.get("example")
+        self.trust.approve(record, enabled=True)
+        state_root = self.base / "extension-state"
+        with mock.patch.object(extensions_module, "extension_state_root", return_value=state_root):
+            result = self.registry.run(
+                "example",
+                "echo",
+                {"value": "hello"},
+                workspace=Workspace(self.workspace_root),
+                read_only=True,
+            )
+
+        self.assertIsNone(result["state_dir"])
+        self.assertFalse(state_root.exists())
+
+    def test_profile_adapter_state_cannot_bypass_extension_state_permission(self) -> None:
+        path = self.make_extension(
+            adapter={"mode": "none", "state": "profile"},
+            permissions=["workspace.read"],
+        )
+        with self.assertRaisesRegex(ValueError, "state=profile requires the extension.state permission"):
+            load_extension(path, bundled=False)
+
+    def test_extension_state_is_isolated_by_workspace(self) -> None:
+        self.make_extension(
+            adapter={"mode": "none", "state": "none"},
+            permissions=["workspace.read", "extension.state"],
+        )
+        record = self.registry.get("example")
+        self.trust.approve(record, enabled=True)
+        second_workspace_root = self.base / "workspace-two"
+        second_workspace_root.mkdir()
+        state_root = self.base / "extension-state"
+        with mock.patch.object(extensions_module, "extension_state_root", return_value=state_root):
+            first = self.registry.run(
+                "example",
+                "echo",
+                {"value": "first"},
+                workspace=Workspace(self.workspace_root),
+                read_only=True,
+            )
+            second = self.registry.run(
+                "example",
+                "echo",
+                {"value": "second"},
+                workspace=Workspace(second_workspace_root),
+                read_only=True,
+            )
+
+        first_expected = state_root / "example" / workspace_id(self.workspace_root)
+        second_expected = state_root / "example" / workspace_id(second_workspace_root)
+        self.assertEqual(Path(first["state_dir"]), first_expected)
+        self.assertEqual(Path(second["state_dir"]), second_expected)
+        self.assertNotEqual(first_expected, second_expected)
+        self.assertTrue(first_expected.is_dir())
+        self.assertTrue(second_expected.is_dir())
+
+    def test_extension_state_uses_global_profile_without_workspace(self) -> None:
+        path = self.make_extension(
+            adapter={"mode": "none", "state": "none"},
+            permissions=["extension.state"],
+        )
+        manifest_path = path / "folderbridge-extension.json"
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest["actions"]["echo"]["requires_workspace"] = False
+        manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+        record = self.registry.get("example")
+        self.trust.approve(record, enabled=True)
+        state_root = self.base / "extension-state"
+        with mock.patch.object(extensions_module, "extension_state_root", return_value=state_root):
+            result = self.registry.run(
+                "example",
+                "echo",
+                {"value": "hello"},
+                workspace=None,
+                read_only=True,
+            )
+
+        expected = state_root / "example" / "global"
+        self.assertEqual(Path(result["state_dir"]), expected)
+        self.assertTrue(expected.is_dir())
+
+    def test_job_mode_uses_same_extension_state_contract(self) -> None:
+        path = self.make_extension(
+            adapter={"mode": "none", "state": "none"},
+            permissions=["workspace.read", "extension.state"],
+        )
+        manifest_path = path / "folderbridge-extension.json"
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest["actions"]["echo"]["run_mode"] = "job"
+        manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+        record = self.registry.get("example")
+        self.trust.approve(record, enabled=True)
+        state_root = self.base / "extension-state"
+        with mock.patch.object(extensions_module, "extension_state_root", return_value=state_root):
+            started = self.registry.run(
+                "example",
+                "echo",
+                {"value": "hello"},
+                workspace=Workspace(self.workspace_root),
+                read_only=True,
+            )
+
+        deadline = time.monotonic() + 3
+        status = self.registry.job_status(started["job_id"], workspace=Workspace(self.workspace_root))
+        while status["status"] == "running" and time.monotonic() < deadline:
+            time.sleep(0.02)
+            status = self.registry.job_status(started["job_id"], workspace=Workspace(self.workspace_root))
+
+        expected = state_root / "example" / workspace_id(self.workspace_root)
+        self.assertEqual(status["status"], "succeeded")
+        self.assertEqual(Path(status["result"]["state_dir"]), expected)
+        self.assertTrue(expected.is_dir())
 
     def test_action_schema_rejects_unknown_fields_before_worker_runs(self) -> None:
         self.make_extension()

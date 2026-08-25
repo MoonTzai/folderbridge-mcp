@@ -80,7 +80,7 @@ ABI v1 accepts precise permission contracts only:
 - `process.execute:<basename>`
 - `environment.inherit:<UPPERCASE_NAME>`
 
-There is no wildcard shell or wildcard network permission. `network.outbound:https` is an explicit authorization-contract declaration for plugins that need external HTTPS APIs; Extension permissions are not a kernel network sandbox. `environment.inherit:<UPPERCASE_NAME>` copies only that exact variable into the otherwise cleaned worker environment. `CONTROL_PLANE_API_KEY`, FolderBridge/control-plane variables, PATH/runtime bootstrap variables, and other reserved names cannot be inherited. Values inherited through variable names containing key/token/secret/password/passwd/auth are treated as secrets and recursively redacted from worker results, worker logs, surfaced stderr, and errors. A dynamic workspace adapter requires `workspace.adapter`; profile state requires `extension.state`.
+There is no wildcard shell or wildcard network permission. `network.outbound:https` is an explicit authorization-contract declaration for plugins that need external HTTPS APIs; Extension permissions are not a kernel network sandbox. `environment.inherit:<UPPERCASE_NAME>` copies only that exact variable into the otherwise cleaned worker environment. `CONTROL_PLANE_API_KEY`, FolderBridge/control-plane variables, PATH/runtime bootstrap variables, and other reserved names cannot be inherited. Values inherited through variable names containing key/token/secret/password/passwd/auth are treated as secrets and recursively redacted from worker results, worker logs, surfaced stderr, and errors. A dynamic workspace adapter requires `workspace.adapter`; `workspace_adapter.state=profile` requires `extension.state`. Declaring `extension.state` is the authorization that makes FolderBridge provision `context.state_dir`; the adapter state field does not independently grant or withhold that directory.
 
 The permission list is part of the approval identity. External extensions are approved against the SHA-256 of the complete extension tree plus the exact permissions. If any file or permission changes, the old approval becomes stale and execution is blocked until the user approves the new hash. At execution time the worker copies the hash-covered tree into a private temporary snapshot, verifies that snapshot against the host-pinned hash, and imports/runs only from the verified snapshot so the checked bytes and executed bytes stay aligned.
 
@@ -104,7 +104,7 @@ def handle(action, params, context):
 - `permissions`
 - `workspace_root` or `null`
 - `workspace_read_only`
-- `state_dir` or `null`
+- `state_dir` or `null` — non-null whenever `extension.state` is declared; FolderBridge creates `<extension-state-root>/<extension_id>/<workspace_id>/` for workspace-bound calls and `<extension-state-root>/<extension_id>/global/` when no workspace is selected
 - `workspace_adapter`
 
 The return value must be a strict JSON object. Non-standard numeric constants such as `NaN` and `Infinity` are rejected at manifest, request, response, and worker serialization boundaries. As with built-in tools, a result may contain `_content` with MCP content items; this is how the bundled ComfyUI extension returns images. A result may also contain `workspace_artifacts`, either workspace-relative strings or `{path,label,kind}` objects. FolderBridge re-resolves each declared artifact through workspace path policy and replaces it with trusted relative-path, byte-size, and SHA-256 metadata before exposing the result.
@@ -126,7 +126,7 @@ Extensions must not require installation-time edits to every workspace's `.folde
 }
 ```
 
-FolderBridge evaluates these patterns every time the extension registry is queried or an action runs. A project can therefore gain a new build script months after the workspace was added and immediately become applicable. Plugin state belongs in `context.state_dir` by default, outside the repository.
+FolderBridge evaluates these patterns every time the extension registry is queried or an action runs. A project can therefore gain a new build script months after the workspace was added and immediately become applicable. Plugin persistent state belongs in `context.state_dir` by default, outside the repository. Request `extension.state` whenever that directory is needed, even when `workspace_adapter.mode=none` and `workspace_adapter.state=none`; `state=profile` remains an adapter declaration that requires the same permission, not the switch that provisions storage.
 
 ## Action granularity: avoid aggregate public actions
 

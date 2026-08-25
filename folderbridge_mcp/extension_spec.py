@@ -17,7 +17,7 @@ EXTENSION_FORMAT_SUMMARY = """FolderBridge Extension ABI v1
 5. v1 插件在独立子进程运行，使用清理环境、有界 stdin/stdout/stderr。前台 action 与 Job action 都有 FolderBridge-owned 进程树；超时/取消/退出会终止整棵进程树。timeout_seconds 可为 0..86400，0 表示不因超时自动终止（显式取消/程序退出仍会清理 owned 进程）。
 6. 不允许任意 shell 或通配网络权限。权限必须是 FolderBridge 认识的精确权限，例如 workspace.read、workspace.write、workspace.adapter、extension.state、network.loopback:127.0.0.1:8188、network.outbound:https、process.execute:node.exe、environment.inherit:OPENAI_API_KEY、git.commit-selected-files、git.push-current-branch、github.web-auth。`network.outbound:https` 是用户可见的授权契约，不是内核网络沙箱。
 7. 不要靠安装时修改每个工作区的 .folderbridge.json。项目适配必须优先使用 workspace_adapter.mode=dynamic 和 detect.any_of/all_of；FolderBridge 会在每次调用时重新检测，因此项目后来新增脚本也能自动适配。
-8. 插件持久状态优先使用 context.state_dir（FolderBridge 用户配置目录），不要污染仓库。确实需要写工作区时必须声明 workspace.write，并由 action 参数明确触发。
+8. 插件持久状态优先使用 context.state_dir（FolderBridge 用户配置目录），不要污染仓库。声明 extension.state 即授权 FolderBridge 提供并创建该目录：有工作区时按 extension_id/workspace_id 隔离，无工作区时使用该扩展的 global 状态目录；workspace_adapter.state=profile 需要 extension.state，但不是 state_dir 的开关。确实需要写工作区时必须声明 workspace.write，并由 action 参数明确触发。
 9. action 的 input_schema 使用受限 JSON Schema 子集：type/properties/required/additionalProperties/items/enum/minimum/maximum/minLength/maxLength/minItems/maxItems/description/default。action 还可声明 `run_mode: "foreground"|"job"` 与可选 `timeout_seconds`；Job 模式通过 extension 的 `job_status` / `job_cancel` 管理。
 10. action.authorization=global 表示侧栏一次批准并启用后全局可用；authorization=none 只允许 bundled 插件的只读状态/发现动作。
 11. ABI v1 的 plugin.py 应只依赖 FolderBridge 已打包模块与 Python 标准库；不要假设用户能在单文件 EXE 内 pip 安装第三方包。额外软件能力优先通过精确的本地 HTTP API 或 process.execute:<程序名> 调用。若需要继承宿主环境变量，必须逐个声明 `environment.inherit:NAME`；`CONTROL_PLANE_API_KEY` 与 FolderBridge/control-plane 内部变量禁止继承。
@@ -77,7 +77,7 @@ EXTENSION_LLM_PROMPT = """你正在为 FolderBridge MCP 编写 Extension。请�
 4. 输出至少包含：folderbridge-extension.json、plugin.py、针对 manifest/动作/错误边界的单元测试，以及简短 README。
 5. manifest.schema_version 必须是 1。entrypoint 必须位于插件目录内并定义 handle(action, params, context) -> dict。
 6. 只能使用 FolderBridge 已允许的精确权限。禁止任意 shell、通配网络权限或隐藏副作用。需要本地 HTTP 时声明具体 network.loopback:127.0.0.1:<port>；需要外部 HTTPS API 时声明 network.outbound:https；需要外部程序时声明具体 process.execute:<basename>；需要宿主环境变量时逐个声明 environment.inherit:NAME。禁止请求 CONTROL_PLANE_API_KEY 或 FolderBridge/control-plane 内部变量。
-7. 不要在安装插件时修改或生成每个工作区的 .folderbridge.json task。若插件需要识别项目能力，使用 workspace_adapter.mode=dynamic + detect.any_of/all_of；FolderBridge 会在调用时动态重新检测。若需要持久状态，优先使用 context.state_dir，而不是往仓库塞内部状态。
+7. 不要在安装插件时修改或生成每个工作区的 .folderbridge.json task。若插件需要识别项目能力，使用 workspace_adapter.mode=dynamic + detect.any_of/all_of；FolderBridge 会在调用时动态重新检测。若需要持久状态，声明 extension.state 并使用 context.state_dir，而不是往仓库塞内部状态；即使 workspace_adapter.mode/state 都是 none，只要声明了 extension.state，FolderBridge 也会提供该目录。
 8. 插件代码在独立子进程运行，但这不是完整 OS 沙箱。不要声称权限声明能阻止恶意 Python 绕过；对不可信代码应建议 VM/容器。
 9. action.input_schema 要尽量精确，拒绝未知参数；对路径使用 workspace-relative 参数语义，不接受任意绝对路径，除非 FolderBridge ABI 未来明确提供这种权限。
 10. action.authorization 默认使用 global。只有随 FolderBridge 打包的 bundled 插件，且动作真正只读/无危险副作用时，才可以建议 authorization=none。
