@@ -19,6 +19,7 @@ EXECUTION_CAPABILITY_NAMES = (
     "build",
     "package-windows",
     "package-android",
+    "release-sync",
     "git-push",
 )
 
@@ -29,6 +30,7 @@ CAPABILITY_LABELS = {
     "build": "项目构建",
     "package-windows": "封装 Windows EXE",
     "package-android": "封装 Android APK",
+    "release-sync": "同步发布交付",
     "git-push": "推送 GitHub",
 }
 
@@ -62,6 +64,7 @@ def discover_capabilities(workspace: Path) -> dict[str, dict[str, str]]:
         "build": _build_task,
         "package-windows": _windows_package_task,
         "package-android": _android_package_task,
+        "release-sync": _release_sync_task,
     }
     for name, builder in builders.items():
         task = builder(root)
@@ -108,6 +111,7 @@ def run_capability(workspace: Path, name: str) -> dict[str, object]:
         "build": _build_task,
         "package-windows": _windows_package_task,
         "package-android": _android_package_task,
+        "release-sync": _release_sync_task,
     }
     task = builders[name](root)
     if task is None:
@@ -196,6 +200,10 @@ def _windows_package_task(root: Path) -> Task | None:
             600,
         )
     return None
+
+
+def _release_sync_task(root: Path) -> Task | None:
+    return _npm_script_task(root, "release:sync", "capability-release-sync", 900)
 
 
 def _android_package_task(root: Path) -> Task | None:

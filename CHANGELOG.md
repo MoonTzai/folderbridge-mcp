@@ -2,6 +2,12 @@
 
 All notable changes to FolderBridge MCP are documented here.
 
+## 0.8.12 — 2026-08-26
+
+- Added globally authorized `release-sync` as a repository-declared delivery handoff seam. Node-based workspaces may expose a fixed `release:sync` script in `package.json`; FolderBridge discovers it dynamically and executes only `npm run release:sync`, without exposing arbitrary command text or shell arguments through MCP.
+- Kept release semantics inside each repository rather than teaching FolderBridge project-specific paths. Development-to-release-repository bridges, staging-folder handoffs, and similar delivery syncs can now reuse one capability while retaining repository-owned validation and safety rules.
+- Added regression coverage for canonical capability ordering, dynamic discovery, fixed npm argv, GUI/i18n exposure, and preservation of existing test/build/package/git-push behavior.
+
 ## 0.8.11 — 2026-08-26
 
 - Added a repository-declared packaging seam for globally authorized `package-windows` and `package-android`: Node-based workspaces may expose fixed `package:windows` / `package:android` scripts in `package.json`, which FolderBridge discovers dynamically and executes only through fixed `npm run <script>` argv.

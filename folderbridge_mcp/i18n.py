@@ -13,6 +13,7 @@ _EXACT_ONLY_KEYS = {
     "项目构建",
     "封装 Windows EXE",
     "封装 Android APK",
+    "同步发布交付",
     "推送 GitHub",
 }
 
@@ -271,7 +272,7 @@ EN_TRANSLATIONS: dict[str, str] = {
     "1. 文件夹列表：逐个添加明确的工作区，最多 8 个；重复或父子重叠目录会被拒绝。全局权限首次使用保持“只读（推荐）”。": "1. Folder list: add explicit workspaces one by one, up to 8. Duplicate or overlapping parent/child roots are rejected. Keep global access at Read-only (recommended) for first use.",
     "2. tunnel-client：只选择完整包中准确名为 tunnel-client.exe 的主程序；不要选 tunnel-client-runtime-*。Profile 保持 folderbridge 即可。": "2. tunnel-client: choose only the main program named exactly tunnel-client.exe from the complete package; do not select tunnel-client-runtime-*. Keep Profile as folderbridge.",
     "3. Tunnel ID：粘贴 Platform 中 tunnel_ 开头的 ID；Runtime API Key：粘贴控制面 Key（仅留内存，不保存）。": "3. Tunnel ID: paste the tunnel_ ID from Platform. Runtime API Key: paste the control-plane key; it stays in memory and is not saved.",
-    "4. 按需勾选一次“全局预授权”（测试/构建/EXE/APK/GitHub），以后所有工作区继承；插件授权与本地 ComfyUI 在右侧 Extensions 单独管理。“高级：自定义任务”通常保持关闭。点击“启动连接”，等待顶部状态变成“运行中”。": "4. Enable Global pre-authorization only as needed (test/build/EXE/APK/GitHub); future workspaces inherit it. Manage Extension authorization and local ComfyUI separately in the Extensions sidebar. Advanced custom tasks should normally stay off. Click Start connection and wait for the top status to become Running.",
+    "4. 按需勾选一次“全局预授权”（测试/构建/EXE/APK/发布同步/GitHub），以后所有工作区继承；插件授权与本地 ComfyUI 在右侧 Extensions 单独管理。“高级：自定义任务”通常保持关闭。点击“启动连接”，等待顶部状态变成“运行中”。": "4. Enable Global pre-authorization only as needed (test/build/EXE/APK/release sync/GitHub); future workspaces inherit it. Manage Extension authorization and local ComfyUI separately in the Extensions sidebar. Advanced custom tasks should normally stay off. Click Start connection and wait for the top status to become Running.",
     "5. 使用期间必须保持 FolderBridge 运行；若失败，点“诊断”并查看脱敏日志。": "5. Keep FolderBridge running while in use. If it fails, click Diagnose and inspect the redacted log.",
     "1. 先在 ChatGPT 设置中启用开发者模式；团队工作区可能需要管理员授权。": "1. Enable developer mode in ChatGPT settings first; team workspaces may require administrator approval.",
     "2. 打开 Plugins，点击 + 创建 App。Connection（连接方式）选择“隧道 / Tunnel”。": "2. Open Plugins and click + to create an App. Set Connection to Tunnel.",
@@ -358,6 +359,7 @@ EN_TRANSLATIONS: dict[str, str] = {
     "项目构建": "Build project",
     "封装 Windows EXE": "Package Windows EXE",
     "封装 Android APK": "Package Android APK",
+    "同步发布交付": "Sync release deliverables",
     "推送 GitHub": "Push to GitHub",
 }
 

@@ -212,6 +212,23 @@ class CapabilityTests(unittest.TestCase):
         self.assertIsNotNone(android_task)
         self.assertEqual(android_task.argv, ("npm", "run", "package:android"))
 
+    def test_declared_release_sync_script_is_discovered_and_uses_fixed_npm_run_argv(self) -> None:
+        (self.root / "package.json").write_text(
+            '{"scripts":{"release:sync":"node scripts/release-sync.cjs --project-specific-body"}}',
+            encoding="utf-8",
+        )
+        runtime = ToolRuntime(self.root, load_config(self.root), capabilities=["release-sync"])
+
+        info = runtime.call("server_info", {})["structuredContent"]
+        by_name = {item["name"]: item for item in info["capabilities"]}
+
+        self.assertTrue(by_name["release-sync"]["available"])
+        self.assertEqual(by_name["release-sync"]["provider"], "project-task")
+        self.assertIn("npm run release:sync", by_name["release-sync"]["source"])
+        task = capabilities_module._release_sync_task(self.root)
+        self.assertIsNotNone(task)
+        self.assertEqual(task.argv, ("npm", "run", "release:sync"))
+
     def test_git_push_rejects_unsafe_repository_local_helpers(self) -> None:
         git = shutil.which("git")
         if not git:
@@ -252,8 +269,8 @@ class CapabilityTests(unittest.TestCase):
 
     def test_capability_names_are_canonical_and_reject_unknown_values(self) -> None:
         self.assertEqual(
-            normalize_capability_names(["git-push", "test", "package-windows"]),
-            ("test", "package-windows", "git-push"),
+            normalize_capability_names(["git-push", "release-sync", "test", "package-windows"]),
+            ("test", "package-windows", "release-sync", "git-push"),
         )
         with self.assertRaises(ValueError):
             normalize_capability_names(["shell"])
