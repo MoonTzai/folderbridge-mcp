@@ -19,7 +19,7 @@ EXPECTED_ENGINEERING_SKILLS = {
     "code-review",
     "implement",
 }
-EXPECTED_EXTENSION_VERSIONS = {"git-publisher": "1.3.0", "office": "1.1.0"}
+EXPECTED_EXTENSION_VERSIONS = {"git-publisher": "1.3.1", "office": "1.1.0"}
 
 
 def _project_version() -> str:
@@ -110,6 +110,14 @@ def verify(executable: Path) -> dict[str, Any]:
         raise RuntimeError("git-publisher generic release-assets action is missing")
     if generic_release.get("run_mode") != "job" or generic_release.get("timeout_seconds") != 7200:
         raise RuntimeError("git-publisher release-assets must be a two-hour host-owned Job")
+    generic_schema = generic_release.get("input_schema")
+    asset_properties = (
+        generic_schema.get("properties", {}).get("assets", {}).get("items", {}).get("properties", {})
+        if isinstance(generic_schema, dict)
+        else {}
+    )
+    if "label" not in asset_properties:
+        raise RuntimeError("git-publisher release-assets display-label contract is missing")
 
     skill_catalog = _json(executable, "skills", "--json")
     packs = skill_catalog.get("packs")

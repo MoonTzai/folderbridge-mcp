@@ -48,7 +48,7 @@ class GitPublisherReleaseAssetValidationTests(unittest.TestCase):
         git(root, "commit", "-m", "initial")
         return temp, root
 
-    def test_generic_release_asset_allows_generated_file_and_friendly_name(self) -> None:
+    def test_generic_release_asset_allows_generated_file_name_and_display_label(self) -> None:
         plugin = load_plugin()
         temp, root = self.make_repo()
         self.addCleanup(temp.cleanup)
@@ -59,12 +59,13 @@ class GitPublisherReleaseAssetValidationTests(unittest.TestCase):
 
         assets = plugin._clean_release_assets(
             root,
-            [{"path": "dist/app.exe", "name": "App-v1.2.3（Windows版）.exe"}],
+            [{"path": "dist/app.exe", "name": "App-Windows-v1.2.3.exe", "label": "Windows版"}],
         )
 
         self.assertEqual(len(assets), 1)
         self.assertEqual(assets[0]["path"], "dist/app.exe")
-        self.assertEqual(assets[0]["name"], "App-v1.2.3（Windows版）.exe")
+        self.assertEqual(assets[0]["name"], "App-Windows-v1.2.3.exe")
+        self.assertEqual(assets[0]["label"], "Windows版")
         self.assertEqual(assets[0]["size"], len(b"artifact"))
         self.assertEqual(len(assets[0]["sha256"]), 64)
 
@@ -98,7 +99,7 @@ class GitPublisherReleaseAssetValidationTests(unittest.TestCase):
         self.addCleanup(temp.cleanup)
         (root / "app.bin").write_bytes(b"x")
 
-        for bad in ("../app.bin", "nested/app.bin", "nested\\app.bin", "bad?.bin", "asset#label.bin", "asset[1].bin", "CON"):
+        for bad in ("../app.bin", "nested/app.bin", "nested\\app.bin", "bad?.bin", "asset#label.bin", "asset[1].bin", "中文.bin", "CON"):
             with self.subTest(name=bad):
                 with self.assertRaises(RuntimeError):
                     plugin._clean_release_assets(root, [{"path": "app.bin", "name": bad}])
@@ -193,7 +194,7 @@ class GitPublisherReleaseAssetValidationTests(unittest.TestCase):
                 return subprocess.CompletedProcess(
                     [],
                     0,
-                    b'{"tagName":"v1.2.3","url":"https://github.com/example/folderbridge-test/releases/tag/v1.2.3","assets":[{"name":"artifact.bin","size":6}]}',
+                    b'{"tagName":"v1.2.3","url":"https://github.com/example/folderbridge-test/releases/tag/v1.2.3","assets":[{"name":"artifact.bin","label":"Windows\\u7248","size":6}]}',
                     b"",
                 )
             if args[:2] == ("repo", "view"):
@@ -215,13 +216,14 @@ class GitPublisherReleaseAssetValidationTests(unittest.TestCase):
                 root,
                 "v1.2.3",
                 "Demo v1.2.3",
-                [{"path": "artifact.bin"}],
+                [{"path": "artifact.bin", "label": "Windows版"}],
                 latest=False,
             )
 
         create = next(args for args in calls if args[:2] == ("release", "create"))
         self.assertIn("--latest=false", create)
         self.assertNotIn("--latest", create)
+        self.assertTrue(any(arg.endswith("artifact.bin#Windows版") for arg in create))
 
     def test_latest_postcondition_rejects_mismatch(self) -> None:
         plugin = load_plugin()

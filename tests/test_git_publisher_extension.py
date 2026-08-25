@@ -39,7 +39,7 @@ class GitPublisherManifestTests(unittest.TestCase):
     def test_manifest_is_explicit_and_does_not_accept_tokens(self) -> None:
         record = load_extension(EXT_DIR, bundled=True)
         self.assertEqual(record.manifest.extension_id, "git-publisher")
-        self.assertEqual(record.manifest.version, "1.3.0")
+        self.assertEqual(record.manifest.version, "1.3.1")
         self.assertEqual(set(record.manifest.actions), {"status", "connect", "commit", "push", "release", "release-assets"})
         self.assertTrue(record.manifest.actions["status"].read_only)
         self.assertEqual(record.manifest.actions["status"].authorization, "none")
@@ -69,7 +69,8 @@ class GitPublisherManifestTests(unittest.TestCase):
         self.assertEqual(record.manifest.actions["release-assets"].timeout_seconds, 7200)
         asset_schema = release_assets_schema["properties"]["assets"]["items"]
         self.assertEqual(asset_schema["required"], ["path"])
-        self.assertEqual(set(asset_schema["properties"]), {"path", "name"})
+        self.assertEqual(set(asset_schema["properties"]), {"path", "name", "label"})
+        self.assertEqual(asset_schema["properties"]["label"]["maxLength"], 128)
         plugin = load_plugin()
         self.assertEqual(plugin.MAX_COMMIT_FILE_BYTES, 100 * 1024 * 1024)
         plugin_text = (EXT_DIR / "plugin.py").read_text(encoding="utf-8")

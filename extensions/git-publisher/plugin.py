@@ -40,7 +40,7 @@ WINDOWS_RESERVED_NAMES = {
     *(f"COM{index}" for index in range(1, 10)),
     *(f"LPT{index}" for index in range(1, 10)),
 }
-INVALID_RELEASE_NAME_RE = re.compile(r'[<>:"/\\|?*#\[\]\x00-\x1f]')
+INVALID_RELEASE_NAME_RE = re.compile(r'[^A-Za-z0-9._+-]')
 TOKEN_RE = re.compile(r"(?:github_pat_[A-Za-z0-9_]+|gh[pousr]_[A-Za-z0-9]+)")
 URL_CREDENTIAL_RE = re.compile(r"(https://)[^/@\s]+@", re.IGNORECASE)
 BRANCH_RE = re.compile(r"^[A-Za-z0-9._/-]{1,240}$")
@@ -616,12 +616,22 @@ def _clean_release_asset_name(raw: Any, default: str) -> str:
     name = default if raw is None else raw
     if not isinstance(name, str) or not name or name != name.strip() or len(name) > 255:
         raise RuntimeError("Release asset name must be a non-empty filename of at most 255 characters")
-    if name in {".", ".."} or INVALID_RELEASE_NAME_RE.search(name) or name.endswith((".", " ")):
-        raise RuntimeError("Release asset name must be a plain safe filename, not a path")
+    if name in {".", ".."} or INVALID_RELEASE_NAME_RE.search(name) or name.endswith("."):
+        raise RuntimeError("Release asset name must use GitHub-stable ASCII filename characters only")
     stem = name.split(".", 1)[0].upper()
     if stem in WINDOWS_RESERVED_NAMES:
         raise RuntimeError("Release asset name uses a reserved Windows filename")
     return name
+
+
+def _clean_release_asset_label(raw: Any) -> str | None:
+    if raw is None:
+        return None
+    if not isinstance(raw, str) or not raw.strip() or raw != raw.strip() or len(raw) > 128:
+        raise RuntimeError("Release asset label must be a non-empty trimmed string of at most 128 characters")
+    if any(char in raw for char in "\r\n\x00"):
+        raise RuntimeError("Release asset label must be one line")
+    return raw
 
 
 def _clean_release_assets(root: Path, raw_assets: Any) -> list[dict[str, Any]]:
@@ -633,8 +643,8 @@ def _clean_release_assets(root: Path, raw_assets: Any) -> list[dict[str, Any]]:
     seen_paths: set[str] = set()
     seen_names: set[str] = set()
     for raw in raw_assets:
-        if not isinstance(raw, dict) or set(raw) - {"path", "name"} or "path" not in raw:
-            raise RuntimeError("each Release asset must contain path and optional name only")
+        if not isinstance(raw, dict) or set(raw) - {"path", "name", "label"} or "path" not in raw:
+            raise RuntimeError("each Release asset must contain path plus optional name/label only")
         value = raw.get("path")
         if not isinstance(value, str) or not value or "\x00" in value or "\\" in value:
             raise RuntimeError("Release asset paths must be non-empty POSIX-style workspace-relative strings")
@@ -661,6 +671,7 @@ def _clean_release_assets(root: Path, raw_assets: Any) -> list[dict[str, Any]]:
             raise RuntimeError(f"Release asset exceeds the {MAX_RELEASE_ASSET_BYTES}-byte safety limit")
         normalized = resolved.relative_to(root).as_posix()
         name = _clean_release_asset_name(raw.get("name"), resolved.name)
+        label = _clean_release_asset_label(raw.get("label"))
         path_key = normalized.casefold()
         name_key = name.casefold()
         if path_key in seen_paths:
@@ -672,6 +683,7 @@ def _clean_release_assets(root: Path, raw_assets: Any) -> list[dict[str, Any]]:
         cleaned.append({
             "path": normalized,
             "name": name,
+            "label": label,
             "size": size,
             "sha256": _sha256_file(resolved),
         })
@@ -756,7 +768,7 @@ def _prepare_release_upload_paths(root: Path, assets: list[dict[str, Any]], temp
         shutil.copyfile(resolved, target)
         if target.stat().st_size != asset["size"] or _sha256_file(target) != asset["sha256"]:
             raise RuntimeError(f"temporary Release asset snapshot verification failed: {asset['name']}")
-        uploads.append(str(target))
+        uploads.append(str(target) + ("#" + asset["label"] if asset.get("label") else ""))
     return uploads
 
 
@@ -856,6 +868,8 @@ def _release_assets(
             raise RuntimeError(f"GitHub Release asset missing after upload: {asset['name']}")
         if remote_asset.get("size") != asset["size"]:
             raise RuntimeError(f"GitHub Release asset size mismatch after upload: {asset['name']}")
+        if asset.get("label") is not None and remote_asset.get("label") != asset["label"]:
+            raise RuntimeError(f"GitHub Release asset label mismatch after upload: {asset['name']}")
     _verify_release_latest(root, repo_name, tag, latest, token)
     remote_target, _ = _remote_tag_target(root, tag)
     if remote_target != head:
