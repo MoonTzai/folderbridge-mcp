@@ -7,6 +7,7 @@ All notable changes to FolderBridge MCP are documented here.
 - Added a repository-declared packaging seam for globally authorized `package-windows` and `package-android`: Node-based workspaces may expose fixed `package:windows` / `package:android` scripts in `package.json`, which FolderBridge discovers dynamically and executes only through fixed `npm run <script>` argv.
 - Kept existing Windows PowerShell/PyInstaller and Android Gradle/Flutter discovery as compatibility fallbacks, so current projects continue to work while nonstandard repository layouts no longer need FolderBridge-specific directory hardcoding.
 - Unified npm-script capability discovery behind one helper shared by `test`, `build`, Windows packaging, and Android packaging, and added regression coverage proving both packaging capabilities are discoverable and that package script bodies are never copied into a shell command.
+- Rebuilt the single-file Windows package and re-ran the packaged smoke test successfully as `folderbridge-mcp 0.8.11` before release.
 
 ## 0.8.10 — 2026-08-25
 
