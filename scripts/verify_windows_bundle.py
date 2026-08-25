@@ -19,7 +19,7 @@ EXPECTED_ENGINEERING_SKILLS = {
     "code-review",
     "implement",
 }
-EXPECTED_EXTENSION_VERSIONS = {"git-publisher": "1.2.1", "office": "1.1.0"}
+EXPECTED_EXTENSION_VERSIONS = {"git-publisher": "1.3.0", "office": "1.1.0"}
 
 
 def _project_version() -> str:
@@ -89,6 +89,27 @@ def verify(executable: Path) -> dict[str, Any]:
             raise RuntimeError(
                 f"{extension_id} version mismatch: expected {expected_version_value}, got {actual}"
             )
+
+    publisher = extension_by_id.get("git-publisher")
+    publisher_actions = publisher.get("actions") if isinstance(publisher, dict) else None
+    if not isinstance(publisher_actions, list):
+        raise RuntimeError("git-publisher bundled action metadata is missing")
+    publisher_action_by_name = {
+        str(item.get("name")): item
+        for item in publisher_actions
+        if isinstance(item, dict) and isinstance(item.get("name"), str)
+    }
+    legacy_release = publisher_action_by_name.get("release")
+    generic_release = publisher_action_by_name.get("release-assets")
+    if not isinstance(legacy_release, dict):
+        raise RuntimeError("git-publisher compatibility release action is missing")
+    legacy_schema = legacy_release.get("input_schema")
+    if not isinstance(legacy_schema, dict) or legacy_schema.get("properties") != {}:
+        raise RuntimeError("git-publisher compatibility release action is no longer parameterless")
+    if not isinstance(generic_release, dict):
+        raise RuntimeError("git-publisher generic release-assets action is missing")
+    if generic_release.get("run_mode") != "job" or generic_release.get("timeout_seconds") != 7200:
+        raise RuntimeError("git-publisher release-assets must be a two-hour host-owned Job")
 
     skill_catalog = _json(executable, "skills", "--json")
     packs = skill_catalog.get("packs")

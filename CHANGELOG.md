@@ -4,6 +4,8 @@ All notable changes to FolderBridge MCP are documented here.
 
 ## 0.8.10 — 2026-08-25
 
+- Updated bundled Git Publisher to 1.3.0 with a generic `release-assets` action while preserving the existing parameterless FolderBridge-only `release` compatibility path. The generic action publishes only explicit regular files from the selected GitHub HTTPS workspace repository, supports safe Release download names, requires the current branch to be fully pushed and tracked content clean, rejects tag movement/force push and credential-like paths, snapshots and SHA-256 verifies assets before remote mutation, verifies Release assets/Latest/tag postconditions, and runs long uploads as a host-owned two-hour Job.
+- Updated the Windows bundle verifier and public Extension documentation to require/report Git Publisher 1.3.0 and its generic Release contract.
 - Added bounded ComfyUI API-workflow preflight for supported dynamic inputs. The incident case `SaveVideo.codec={"codec":"auto"}` is now rejected before `/prompt`, while the correct API form `codec="auto"` remains accepted and submitted.
 - Completed host-owned ComfyUI job cancellation: FolderBridge passes a private cancellation token into the isolated worker, the bundled plugin watches it independently of history polling, and cancellation/timeout targets only the submitted ComfyUI `prompt_id` through `/api/jobs/{id}/cancel` before any bounded worker force-kill fallback.
 - Removed the legacy `/interrupt` cancellation fallback because it cannot guarantee prompt-scoped cancellation and could interrupt an unrelated ComfyUI GUI/job workload. If targeted cancellation is unavailable, FolderBridge fails closed and only reaps its own worker.

@@ -40,7 +40,7 @@ FolderBridge MCP 是一个零第三方依赖的 Python MCP 服务器和桌面启
 - **窗口按真实内容自适应并支持折叠：** Tk 完成布局后，启动器会按页面实际请求尺寸扩大窗口，最多占显示器 94%；“本地工作区与权限”“OpenAI Secure MCP Tunnel”“运行日志”三个区域都可单独展开/收起，顶部还提供“全部展开 / 全部折叠”。内容全部放得下时主滚动条自动隐藏，只有可见内容超出可用高度才显示；DPI 改变、区域折叠或打开/关闭 Extensions 侧栏都会重新计算。
 - **托管服务状态实时刷新：** Extensions 侧栏打开时，每 2 秒重新检测一次 ComfyUI 托管状态；在线显示绿色，离线/未配置显示红色，检测中/启动中使用中性色。状态未变化时只更新原有状态标签，不再每 2 秒重建整个侧栏。
 - **Judge 类 API 配置文件默认隐藏：** `.api-config.json` / `api-config.json` 已归入凭据类路径，普通 MCP 文件工具不会把它们当项目文本暴露出来。
-- **新增浏览器授权的 GitHub 发布链：** bundled `git-publisher` Extension 可通过 Git Credential Manager 打开 GitHub 官方网页授权，OAuth 凭据保留在 Windows Credential Manager；插件只提交显式文件白名单，并且只把当前分支推到既有 GitHub HTTPS origin。模型侧不暴露 token/PAT/password 输入字段。
+- **新增浏览器授权的 GitHub 发布链：** bundled `git-publisher` Extension 可通过 Git Credential Manager 打开 GitHub 官方网页授权，OAuth 凭据保留在 Windows Credential Manager；插件只提交显式文件白名单、只把当前分支推到既有 GitHub HTTPS origin，并可把显式工作区文件按受限 tag/title/文件名发布为 GitHub Release assets。通用 Release 的长时间上传使用宿主托管 Job。模型侧不暴露 token/PAT/password 输入字段。
 - **Git 发布仍保持强边界：** 拒绝已有 staged 内容、密钥/凭据类文件、会变换内容的 Git attributes 和危险的仓库本地 Git 设置；绝不执行 `git add .`，不接受任意 remote/ref，受控 commit 禁用 hooks/签名，push 永不 force。
 - **补齐 Microsoft Office 原生视觉链：** bundled `office` Extension 可对 `.pptx`、`.docx`、`.xlsx` 调用本机已安装的 Microsoft Office 做原生渲染。PowerPoint 直接逐页导出 PNG；Word/Excel 先走各自原生固定版式引擎，再由 Windows 原生 PDF renderer 转成逐页 PNG。
 - **Word 不启动 Office 也能做结构读取：** `inspect_docx` 可读取段落、样式/编号、表格、分节与页设置、页眉页脚、媒体、超链接、脚注、尾注、批注等 OOXML 结构。
@@ -357,7 +357,7 @@ python -m venv .build-venv
 
 ### 发布 GitHub Release
 
-仓库 `main` 的 push 与 GitHub Release 明确分离。Git Publisher 1.2.1 提供一个零参数的 `release` 动作：版本只允许从 `pyproject.toml` 读取稳定的 `x.y.z`，只允许在 `main`、tracked 工作树干净且 `origin/main` 已与当前 HEAD 一致时发布；标签固定为 `v<version>`，资产固定为 `release/windows-x64/FolderBridge.exe` 与 `FolderBridge.exe.sha256`。Release 认证直接复用已经通过浏览器授权的 Git Credential Manager 账号：隔离 worker 从 GCM 取得凭据，只在本次操作期间通过子进程环境交给 `gh.exe`，因此不再要求额外执行 `gh auth login`。模型不能传入任意仓库、tag、version、asset 路径、token 或 `gh` 参数，凭据也不会由 FolderBridge 持久化或通过 MCP 返回。
+仓库 push 与 GitHub Release 明确分离。Git Publisher 1.3.0 保留零参数 `release` 动作作为 FolderBridge 自身的兼容锁定发布路径：版本只允许从 `pyproject.toml` 读取稳定的 `x.y.z`，只允许在 `main`、tracked 工作树干净且 `origin/main` 已与当前 HEAD 一致时发布；标签固定为 `v<version>`，资产固定为 `release/windows-x64/FolderBridge.exe` 与 `FolderBridge.exe.sha256`。独立的通用 `release-assets` 动作只作用于当前选中的工作区仓库，接受受限 tag/title 与显式普通文件白名单；tracked 内容必须干净、当前分支必须已与 origin 对齐，禁止移动既有 tag 与 force push，同时允许显式未跟踪构建产物使用安全的 Release 文件名上传。资产在任何远端修改前都会做 SHA-256 校验并复制为临时快照，长时间上传以宿主托管 Job 运行。Release 认证直接复用已经通过浏览器授权的 Git Credential Manager 账号：隔离 worker 从 GCM 取得凭据，只在本次操作期间通过子进程环境交给 `gh.exe`，因此不再要求额外执行 `gh auth login`。模型不能传入 token/PAT/password 或任意 Git/`gh` 命令参数，凭据也不会由 FolderBridge 持久化或通过 MCP 返回。
 
 仓库端 `.github/workflows/release-windows.yml` 仍保留为第二条发布路径：当最终 commit 标题严格为 `Release FolderBridge <version>` 时，它会独立重新读取版本、执行完整 Windows 测试、构建并验证 EXE，然后创建或修复对应 Release。已有 tag 只有在确实指向同一个 release commit 时才会被接受；已有 Release 可以重新上传两个固定资产并重新标记为 Latest。
 

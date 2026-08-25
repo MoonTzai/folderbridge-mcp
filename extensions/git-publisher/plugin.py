@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import re
 import shutil
 import stat
 import subprocess
 import sys
+import tempfile
 from pathlib import Path, PurePosixPath
 from typing import Any
 from urllib.parse import urlsplit
@@ -17,6 +19,9 @@ from folderbridge_mcp.process_control import owned_process_group_kwargs, termina
 MAX_OUTPUT = 32_000
 MAX_COMMIT_FILE_BYTES = 100 * 1024 * 1024
 MAX_COMMIT_PATHS = 128
+MAX_RELEASE_ASSET_BYTES = 2 * 1024 * 1024 * 1024 - 1
+MAX_RELEASE_ASSETS = 64
+RELEASE_GH_TIMEOUT_SECONDS = 115 * 60
 MAX_STATUS_PAGE = 500
 DEFAULT_STATUS_PAGE = 200
 DENIED_PARTS = {
@@ -27,6 +32,15 @@ DENIED_BASENAMES = {
     ".env", ".npmrc", ".pypirc", "id_rsa", "id_ed25519", "credentials", "credentials.json",
 }
 DENIED_SUFFIXES = {".pem", ".key", ".p12", ".pfx"}
+RELEASE_DENIED_PARTS = {
+    ".git", ".svn", ".hg", ".venv", "venv", "node_modules", "__pycache__", ".idea", ".vscode",
+}
+WINDOWS_RESERVED_NAMES = {
+    "CON", "PRN", "AUX", "NUL",
+    *(f"COM{index}" for index in range(1, 10)),
+    *(f"LPT{index}" for index in range(1, 10)),
+}
+INVALID_RELEASE_NAME_RE = re.compile(r'[<>:"/\\|?*#\[\]\x00-\x1f]')
 TOKEN_RE = re.compile(r"(?:github_pat_[A-Za-z0-9_]+|gh[pousr]_[A-Za-z0-9]+)")
 URL_CREDENTIAL_RE = re.compile(r"(https://)[^/@\s]+@", re.IGNORECASE)
 BRANCH_RE = re.compile(r"^[A-Za-z0-9._/-]{1,240}$")
@@ -50,6 +64,14 @@ def handle(action: str, params: dict[str, Any], context: dict[str, Any]) -> dict
         return _push(root)
     if action == "release":
         return _release(root)
+    if action == "release-assets":
+        return _release_assets(
+            root,
+            params.get("tag"),
+            params.get("title"),
+            params.get("assets"),
+            latest=params.get("latest", True),
+        )
     raise RuntimeError(f"unsupported action: {action}")
 
 
@@ -433,7 +455,7 @@ def _clean_commit_path(root: Path, raw: Any) -> str:
         raise RuntimeError("commit path targets a denied VCS/dependency/generated directory")
     basename = rel.name.lower()
     suffix = Path(rel.name).suffix.lower()
-    if basename in DENIED_BASENAMES or suffix in DENIED_SUFFIXES:
+    if basename in DENIED_BASENAMES or basename.startswith(".env.") or suffix in DENIED_SUFFIXES:
         raise RuntimeError("credential/key-like files are not eligible for Git Publisher commits")
     candidate = root.joinpath(*rel.parts)
     _reject_links(root, candidate)
@@ -565,6 +587,299 @@ def _push(root: Path) -> dict[str, Any]:
             "pre_push_hooks_disabled": True,
             "credential_helper_forced_to_gcm": True,
             "interactive_prompt_disabled": True,
+        },
+    }
+
+
+def _clean_release_tag(root: Path, raw: Any) -> str:
+    if not isinstance(raw, str) or not raw.strip() or "\x00" in raw:
+        raise RuntimeError("release tag must be a non-empty string")
+    tag = raw.strip()
+    if len(tag) > 128 or tag.startswith("-") or tag.lower().startswith("refs/"):
+        raise RuntimeError("release tag is not a safe bounded tag name")
+    checked = _run_git(root, "check-ref-format", f"refs/tags/{tag}", check=False)
+    if checked.returncode != 0:
+        raise RuntimeError("release tag is not a valid Git tag name")
+    return tag
+
+
+def _clean_release_title(raw: Any) -> str:
+    if not isinstance(raw, str) or "\x00" in raw:
+        raise RuntimeError("release title must be a string")
+    title = raw.strip()
+    if not title or len(title) > 256 or "\r" in title or "\n" in title:
+        raise RuntimeError("release title must be one non-empty line of at most 256 characters")
+    return title
+
+
+def _clean_release_asset_name(raw: Any, default: str) -> str:
+    name = default if raw is None else raw
+    if not isinstance(name, str) or not name or name != name.strip() or len(name) > 255:
+        raise RuntimeError("Release asset name must be a non-empty filename of at most 255 characters")
+    if name in {".", ".."} or INVALID_RELEASE_NAME_RE.search(name) or name.endswith((".", " ")):
+        raise RuntimeError("Release asset name must be a plain safe filename, not a path")
+    stem = name.split(".", 1)[0].upper()
+    if stem in WINDOWS_RESERVED_NAMES:
+        raise RuntimeError("Release asset name uses a reserved Windows filename")
+    return name
+
+
+def _clean_release_assets(root: Path, raw_assets: Any) -> list[dict[str, Any]]:
+    if not isinstance(raw_assets, list) or not raw_assets:
+        raise RuntimeError("release assets must contain at least one explicit file")
+    if len(raw_assets) > MAX_RELEASE_ASSETS:
+        raise RuntimeError(f"release assets may contain at most {MAX_RELEASE_ASSETS} files")
+    cleaned: list[dict[str, Any]] = []
+    seen_paths: set[str] = set()
+    seen_names: set[str] = set()
+    for raw in raw_assets:
+        if not isinstance(raw, dict) or set(raw) - {"path", "name"} or "path" not in raw:
+            raise RuntimeError("each Release asset must contain path and optional name only")
+        value = raw.get("path")
+        if not isinstance(value, str) or not value or "\x00" in value or "\\" in value:
+            raise RuntimeError("Release asset paths must be non-empty POSIX-style workspace-relative strings")
+        rel = PurePosixPath(value)
+        if rel.is_absolute() or ".." in rel.parts or not rel.parts:
+            raise RuntimeError("Release asset path must stay inside the selected workspace")
+        if any(part.lower() in RELEASE_DENIED_PARTS for part in rel.parts):
+            raise RuntimeError("Release asset path targets a denied VCS/dependency directory")
+        basename = rel.name.lower()
+        suffix = Path(rel.name).suffix.lower()
+        if basename in DENIED_BASENAMES or basename.startswith(".env.") or suffix in DENIED_SUFFIXES:
+            raise RuntimeError("credential/key-like files are not eligible for GitHub Releases")
+        candidate = root.joinpath(*rel.parts)
+        _reject_links(root, candidate)
+        try:
+            resolved = candidate.resolve(strict=True)
+            resolved.relative_to(root)
+        except (OSError, ValueError) as exc:
+            raise RuntimeError("Release asset does not resolve to a regular workspace file") from exc
+        if not resolved.is_file() or resolved.is_symlink() or _is_reparse(resolved):
+            raise RuntimeError("Git Publisher Releases accept only explicit regular workspace files")
+        size = resolved.stat().st_size
+        if size > MAX_RELEASE_ASSET_BYTES:
+            raise RuntimeError(f"Release asset exceeds the {MAX_RELEASE_ASSET_BYTES}-byte safety limit")
+        normalized = resolved.relative_to(root).as_posix()
+        name = _clean_release_asset_name(raw.get("name"), resolved.name)
+        path_key = normalized.casefold()
+        name_key = name.casefold()
+        if path_key in seen_paths:
+            raise RuntimeError(f"duplicate Release asset path: {normalized}")
+        if name_key in seen_names:
+            raise RuntimeError(f"duplicate Release asset name: {name}")
+        seen_paths.add(path_key)
+        seen_names.add(name_key)
+        cleaned.append({
+            "path": normalized,
+            "name": name,
+            "size": size,
+            "sha256": _sha256_file(resolved),
+        })
+    return cleaned
+
+
+def _remote_tag_target(root: Path, tag: str) -> tuple[str, list[str]]:
+    completed = _run_git(
+        root,
+        "ls-remote", "--tags", "origin", f"refs/tags/{tag}", f"refs/tags/{tag}^{{}}",
+        timeout=120,
+        gcm_only=True,
+    )
+    lines = [line for line in _text(completed).splitlines() if line.strip()]
+    target = ""
+    for line in lines:
+        sha, ref = line.split("\t", 1)
+        if ref.endswith("^{}"):
+            target = sha
+            break
+    if not target and lines:
+        target = lines[0].split("\t", 1)[0]
+    return target, lines
+
+
+def _ensure_generic_release_tag(root: Path, repo: dict[str, str], tag: str, title: str) -> str:
+    if _staged_paths(root):
+        raise RuntimeError("Release publishing requires no staged changes")
+    tracked = _run_git(root, "-c", "core.fsmonitor=false", "status", "--porcelain=v1", "--untracked-files=no")
+    if tracked.stdout.strip():
+        raise RuntimeError("Release publishing requires a clean tracked working tree; explicit untracked assets are allowed")
+    head = _text(_run_git(root, "rev-parse", "HEAD"))
+    branch = repo["branch"]
+    remote = _run_git(root, "ls-remote", "origin", f"refs/heads/{branch}", timeout=120, gcm_only=True)
+    remote_lines = _text(remote).splitlines()
+    remote_head = remote_lines[0].split("\t", 1)[0] if remote_lines else ""
+    if remote_head != head:
+        raise RuntimeError(f"origin/{branch} does not match current HEAD; push the release commit first")
+
+    local_tag = _run_git(root, "rev-parse", "--verify", f"refs/tags/{tag}^{{}}", check=False)
+    if local_tag.returncode == 0 and _text(local_tag) != head:
+        raise RuntimeError(f"local tag {tag} already points to a different commit")
+    remote_target, remote_lines = _remote_tag_target(root, tag)
+    if remote_target and remote_target != head:
+        raise RuntimeError(f"remote tag {tag} already points to a different commit")
+    if not remote_lines:
+        if local_tag.returncode != 0:
+            _run_git(
+                root,
+                "-c", "core.hooksPath=NUL",
+                "-c", "tag.gpgSign=false",
+                "tag", "-a", tag, "-m", title, head,
+            )
+        _run_git(
+            root,
+            "-c", "core.hooksPath=NUL",
+            "push", "--porcelain", "--no-verify", "origin", f"refs/tags/{tag}:refs/tags/{tag}",
+            timeout=300,
+            gcm_only=True,
+        )
+    verified_target, _ = _remote_tag_target(root, tag)
+    if verified_target != head:
+        raise RuntimeError("remote Release tag verification failed after push")
+    return head
+
+
+def _prepare_release_upload_paths(root: Path, assets: list[dict[str, Any]], temp_root: Path) -> list[str]:
+    uploads: list[str] = []
+    for asset in assets:
+        source = root.joinpath(*PurePosixPath(asset["path"]).parts)
+        _reject_links(root, source)
+        try:
+            resolved = source.resolve(strict=True)
+            resolved.relative_to(root)
+        except (OSError, ValueError) as exc:
+            raise RuntimeError("Release asset changed or escaped after validation") from exc
+        if not resolved.is_file() or resolved.is_symlink() or _is_reparse(resolved):
+            raise RuntimeError("Release asset changed after validation")
+        if resolved.stat().st_size != asset["size"] or _sha256_file(resolved) != asset["sha256"]:
+            raise RuntimeError(f"Release asset changed after validation: {asset['path']}")
+        target = temp_root / asset["name"]
+        shutil.copyfile(resolved, target)
+        if target.stat().st_size != asset["size"] or _sha256_file(target) != asset["sha256"]:
+            raise RuntimeError(f"temporary Release asset snapshot verification failed: {asset['name']}")
+        uploads.append(str(target))
+    return uploads
+
+
+def _verify_release_latest(
+    root: Path,
+    repo_name: str,
+    tag: str,
+    latest: bool,
+    token: str,
+) -> None:
+    completed = _run_gh(
+        root,
+        "repo", "view", repo_name, "--json", "latestRelease",
+        token=token,
+    )
+    try:
+        repository = json.loads(_text(completed))
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("GitHub Release latest-state verification returned invalid JSON") from exc
+    if not isinstance(repository, dict):
+        raise RuntimeError("GitHub Release latest-state verification returned an invalid repository object")
+    latest_release = repository.get("latestRelease")
+    if latest_release is None:
+        latest_tag = None
+    elif isinstance(latest_release, dict) and isinstance(latest_release.get("tagName"), str):
+        latest_tag = latest_release["tagName"]
+    else:
+        raise RuntimeError("GitHub Release latest-state verification returned an invalid latestRelease object")
+    is_latest = latest_tag == tag
+    if is_latest is not latest:
+        raise RuntimeError(
+            f"GitHub Release latest-state mismatch for {tag}: expected {latest}, got {is_latest}"
+        )
+
+
+def _release_assets(
+    root: Path,
+    raw_tag: Any,
+    raw_title: Any,
+    raw_assets: Any,
+    *,
+    latest: Any = True,
+) -> dict[str, Any]:
+    repo = _repo_info(root)
+    if not isinstance(latest, bool):
+        raise RuntimeError("latest must be a boolean")
+    tag = _clean_release_tag(root, raw_tag)
+    title = _clean_release_title(raw_title)
+    assets = _clean_release_assets(root, raw_assets)
+    token = _github_token_from_gcm(root)
+    repo_name = f"{repo['owner']}/{repo['repo']}"
+
+    with tempfile.TemporaryDirectory(prefix="folderbridge-release-") as temp_dir:
+        uploads = _prepare_release_upload_paths(root, assets, Path(temp_dir))
+        head = _ensure_generic_release_tag(root, repo, tag, title)
+        existing = _run_gh(root, "release", "view", tag, "--repo", repo_name, token=token, check=False)
+        if existing.returncode == 0:
+            _run_gh(
+                root,
+                "release", "upload", tag, *uploads, "--clobber", "--repo", repo_name,
+                token=token,
+                timeout=RELEASE_GH_TIMEOUT_SECONDS,
+            )
+            edit_args = [
+                "release", "edit", tag, "--title", title,
+                "--latest" if latest else "--latest=false",
+                "--repo", repo_name,
+            ]
+            _run_gh(root, *edit_args, token=token)
+        else:
+            create_args = [
+                "release", "create", tag, *uploads,
+                "--verify-tag", "--title", title, "--notes", "",
+                "--latest" if latest else "--latest=false",
+                "--repo", repo_name,
+            ]
+            _run_gh(root, *create_args, token=token, timeout=RELEASE_GH_TIMEOUT_SECONDS)
+
+    verified = _run_gh(
+        root,
+        "release", "view", tag, "--repo", repo_name, "--json", "tagName,url,assets",
+        token=token,
+    )
+    try:
+        release = json.loads(_text(verified))
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("GitHub Release verification returned invalid JSON") from exc
+    if release.get("tagName") != tag or not isinstance(release.get("url"), str) or not release.get("url"):
+        raise RuntimeError("GitHub Release tag/url verification failed")
+    remote_assets = release.get("assets")
+    if not isinstance(remote_assets, list):
+        raise RuntimeError("GitHub Release asset verification returned an invalid asset list")
+    by_name = {str(item.get("name", "")): item for item in remote_assets if isinstance(item, dict)}
+    for asset in assets:
+        remote_asset = by_name.get(asset["name"])
+        if remote_asset is None:
+            raise RuntimeError(f"GitHub Release asset missing after upload: {asset['name']}")
+        if remote_asset.get("size") != asset["size"]:
+            raise RuntimeError(f"GitHub Release asset size mismatch after upload: {asset['name']}")
+    _verify_release_latest(root, repo_name, tag, latest, token)
+    remote_target, _ = _remote_tag_target(root, tag)
+    if remote_target != head:
+        raise RuntimeError("GitHub Release tag moved away from current HEAD during publication")
+    return {
+        **repo,
+        "released": True,
+        "tag": tag,
+        "title": title,
+        "head": head,
+        "latest_requested": latest,
+        "url": release["url"],
+        "assets": assets,
+        "safety": {
+            "current_workspace_repo_only": True,
+            "current_head_only": True,
+            "origin_current_branch_must_match_head": True,
+            "explicit_release_asset_allowlist": True,
+            "tracked_worktree_clean": True,
+            "untracked_explicit_assets_allowed": True,
+            "github_https_origin_only": True,
+            "credential_manager_only": True,
+            "token_input_exposed_to_model": False,
+            "force_push": False,
         },
     }
 

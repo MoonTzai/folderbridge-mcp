@@ -39,11 +39,11 @@ class GitPublisherManifestTests(unittest.TestCase):
     def test_manifest_is_explicit_and_does_not_accept_tokens(self) -> None:
         record = load_extension(EXT_DIR, bundled=True)
         self.assertEqual(record.manifest.extension_id, "git-publisher")
-        self.assertEqual(record.manifest.version, "1.2.1")
-        self.assertEqual(set(record.manifest.actions), {"status", "connect", "commit", "push", "release"})
+        self.assertEqual(record.manifest.version, "1.3.0")
+        self.assertEqual(set(record.manifest.actions), {"status", "connect", "commit", "push", "release", "release-assets"})
         self.assertTrue(record.manifest.actions["status"].read_only)
         self.assertEqual(record.manifest.actions["status"].authorization, "none")
-        for name in ("connect", "commit", "push", "release"):
+        for name in ("connect", "commit", "push", "release", "release-assets"):
             self.assertFalse(record.manifest.actions[name].read_only)
             self.assertEqual(record.manifest.actions[name].authorization, "global")
         self.assertIn("git.commit-selected-files", record.manifest.permissions)
@@ -61,6 +61,15 @@ class GitPublisherManifestTests(unittest.TestCase):
         self.assertEqual(commit_schema["properties"]["paths"]["maxItems"], 128)
         release_schema = record.manifest.actions["release"].input_schema
         self.assertEqual(release_schema["properties"], {})
+        release_assets_schema = record.manifest.actions["release-assets"].input_schema
+        self.assertEqual(set(release_assets_schema["required"]), {"tag", "title", "assets"})
+        self.assertEqual(release_assets_schema["properties"]["assets"]["maxItems"], 64)
+        self.assertEqual(release_assets_schema["properties"]["latest"]["type"], "boolean")
+        self.assertEqual(record.manifest.actions["release-assets"].run_mode, "job")
+        self.assertEqual(record.manifest.actions["release-assets"].timeout_seconds, 7200)
+        asset_schema = release_assets_schema["properties"]["assets"]["items"]
+        self.assertEqual(asset_schema["required"], ["path"])
+        self.assertEqual(set(asset_schema["properties"]), {"path", "name"})
         plugin = load_plugin()
         self.assertEqual(plugin.MAX_COMMIT_FILE_BYTES, 100 * 1024 * 1024)
         plugin_text = (EXT_DIR / "plugin.py").read_text(encoding="utf-8")
@@ -187,12 +196,15 @@ class GitPublisherRuntimeTests(unittest.TestCase):
         temp, root = self.make_repo()
         self.addCleanup(temp.cleanup)
         (root / ".env").write_text("SECRET=value\n", encoding="utf-8")
-        with self.assertRaises(RuntimeError):
-            plugin.handle(
-                "commit",
-                {"paths": [".env"], "message": "No"},
-                {"workspace_root": str(root), "workspace_read_only": False},
-            )
+        (root / ".env.production").write_text("SECRET=value\n", encoding="utf-8")
+        for sensitive in (".env", ".env.production"):
+            with self.subTest(sensitive=sensitive):
+                with self.assertRaises(RuntimeError):
+                    plugin.handle(
+                        "commit",
+                        {"paths": [sensitive], "message": "No"},
+                        {"workspace_root": str(root), "workspace_read_only": False},
+                    )
         with self.assertRaises(RuntimeError):
             plugin.handle(
                 "commit",
