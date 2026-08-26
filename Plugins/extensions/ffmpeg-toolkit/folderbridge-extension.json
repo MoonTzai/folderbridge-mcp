@@ -1,0 +1,126 @@
+{
+  "schema_version": 1,
+  "id": "ffmpeg-toolkit",
+  "name": "FFmpeg Toolkit",
+  "version": "0.1.1",
+  "description": "Workspace-confined FFmpeg/FFprobe adapter with a full local-media argv surface, declared path placeholders, bounded diagnostics, capability discovery, and host-owned long-running jobs.",
+  "entrypoint": "plugin.py",
+  "permissions": [
+    "workspace.read",
+    "workspace.write",
+    "extension.state",
+    "process.execute:ffmpeg.exe",
+    "process.execute:ffprobe.exe"
+  ],
+  "execution": {
+    "mode": "isolated-process",
+    "timeout_seconds": 600
+  },
+  "workspace_adapter": {
+    "mode": "none",
+    "state": "none"
+  },
+  "actions": {
+    "status": {
+      "read_only": true,
+      "requires_workspace": true,
+      "authorization": "global",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "tool_dir": {"type": "string", "minLength": 1, "maxLength": 1024}
+        },
+        "additionalProperties": false
+      }
+    },
+    "capabilities": {
+      "read_only": true,
+      "requires_workspace": true,
+      "authorization": "global",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "kind": {
+            "type": "string",
+            "enum": ["encoders", "decoders", "codecs", "formats", "muxers", "demuxers", "filters", "protocols", "hwaccels", "devices", "bsfs", "pix_fmts", "sample_fmts", "layouts", "colors"]
+          },
+          "contains": {"type": "string", "minLength": 1, "maxLength": 256},
+          "max_items": {"type": "integer", "minimum": 1, "maximum": 2000, "default": 500},
+          "tool_dir": {"type": "string", "minLength": 1, "maxLength": 1024}
+        },
+        "required": ["kind"],
+        "additionalProperties": false
+      }
+    },
+    "probe": {
+      "read_only": true,
+      "requires_workspace": true,
+      "authorization": "global",
+      "timeout_seconds": 600,
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "path": {"type": "string", "minLength": 1, "maxLength": 1024},
+          "args": {
+            "type": "array",
+            "maxItems": 512,
+            "items": {"type": "string", "minLength": 1, "maxLength": 8192}
+          },
+          "paths": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "object",
+              "properties": {
+                "path": {"type": "string", "minLength": 1, "maxLength": 1024},
+                "mode": {"type": "string", "enum": ["input", "input_pattern", "input_dir"]}
+              },
+              "required": ["path", "mode"],
+              "additionalProperties": false
+            }
+          },
+          "tool_dir": {"type": "string", "minLength": 1, "maxLength": 1024},
+          "timeout_seconds": {"type": "integer", "minimum": 1, "maximum": 3600, "default": 120},
+          "max_output_chars": {"type": "integer", "minimum": 1024, "maximum": 262144, "default": 131072}
+        },
+        "additionalProperties": false
+      }
+    },
+    "run": {
+      "read_only": false,
+      "requires_workspace": true,
+      "authorization": "global",
+      "run_mode": "job",
+      "timeout_seconds": 0,
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "args": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 512,
+            "items": {"type": "string", "minLength": 1, "maxLength": 8192}
+          },
+          "paths": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "object",
+              "properties": {
+                "path": {"type": "string", "minLength": 1, "maxLength": 1024},
+                "mode": {"type": "string", "enum": ["input", "input_pattern", "input_dir", "output", "output_pattern", "output_dir"]}
+              },
+              "required": ["path", "mode"],
+              "additionalProperties": false
+            }
+          },
+          "tool_dir": {"type": "string", "minLength": 1, "maxLength": 1024},
+          "overwrite": {"type": "boolean", "default": false},
+          "create_output_parents": {"type": "boolean", "default": true},
+          "timeout_seconds": {"type": "integer", "minimum": 0, "maximum": 86400, "default": 7200},
+          "max_artifacts": {"type": "integer", "minimum": 1, "maximum": 256, "default": 100}
+        },
+        "required": ["args"],
+        "additionalProperties": false
+      }
+    }
+  }
+}

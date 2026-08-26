@@ -1,0 +1,62 @@
+{
+  "schema_version": 1,
+  "id": "gpt-sovits-local",
+  "name": "Local GPT-SoVITS",
+  "version": "0.1.1",
+  "description": "Workspace-confined adapter for a dedicated GPT-SoVITS Windows runtime under GPT-SoVITS/. Runs only the fixed GPT-SoVITS-Bridge/runner.ps1 entrypoint for bootstrap, dataset preparation, ASR, training, inference, and status checks.",
+  "entrypoint": "plugin.py",
+  "permissions": [
+    "workspace.read",
+    "workspace.write",
+    "extension.state",
+    "process.execute:powershell.exe"
+  ],
+  "execution": {
+    "mode": "isolated-process",
+    "timeout_seconds": 600
+  },
+  "workspace_adapter": {
+    "mode": "none",
+    "state": "none"
+  },
+  "actions": {
+    "status": {
+      "read_only": true,
+      "requires_workspace": true,
+      "authorization": "global",
+      "input_schema": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false
+      }
+    },
+    "run": {
+      "read_only": false,
+      "requires_workspace": true,
+      "authorization": "global",
+      "run_mode": "job",
+      "timeout_seconds": 0,
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "operation": {
+            "type": "string",
+            "enum": ["probe", "bootstrap", "prepare-dataset", "asr", "train", "infer", "launch-webui", "stop"]
+          },
+          "params": {
+            "type": "object",
+            "additionalProperties": true
+          },
+          "timeout_seconds": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 86400,
+            "default": 7200
+          }
+        },
+        "required": ["operation"],
+        "additionalProperties": false
+      }
+    }
+  }
+}
