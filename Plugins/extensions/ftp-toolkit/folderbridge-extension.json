@@ -1,0 +1,205 @@
+{
+  "schema_version": 1,
+  "id": "ftp-toolkit",
+  "name": "FTP Toolkit",
+  "version": "0.2.0",
+  "description": "Generic workspace-confined FTP/FTPS transfer extension with reusable local profiles, Windows Credential Manager credentials, optional local HTTP CONNECT proxy transport, bounded listing/stat/upload/download/tree transfer, mkdir/rename/delete actions, automatic parent-directory creation, and no arbitrary URL or command surface.",
+  "entrypoint": "plugin.py",
+  "permissions": [
+    "workspace.read",
+    "workspace.write",
+    "process.execute:curl.exe",
+    "process.execute:powershell.exe"
+  ],
+  "execution": {
+    "mode": "isolated-process",
+    "timeout_seconds": 600
+  },
+  "workspace_adapter": {
+    "mode": "none",
+    "state": "none"
+  },
+  "actions": {
+    "status": {
+      "read_only": true,
+      "requires_workspace": false,
+      "authorization": "global",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "profile": {"type": "string", "minLength": 1, "maxLength": 64}
+        },
+        "additionalProperties": false
+      }
+    },
+    "configure": {
+      "read_only": false,
+      "requires_workspace": false,
+      "authorization": "global",
+      "timeout_seconds": 600,
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "profile": {"type": "string", "minLength": 1, "maxLength": 64, "default": "default"}
+        },
+        "additionalProperties": false
+      }
+    },
+    "forget": {
+      "read_only": false,
+      "requires_workspace": false,
+      "authorization": "global",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "profile": {"type": "string", "minLength": 1, "maxLength": 64, "default": "default"}
+        },
+        "additionalProperties": false
+      }
+    },
+    "check": {
+      "read_only": true,
+      "requires_workspace": false,
+      "authorization": "global",
+      "timeout_seconds": 180,
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "profile": {"type": "string", "minLength": 1, "maxLength": 64, "default": "default"}
+        },
+        "additionalProperties": false
+      }
+    },
+    "list": {
+      "read_only": true,
+      "requires_workspace": false,
+      "authorization": "global",
+      "timeout_seconds": 180,
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "profile": {"type": "string", "minLength": 1, "maxLength": 64, "default": "default"},
+          "remote_dir": {"type": "string", "maxLength": 1024, "default": ""},
+          "max_items": {"type": "integer", "minimum": 1, "maximum": 2000, "default": 500}
+        },
+        "additionalProperties": false
+      }
+    },
+    "stat": {
+      "read_only": true,
+      "requires_workspace": false,
+      "authorization": "global",
+      "timeout_seconds": 180,
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "profile": {"type": "string", "minLength": 1, "maxLength": 64, "default": "default"},
+          "remote_path": {"type": "string", "minLength": 1, "maxLength": 1024}
+        },
+        "required": ["remote_path"],
+        "additionalProperties": false
+      }
+    },
+    "mkdir": {
+      "read_only": false,
+      "requires_workspace": false,
+      "authorization": "global",
+      "timeout_seconds": 180,
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "profile": {"type": "string", "minLength": 1, "maxLength": 64, "default": "default"},
+          "remote_dir": {"type": "string", "minLength": 1, "maxLength": 1024}
+        },
+        "required": ["remote_dir"],
+        "additionalProperties": false
+      }
+    },
+    "rename": {
+      "read_only": false,
+      "requires_workspace": false,
+      "authorization": "global",
+      "timeout_seconds": 180,
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "profile": {"type": "string", "minLength": 1, "maxLength": 64, "default": "default"},
+          "from_path": {"type": "string", "minLength": 1, "maxLength": 1024},
+          "to_path": {"type": "string", "minLength": 1, "maxLength": 1024}
+        },
+        "required": ["from_path", "to_path"],
+        "additionalProperties": false
+      }
+    },
+    "delete": {
+      "read_only": false,
+      "requires_workspace": false,
+      "authorization": "global",
+      "timeout_seconds": 180,
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "profile": {"type": "string", "minLength": 1, "maxLength": 64, "default": "default"},
+          "remote_path": {"type": "string", "minLength": 1, "maxLength": 1024}
+        },
+        "required": ["remote_path"],
+        "additionalProperties": false
+      }
+    },
+    "upload": {
+      "read_only": false,
+      "requires_workspace": true,
+      "authorization": "global",
+      "run_mode": "job",
+      "timeout_seconds": 0,
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "profile": {"type": "string", "minLength": 1, "maxLength": 64, "default": "default"},
+          "local_path": {"type": "string", "minLength": 1, "maxLength": 1024},
+          "remote_path": {"type": "string", "maxLength": 1024},
+          "verify": {"type": "string", "enum": ["none", "size", "sha256"], "default": "sha256"}
+        },
+        "required": ["local_path"],
+        "additionalProperties": false
+      }
+    },
+    "upload-tree": {
+      "read_only": false,
+      "requires_workspace": true,
+      "authorization": "global",
+      "run_mode": "job",
+      "timeout_seconds": 0,
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "profile": {"type": "string", "minLength": 1, "maxLength": 64, "default": "default"},
+          "local_dir": {"type": "string", "minLength": 1, "maxLength": 1024},
+          "remote_dir": {"type": "string", "maxLength": 1024, "default": ""},
+          "verify": {"type": "string", "enum": ["none", "size", "sha256"], "default": "size"},
+          "max_files": {"type": "integer", "minimum": 1, "maximum": 4096, "default": 1024}
+        },
+        "required": ["local_dir"],
+        "additionalProperties": false
+      }
+    },
+    "download": {
+      "read_only": false,
+      "requires_workspace": true,
+      "authorization": "global",
+      "run_mode": "job",
+      "timeout_seconds": 0,
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "profile": {"type": "string", "minLength": 1, "maxLength": 64, "default": "default"},
+          "remote_path": {"type": "string", "minLength": 1, "maxLength": 1024},
+          "local_path": {"type": "string", "minLength": 1, "maxLength": 1024},
+          "overwrite": {"type": "boolean", "default": false}
+        },
+        "required": ["remote_path", "local_path"],
+        "additionalProperties": false
+      }
+    }
+  }
+}

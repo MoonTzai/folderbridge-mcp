@@ -28,3 +28,4 @@ Any later change to a hash-covered Extension file makes the old approval stale a
 | --- | --- | --- |
 | `gpt-sovits-local` | 0.1.1 | Workspace adapter for the fixed `GPT-SoVITS-Bridge/runner.ps1` workflow. |
 | `ffmpeg-toolkit` | 0.1.1 | Workspace-confined FFmpeg/FFprobe probe, capability discovery, and long-running media jobs. |
+| `ftp-toolkit` | 0.2.0 | Generic workspace-confined FTP/FTPS profiles with optional local HTTP CONNECT proxy, listing/stat, upload/download, recursive upload, automatic parent mkdir, rename and exact-file delete. |
