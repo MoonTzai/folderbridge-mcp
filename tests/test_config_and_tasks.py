@@ -10,6 +10,7 @@ from unittest.mock import patch
 
 from folderbridge_mcp.config import (
     CONFIG_NAME,
+    MAX_WORKSPACES,
     ConfigError,
     approve_config,
     canonical_workspace,
@@ -70,7 +71,7 @@ class ConfigAndTaskTests(unittest.TestCase):
         with self.assertRaises(ConfigError):
             canonical_workspaces([self.root, child])
         extras = []
-        for index in range(8):
+        for index in range(MAX_WORKSPACES):
             extra = self.base / f"extra-{index}"
             extra.mkdir()
             extras.append(extra)

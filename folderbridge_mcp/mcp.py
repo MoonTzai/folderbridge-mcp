@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import sys
 import threading
+import time
 from typing import Any, BinaryIO
 
 from .concurrency import (
@@ -13,6 +14,7 @@ from .concurrency import (
     SERVER_BUSY_CODE,
     BoundedExecutorLane,
 )
+from .flight_recorder import FlightRecorder
 from .tools import ToolRuntime
 
 
@@ -24,9 +26,19 @@ SERVER_META = "io.modelcontextprotocol/serverInfo"
 
 
 class McpServer:
-    def __init__(self, runtime: ToolRuntime) -> None:
+    def __init__(self, runtime: ToolRuntime, *, flight_recorder: FlightRecorder | None = None) -> None:
         self.runtime = runtime
+        self.flight_recorder = flight_recorder or getattr(runtime, "flight_recorder", None)
         self._write_lock = threading.Lock()
+
+    def _record(self, event: str, *, severity: str = "info", text: str | None = None, **fields: Any) -> None:
+        recorder = self.flight_recorder
+        if recorder is None:
+            return
+        try:
+            recorder.record(event, severity=severity, text=text, **fields)
+        except Exception:
+            pass
 
     def dispatch(self, request: Any) -> dict[str, Any] | None:
         if not isinstance(request, dict) or request.get("jsonrpc") != "2.0":
@@ -113,24 +125,45 @@ class McpServer:
         )
         try:
             while True:
-                line = source.readline(MAX_MESSAGE_BYTES + 1)
+                try:
+                    line = source.readline(MAX_MESSAGE_BYTES + 1)
+                except Exception as exc:
+                    self._record("mcp.read_error", severity="error", text=str(exc), exception_type=type(exc).__name__)
+                    raise
                 if not line:
+                    self._record("mcp.eof")
                     break
                 if len(line) > MAX_MESSAGE_BYTES:
+                    self._record("mcp.message_too_large", severity="warning", request_bytes=len(line))
                     if not line.endswith(b"\n"):
                         _discard_line(source)
                     self._write(destination, _rpc_error(None, -32700, "Message exceeds 1 MiB"))
                     continue
                 try:
                     request = json.loads(line, parse_constant=_reject_json_constant)
-                except (UnicodeDecodeError, json.JSONDecodeError, ValueError):
+                except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
+                    self._record("mcp.parse_error", severity="warning", text=str(exc), request_bytes=len(line))
                     self._write(destination, _rpc_error(None, -32700, "Parse error"))
                     continue
-                lane = control if _request_lane(request) == "control" else data
-                if not lane.submit(lambda request=request: self._dispatch_and_write(request, destination)):
+                lane_name = _request_lane(request)
+                lane = control if lane_name == "control" else data
+                observation = _request_observation(request)
+                enqueued_at = time.monotonic()
+                self._record("mcp.request", lane=lane_name, request_bytes=len(line), **observation)
+                if not lane.submit(
+                    lambda request=request, enqueued_at=enqueued_at, lane_name=lane_name, observation=observation: self._dispatch_and_write(
+                        request,
+                        destination,
+                        enqueued_at=enqueued_at,
+                        lane_name=lane_name,
+                        observation=observation,
+                    )
+                ):
+                    self._record("mcp.busy", severity="warning", lane=lane_name, **observation)
                     if isinstance(request, dict) and "id" in request:
-                        self._write(destination, _rpc_error(request.get("id"), SERVER_BUSY_CODE, "Server busy"))
+                        self._write(destination, _rpc_error(request.get("id"), SERVER_BUSY_CODE, "Server busy"), observation=observation)
         finally:
+            self._record("mcp.shutdown_begin")
             try:
                 begin_shutdown = getattr(self.runtime, "begin_shutdown", None)
                 if callable(begin_shutdown):
@@ -141,21 +174,72 @@ class McpServer:
                 close_runtime = getattr(self.runtime, "close", None)
                 if callable(close_runtime):
                     close_runtime()
+                self._record("mcp.shutdown_complete")
 
-    def _dispatch_and_write(self, request: Any, destination: BinaryIO) -> None:
+    def _dispatch_and_write(
+        self,
+        request: Any,
+        destination: BinaryIO,
+        *,
+        enqueued_at: float,
+        lane_name: str,
+        observation: dict[str, Any],
+    ) -> None:
+        dispatch_started = time.monotonic()
         try:
             response = self.dispatch(request)
-        except Exception:
+        except Exception as exc:
+            self._record(
+                "mcp.dispatch_exception",
+                severity="error",
+                text=str(exc),
+                lane=lane_name,
+                exception_type=type(exc).__name__,
+                **observation,
+            )
             request_id = request.get("id") if isinstance(request, dict) else None
             response = _rpc_error(request_id, -32603, "Internal error")
+        response_bytes = 0
         if response is not None:
-            self._write(destination, response)
+            response_bytes = self._write(destination, response, observation=observation)
+        rpc_error_code = None
+        if isinstance(response, dict) and isinstance(response.get("error"), dict):
+            rpc_error_code = response["error"].get("code")
+        self._record(
+            "mcp.complete",
+            lane=lane_name,
+            duration_ms=round((time.monotonic() - enqueued_at) * 1000, 3),
+            dispatch_ms=round((time.monotonic() - dispatch_started) * 1000, 3),
+            response_bytes=response_bytes,
+            rpc_error_code=rpc_error_code,
+            **observation,
+        )
 
-    def _write(self, destination: BinaryIO, response: dict[str, Any]) -> None:
+    def _write(
+        self,
+        destination: BinaryIO,
+        response: dict[str, Any],
+        *,
+        observation: dict[str, Any] | None = None,
+    ) -> int:
         encoded = json.dumps(response, ensure_ascii=False, separators=(",", ":")).encode("utf-8") + b"\n"
-        with self._write_lock:
-            destination.write(encoded)
-            destination.flush()
+        try:
+            with self._write_lock:
+                destination.write(encoded)
+                destination.flush()
+        except Exception as exc:
+            fields = dict(observation or {})
+            fields.setdefault("request_id", response.get("id"))
+            self._record(
+                "mcp.write_error",
+                severity="error",
+                text=str(exc),
+                exception_type=type(exc).__name__,
+                response_bytes=len(encoded),
+                **fields,
+            )
+            raise
+        return len(encoded)
 
 
 class RpcFailure(RuntimeError):
@@ -186,13 +270,39 @@ def _request_lane(request: Any) -> str:
     name = params.get("name")
     arguments = params.get("arguments")
     arguments = arguments if isinstance(arguments, dict) else {}
-    if name == "server_info":
+    if name in {"server_info", "flight_recorder"}:
         return "control"
-    if name == "extension" and arguments.get("action") in {"list", "info", "job_status", "job_cancel"}:
+    if name == "extension" and arguments.get("action") in {"list", "info", "job_list", "job_status", "job_cancel"}:
+        return "control"
+    if name in {"run_task", "run_capability"} and arguments.get("action") in {"list", "status", "cancel"}:
         return "control"
     if name == "write_file" and arguments.get("action") in {"status", "abort"}:
         return "control"
     return "data"
+
+
+def _request_observation(request: Any) -> dict[str, Any]:
+    if not isinstance(request, dict):
+        return {}
+    observation: dict[str, Any] = {"request_id": request.get("id"), "method": request.get("method")}
+    if request.get("method") != "tools/call":
+        return observation
+    params = request.get("params")
+    if not isinstance(params, dict):
+        return observation
+    name = params.get("name")
+    if isinstance(name, str):
+        observation["tool"] = name
+    arguments = params.get("arguments")
+    if not isinstance(arguments, dict):
+        return observation
+    for key in ("action", "workspace_id", "extension_id", "extension_action", "job_id"):
+        value = arguments.get(key)
+        if isinstance(value, (str, int)) and not isinstance(value, bool):
+            observation[key] = value
+    if name == "run_capability" and isinstance(arguments.get("name"), str):
+        observation["capability"] = arguments["name"]
+    return observation
 
 
 def _is_modern(params: dict[str, Any]) -> bool:

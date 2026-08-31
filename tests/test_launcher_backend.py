@@ -8,6 +8,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+from folderbridge_mcp.flight_recorder import FlightRecorder
 from folderbridge_mcp.launcher_backend import (
     MAX_COMMAND_OUTPUT,
     LauncherError,
@@ -284,7 +285,8 @@ class LauncherBackendTests(unittest.TestCase):
             def kill(self):
                 self.returncode = -9
 
-        supervisor = TunnelSupervisor(lambda _text: None)
+        recorder = FlightRecorder("launcher", root=Path(self.temp.name) / "flight-state")
+        supervisor = TunnelSupervisor(lambda _text: None, flight_recorder=recorder)
         process = FakeProcess()
         supervisor._process = process  # type: ignore[assignment]
 
@@ -297,6 +299,8 @@ class LauncherBackendTests(unittest.TestCase):
         terminate_tree.assert_called_once_with(process, hide_window=True)
         self.assertEqual(code, -9)
         self.assertFalse(supervisor.running())
+        flight = recorder.recent(minutes=15, limit=10)
+        self.assertTrue(any(event["event"] == "tunnel.process_stop" and event.get("exit_code") == -9 for event in flight["events"]))
 
     def test_control_plane_environment_is_a_copy(self) -> None:
         with mock.patch.dict(os.environ, {}, clear=True):

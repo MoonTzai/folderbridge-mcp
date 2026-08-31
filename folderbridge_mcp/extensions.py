@@ -3,6 +3,7 @@ from __future__ import annotations
 import atexit
 import hashlib
 import json
+import math
 import os
 import re
 import stat
@@ -17,7 +18,11 @@ from pathlib import Path, PurePosixPath
 from typing import Any, Callable, Iterable
 
 from .config import workspace_id
-from .process_control import owned_process_group_kwargs, terminate_owned_process_tree
+from .process_control import (
+    TRANSPORT_RESPONSE_BUDGET_SECONDS,
+    owned_process_group_kwargs,
+    terminate_owned_process_tree,
+)
 from .security import ToolError, Workspace, clean_environment
 from .user_paths import INTERNAL_CONFIG_ROOT_ENV, user_config_root
 
@@ -38,6 +43,11 @@ MAX_JOB_TIMEOUT_SECONDS = 24 * 60 * 60
 MAX_RUNNING_EXTENSION_JOBS = 16
 MAX_RETAINED_FINISHED_JOBS = 128
 MAX_FOREGROUND_EXTENSION_WORKERS = 16
+MAX_JOB_PROGRESS_BYTES = 64 * 1024
+JOB_ACTIVITY_FRESH_SECONDS = 300.0
+MIN_JOB_PROGRESS_HEARTBEAT_SECONDS = 5
+MAX_JOB_PROGRESS_HEARTBEAT_SECONDS = 3600
+MIN_JOB_STALL_SUSPECT_SECONDS = 300.0
 MAX_EXTENSION_JOB_SHUTDOWN_SECONDS = 5.0
 MAX_EXTENSION_JOB_CANCEL_GRACE_SECONDS = 2.0
 ACTIVE_EXTENSION_JOB_STATUSES = frozenset({"running", "termination_pending"})
@@ -482,6 +492,15 @@ class ExtensionRegistry:
                 extension_id=extension_id,
             )
 
+    def job_list(
+        self,
+        *,
+        workspace: Workspace | None,
+        offset: int = 0,
+        limit: int = 100,
+    ) -> dict[str, Any]:
+        return self.jobs.list(workspace=workspace, offset=offset, limit=limit)
+
     def job_status(self, job_id: str, *, workspace: Workspace | None) -> dict[str, Any]:
         return self.jobs.status(job_id, workspace=workspace)
 
@@ -901,6 +920,7 @@ def _worker_context_and_environment(
     workspace: Workspace | None,
     read_only: bool,
     job_cancel_path: str | None = None,
+    job_progress_path: str | None = None,
 ) -> tuple[dict[str, Any], dict[str, str]]:
     workspace_root = workspace.root if workspace is not None else None
     state_dir: str | None = None
@@ -944,6 +964,7 @@ def _worker_context_and_environment(
         "workspace_root": str(workspace_root) if workspace_root is not None else None,
         "workspace_read_only": bool(read_only),
         "job_cancel_path": job_cancel_path,
+        "job_progress_path": job_progress_path,
         "state_dir": state_dir,
         "workspace_adapter": record.manifest.workspace_adapter,
         "inherited_environment": inherited_names,
@@ -991,12 +1012,14 @@ def _worker_request(
     workspace: Workspace | None,
     read_only: bool,
     job_cancel_path: str | None = None,
+    job_progress_path: str | None = None,
 ) -> tuple[bytes, dict[str, str], tuple[str, ...]]:
     context, env = _worker_context_and_environment(
         record,
         workspace=workspace,
         read_only=read_only,
         job_cancel_path=job_cancel_path,
+        job_progress_path=job_progress_path,
     )
     try:
         request = json.dumps(
@@ -1212,20 +1235,48 @@ def _run_worker(
     owner: ExtensionJobManager,
     on_finish: Callable[[], None] | None = None,
 ) -> dict[str, Any]:
+    timeout = _action_timeout(record, action)
+    promotable = timeout == 0 or float(timeout) > TRANSPORT_RESPONSE_BUDGET_SECONDS
     try:
-        owner.reserve_foreground()
+        owner.reserve_foreground(reserve_job_slot=promotable)
     except Exception:
         if on_finish is not None:
             on_finish()
         raise
     reservation_active = True
     worker: _ForegroundWorker | None = None
+    control_dir: str | None = None
+    cancel_path: str | None = None
+    progress_path: str | None = None
+    started_at = time.time()
+    started_monotonic = time.monotonic()
     try:
-        request, env, secrets = _worker_request(record, action, params, workspace=workspace, read_only=read_only)
+        if promotable:
+            control_dir, cancel_path, progress_path = owner._prepare_cancel_control(uuid.uuid4().hex)
+        request, env, secrets = _worker_request(
+            record,
+            action,
+            params,
+            workspace=workspace,
+            read_only=read_only,
+            job_cancel_path=cancel_path,
+            job_progress_path=progress_path,
+        )
         try:
             process, stdout, stderr = _start_worker_process(record, request, env)
         except _WorkerLaunchTerminationPending as pending:
-            worker = owner.adopt_foreground(pending.process, pending.stdout, pending.stderr, on_finish)
+            worker = owner.adopt_foreground(
+                pending.process,
+                pending.stdout,
+                pending.stderr,
+                on_finish,
+                started_at=started_at,
+                started_monotonic=started_monotonic,
+                cancel_control_dir=control_dir,
+                cancel_token_path=cancel_path,
+                progress_path=progress_path,
+                job_slot_reserved=promotable,
+            )
             reservation_active = False
             raise ToolError(
                 "EXTENSION_TERMINATION_PENDING",
@@ -1236,10 +1287,21 @@ def _run_worker(
                 cause_code=pending.error.code,
             ) from pending
 
-        worker = owner.adopt_foreground(process, stdout, stderr, on_finish)
+        worker = owner.adopt_foreground(
+            process,
+            stdout,
+            stderr,
+            on_finish,
+            started_at=started_at,
+            started_monotonic=started_monotonic,
+            cancel_control_dir=control_dir,
+            cancel_token_path=cancel_path,
+            progress_path=progress_path,
+            job_slot_reserved=promotable,
+        )
         reservation_active = False
-        timeout = _action_timeout(record, action)
-        state = owner.wait_foreground(worker, _wait_timeout(timeout))
+        wait_timeout = TRANSPORT_RESPONSE_BUDGET_SECONDS if promotable else _wait_timeout(timeout)
+        state = owner.wait_foreground(worker, wait_timeout)
         if state == "shutdown":
             terminate_owned_process_tree(worker.process)
             raise ToolError(
@@ -1266,6 +1328,21 @@ def _run_worker(
                 action=action.name,
                 recovery_token=worker.token,
             )
+        if state == "timeout" and promotable:
+            promoted = owner.promote_foreground(
+                worker,
+                record,
+                action,
+                workspace=workspace,
+                secrets=secrets,
+                timeout_seconds=timeout,
+            )
+            if promoted is not None:
+                return promoted
+            # Boundary race: the worker exited while the response-budget timer fired.
+            # Let its foreground finalizer finish and preserve the original sync result.
+            owner.wait_foreground_exit(worker, MAX_EXTENSION_JOB_SHUTDOWN_SECONDS)
+            state = "finished" if worker.finished else "timeout"
         if state == "timeout":
             terminate_owned_process_tree(worker.process)
             if not owner.wait_foreground_exit(worker, MAX_EXTENSION_JOB_SHUTDOWN_SECONDS):
@@ -1298,7 +1375,8 @@ def _run_worker(
         )
     finally:
         if reservation_active:
-            owner.finish_foreground(on_finish)
+            owner._cleanup_cancel_control_paths(control_dir, cancel_path, progress_path)
+            owner.finish_foreground(on_finish, release_job_slot=promotable)
 
 
 @dataclass
@@ -1308,6 +1386,13 @@ class _ForegroundWorker:
     stdout: _BoundedCapture
     stderr: _BoundedCapture
     on_finish: Callable[[], None] | None
+    started_at: float = field(default_factory=time.time)
+    started_monotonic: float = field(default_factory=time.monotonic)
+    cancel_control_dir: str | None = None
+    cancel_token_path: str | None = None
+    progress_path: str | None = None
+    job_slot_reserved: bool = False
+    promoted: bool = False
     condition: threading.Condition = field(
         default_factory=lambda: threading.Condition(threading.Lock()),
         repr=False,
@@ -1329,15 +1414,19 @@ class _ExtensionJob:
     extension_id: str
     action_name: str
     workspace_root: str | None
-    timeout_seconds: int
+    timeout_seconds: int | float
     process: subprocess.Popen[bytes]
     stdout: _BoundedCapture
     stderr: _BoundedCapture
     started_at: float
     secrets: tuple[str, ...]
+    started_monotonic: float = field(default_factory=time.monotonic)
     on_finish: Callable[[], None] | None = None
     cancel_control_dir: str | None = None
     cancel_token_path: str | None = None
+    progress_path: str | None = None
+    auto_promoted: bool = False
+    promoted_at: float | None = None
     cancel_reaper_started: bool = False
     status: str = "running"
     finished_at: float | None = None
@@ -1358,6 +1447,7 @@ class ExtensionJobManager:
     def __init__(self) -> None:
         self._jobs: dict[str, _ExtensionJob] = {}
         self._starting_jobs = 0
+        self._promotion_reservations = 0
         self._foreground_active = 0
         self._foreground_running: dict[str, _ForegroundWorker] = {}
         self._closed = False
@@ -1382,26 +1472,34 @@ class ExtensionJobManager:
         self._call_finish(callback)
 
     @staticmethod
-    def _prepare_cancel_control(job_id: str) -> tuple[str, str]:
+    def _prepare_cancel_control(job_id: str) -> tuple[str, str, str]:
         control_dir = tempfile.mkdtemp(prefix=f"folderbridge-extension-job-{job_id[:8]}-")
         try:
             os.chmod(control_dir, 0o700)
         except OSError:
             pass
-        return control_dir, str(Path(control_dir) / "cancel")
+        directory = Path(control_dir)
+        return control_dir, str(directory / "cancel"), str(directory / "progress.json")
 
     @staticmethod
-    def _cleanup_cancel_control_paths(control_dir: str | None, token_path: str | None) -> None:
+    def _cleanup_cancel_control_paths(
+        control_dir: str | None,
+        token_path: str | None,
+        progress_path: str | None = None,
+    ) -> None:
         if not control_dir:
             return
         directory = Path(control_dir)
-        token = Path(token_path) if token_path else directory / "cancel"
-        try:
-            token.unlink()
-        except FileNotFoundError:
-            pass
-        except OSError:
-            return
+        for candidate in (
+            Path(token_path) if token_path else directory / "cancel",
+            Path(progress_path) if progress_path else directory / "progress.json",
+        ):
+            try:
+                candidate.unlink()
+            except FileNotFoundError:
+                pass
+            except OSError:
+                return
         try:
             directory.rmdir()
         except OSError:
@@ -1409,9 +1507,10 @@ class ExtensionJobManager:
 
     @classmethod
     def _cleanup_cancel_control(cls, job: _ExtensionJob) -> None:
-        cls._cleanup_cancel_control_paths(job.cancel_control_dir, job.cancel_token_path)
+        cls._cleanup_cancel_control_paths(job.cancel_control_dir, job.cancel_token_path, job.progress_path)
         job.cancel_control_dir = None
         job.cancel_token_path = None
+        job.progress_path = None
 
     @staticmethod
     def _signal_cancel(job: _ExtensionJob) -> bool:
@@ -1452,7 +1551,7 @@ class ExtensionJobManager:
             with self._lock:
                 job.cancel_reaper_started = False
 
-    def reserve_foreground(self) -> None:
+    def reserve_foreground(self, *, reserve_job_slot: bool = False) -> None:
         with self._lock:
             if self._closed:
                 raise ToolError("SERVER_SHUTTING_DOWN", "FolderBridge is shutting down; new Extension workers are disabled.")
@@ -1462,14 +1561,31 @@ class ExtensionJobManager:
                     f"At most {MAX_FOREGROUND_EXTENSION_WORKERS} foreground Extension workers may remain active concurrently.",
                     limit=MAX_FOREGROUND_EXTENSION_WORKERS,
                 )
+            if reserve_job_slot:
+                self._prune_finished_locked()
+                running = sum(job.status in ACTIVE_EXTENSION_JOB_STATUSES for job in self._jobs.values())
+                if running + self._starting_jobs + self._promotion_reservations >= MAX_RUNNING_EXTENSION_JOBS:
+                    raise ToolError(
+                        "EXTENSION_JOB_LIMIT",
+                        "No host-owned Job capacity is available for a foreground action that may need transport-safe promotion.",
+                        limit=MAX_RUNNING_EXTENSION_JOBS,
+                    )
+                self._promotion_reservations += 1
             self._foreground_active += 1
 
-    def finish_foreground(self, on_finish: Callable[[], None] | None) -> None:
+    def finish_foreground(
+        self,
+        on_finish: Callable[[], None] | None,
+        *,
+        release_job_slot: bool = False,
+    ) -> None:
         """Release a foreground reservation that never adopted a process."""
         self._call_finish(on_finish)
         with self._lock:
             if self._foreground_active > 0:
                 self._foreground_active -= 1
+            if release_job_slot and self._promotion_reservations > 0:
+                self._promotion_reservations -= 1
 
     def adopt_foreground(
         self,
@@ -1477,9 +1593,28 @@ class ExtensionJobManager:
         stdout: _BoundedCapture,
         stderr: _BoundedCapture,
         on_finish: Callable[[], None] | None,
+        *,
+        started_at: float | None = None,
+        started_monotonic: float | None = None,
+        cancel_control_dir: str | None = None,
+        cancel_token_path: str | None = None,
+        progress_path: str | None = None,
+        job_slot_reserved: bool = False,
     ) -> _ForegroundWorker:
         token = uuid.uuid4().hex
-        worker = _ForegroundWorker(token, process, stdout, stderr, on_finish)
+        worker = _ForegroundWorker(
+            token,
+            process,
+            stdout,
+            stderr,
+            on_finish,
+            started_at=time.time() if started_at is None else started_at,
+            started_monotonic=time.monotonic() if started_monotonic is None else started_monotonic,
+            cancel_control_dir=cancel_control_dir,
+            cancel_token_path=cancel_token_path,
+            progress_path=progress_path,
+            job_slot_reserved=job_slot_reserved,
+        )
         with self._lock:
             self._foreground_running[token] = worker
             closed = self._closed
@@ -1517,6 +1652,10 @@ class ExtensionJobManager:
                     worker.monitor_failed = True
                     worker.condition.notify_all()
                 self._ensure_foreground_pending_reaper(worker)
+                return
+        with worker.condition:
+            if worker.promoted:
+                worker.condition.notify_all()
                 return
         self._finalize_foreground(worker, exit_code)
 
@@ -1569,6 +1708,7 @@ class ExtensionJobManager:
             cleanup_error = exc
         except Exception as exc:
             cleanup_error = ToolError("EXTENSION_PROTOCOL_ERROR", f"Could not finalize Extension worker streams: {type(exc).__name__}")
+        self._cleanup_cancel_control_paths(worker.cancel_control_dir, worker.cancel_token_path, worker.progress_path)
         self._call_finish(worker.on_finish)
         with worker.condition:
             worker.exit_code = exit_code
@@ -1580,6 +1720,8 @@ class ExtensionJobManager:
         with self._lock:
             if self._foreground_running.pop(worker.token, None) is not None and self._foreground_active > 0:
                 self._foreground_active -= 1
+            if worker.job_slot_reserved and self._promotion_reservations > 0:
+                self._promotion_reservations -= 1
         return True
 
     def request_foreground_shutdown(self, worker: _ForegroundWorker) -> None:
@@ -1606,6 +1748,117 @@ class ExtensionJobManager:
             worker.condition.wait_for(lambda: worker.finished, timeout=timeout)
             return worker.finished
 
+    def promote_foreground(
+        self,
+        worker: _ForegroundWorker,
+        record: ExtensionRecord,
+        action: ExtensionAction,
+        *,
+        workspace: Workspace | None,
+        secrets: tuple[str, ...],
+        timeout_seconds: int | float,
+    ) -> dict[str, Any] | None:
+        """Transfer one live foreground worker to Job ownership without restart."""
+        with worker.condition:
+            if worker.finished or worker.finalizing or worker.promoted:
+                return None
+            # Promotion is an ownership transfer and must be atomic against
+            # manager shutdown. Once close() has won the manager lock, the
+            # foreground worker stays foreground-owned and no new Job may be
+            # registered during shutdown.
+            with self._lock:
+                if self._closed:
+                    return None
+                worker.promoted = True
+                callback = worker.on_finish
+                worker.on_finish = None
+
+                job_id = uuid.uuid4().hex
+                promoted_at = time.time()
+                job = _ExtensionJob(
+                    job_id=job_id,
+                    extension_id=record.manifest.extension_id,
+                    action_name=action.name,
+                    workspace_root=str(workspace.root) if workspace is not None else None,
+                    timeout_seconds=timeout_seconds,
+                    process=worker.process,
+                    stdout=worker.stdout,
+                    stderr=worker.stderr,
+                    started_at=worker.started_at,
+                    started_monotonic=worker.started_monotonic,
+                    secrets=secrets,
+                    on_finish=callback,
+                    cancel_control_dir=worker.cancel_control_dir,
+                    cancel_token_path=worker.cancel_token_path,
+                    progress_path=worker.progress_path,
+                    auto_promoted=True,
+                    promoted_at=promoted_at,
+                )
+                worker.cancel_control_dir = None
+                worker.cancel_token_path = None
+                worker.progress_path = None
+
+                removed = self._foreground_running.pop(worker.token, None)
+                if removed is not None and self._foreground_active > 0:
+                    self._foreground_active -= 1
+                if worker.job_slot_reserved and self._promotion_reservations > 0:
+                    self._promotion_reservations -= 1
+                worker.job_slot_reserved = False
+                self._jobs[job.job_id] = job
+
+        monitor = threading.Thread(
+            target=self._monitor,
+            args=(job, record, action, workspace),
+            name=f"folderbridge-extension-job-{job.job_id[:8]}",
+            daemon=True,
+        )
+        try:
+            monitor.start()
+        except Exception as exc:
+            self._signal_cancel(job)
+            if not _wait_for_process_exit_without_kill(job.process, MAX_EXTENSION_JOB_CANCEL_GRACE_SECONDS):
+                terminate_owned_process_tree(job.process)
+            if _wait_for_process_exit(job.process, MAX_EXTENSION_JOB_SHUTDOWN_SECONDS):
+                self._cleanup_cancel_control(job)
+                with self._lock:
+                    self._jobs.pop(job.job_id, None)
+                self._notify_finish(job)
+                raise ToolError(
+                    "EXTENSION_JOB_MONITOR_START_FAILED",
+                    f"Could not start promoted Extension Job monitor: {type(exc).__name__}",
+                ) from exc
+            monitor_error = {
+                "code": "EXTENSION_JOB_MONITOR_START_FAILED",
+                "message": f"Could not start promoted Extension Job monitor: {type(exc).__name__}",
+            }
+            self._set_termination_pending(
+                job,
+                terminal_status="failed",
+                terminal_error=monitor_error,
+                code="EXTENSION_JOB_TERMINATION_PENDING",
+                message="The promoted Extension Job monitor failed to start and the worker is still alive; workspace mutation protection remains held.",
+            )
+            return {
+                "job_id": job.job_id,
+                "status": "termination_pending",
+                "extension_id": job.extension_id,
+                "extension_action": job.action_name,
+                "timeout_seconds": job.timeout_seconds,
+                "worker_pid": getattr(job.process, "pid", None),
+                "auto_promoted": True,
+                "promoted_after_seconds": max(0.0, time.monotonic() - worker.started_monotonic),
+            }
+        return {
+            "job_id": job.job_id,
+            "status": "running",
+            "extension_id": job.extension_id,
+            "extension_action": job.action_name,
+            "timeout_seconds": job.timeout_seconds,
+            "worker_pid": getattr(job.process, "pid", None),
+            "auto_promoted": True,
+            "promoted_after_seconds": max(0.0, time.monotonic() - worker.started_monotonic),
+        }
+
     def _prune_finished_locked(self) -> None:
         finished = sorted(
             (job for job in self._jobs.values() if job.status not in ACTIVE_EXTENSION_JOB_STATUSES),
@@ -1630,7 +1883,7 @@ class ExtensionJobManager:
                 raise ToolError("SERVER_SHUTTING_DOWN", "FolderBridge is shutting down; new Extension Jobs are disabled.")
             self._prune_finished_locked()
             running = sum(job.status in ACTIVE_EXTENSION_JOB_STATUSES for job in self._jobs.values())
-            if running + self._starting_jobs >= MAX_RUNNING_EXTENSION_JOBS:
+            if running + self._starting_jobs + self._promotion_reservations >= MAX_RUNNING_EXTENSION_JOBS:
                 raise ToolError(
                     "EXTENSION_JOB_LIMIT",
                     f"At most {MAX_RUNNING_EXTENSION_JOBS} extension jobs may run concurrently.",
@@ -1640,8 +1893,9 @@ class ExtensionJobManager:
         job_id = uuid.uuid4().hex
         cancel_control_dir: str | None = None
         cancel_token_path: str | None = None
+        progress_path: str | None = None
         try:
-            cancel_control_dir, cancel_token_path = self._prepare_cancel_control(job_id)
+            cancel_control_dir, cancel_token_path, progress_path = self._prepare_cancel_control(job_id)
             request, env, secrets = _worker_request(
                 record,
                 action,
@@ -1649,6 +1903,7 @@ class ExtensionJobManager:
                 workspace=workspace,
                 read_only=read_only,
                 job_cancel_path=cancel_token_path,
+                job_progress_path=progress_path,
             )
             process, stdout, stderr = _start_worker_process(record, request, env)
             job = _ExtensionJob(
@@ -1662,9 +1917,11 @@ class ExtensionJobManager:
                 stderr=stderr,
                 started_at=time.time(),
                 secrets=secrets,
+                started_monotonic=time.monotonic(),
                 on_finish=on_finish,
                 cancel_control_dir=cancel_control_dir,
                 cancel_token_path=cancel_token_path,
+                progress_path=progress_path,
             )
         except _WorkerLaunchTerminationPending as pending:
             terminal_error = {
@@ -1683,9 +1940,11 @@ class ExtensionJobManager:
                 stderr=pending.stderr,
                 started_at=time.time(),
                 secrets=secrets,
+                started_monotonic=time.monotonic(),
                 on_finish=on_finish,
                 cancel_control_dir=cancel_control_dir,
                 cancel_token_path=cancel_token_path,
+                progress_path=progress_path,
             )
             with self._lock:
                 self._starting_jobs -= 1
@@ -1703,11 +1962,12 @@ class ExtensionJobManager:
                 "extension_id": record.manifest.extension_id,
                 "extension_action": action.name,
                 "timeout_seconds": job.timeout_seconds,
+                "worker_pid": getattr(job.process, "pid", None),
             }
         except Exception:
             with self._lock:
                 self._starting_jobs -= 1
-            self._cleanup_cancel_control_paths(cancel_control_dir, cancel_token_path)
+            self._cleanup_cancel_control_paths(cancel_control_dir, cancel_token_path, progress_path)
             self._call_finish(on_finish)
             raise
         with self._lock:
@@ -1748,6 +2008,7 @@ class ExtensionJobManager:
                 "extension_id": record.manifest.extension_id,
                 "extension_action": action.name,
                 "timeout_seconds": job.timeout_seconds,
+                "worker_pid": getattr(job.process, "pid", None),
             }
         return {
             "job_id": job.job_id,
@@ -1755,6 +2016,7 @@ class ExtensionJobManager:
             "extension_id": record.manifest.extension_id,
             "extension_action": action.name,
             "timeout_seconds": job.timeout_seconds,
+            "worker_pid": getattr(job.process, "pid", None),
         }
 
     def _monitor(
@@ -1767,7 +2029,11 @@ class ExtensionJobManager:
         timed_out = False
         try:
             try:
-                exit_code = job.process.wait(timeout=_wait_timeout(job.timeout_seconds))
+                remaining_timeout = None if job.timeout_seconds == 0 else max(
+                    0.0,
+                    float(job.timeout_seconds) - (time.monotonic() - job.started_monotonic),
+                )
+                exit_code = job.process.wait(timeout=remaining_timeout)
             except subprocess.TimeoutExpired:
                 timed_out = True
                 self._signal_cancel(job)
@@ -1932,6 +2198,188 @@ class ExtensionJobManager:
                 if job.status == "termination_pending":
                     job.reconcile_in_progress = False
 
+    @staticmethod
+    def _read_progress(job: _ExtensionJob) -> tuple[dict[str, Any] | None, str | None]:
+        raw_path = job.progress_path
+        if not raw_path:
+            return None, None
+        path = Path(raw_path)
+        try:
+            if path.is_symlink() or _is_reparse_point(path):
+                return None, "progress path became a link/reparse point"
+            before = path.stat()
+        except FileNotFoundError:
+            return None, None
+        except OSError as exc:
+            return None, f"progress stat failed: {type(exc).__name__}"
+        if not path.is_file():
+            return None, "progress path is not a regular file"
+        if before.st_size > MAX_JOB_PROGRESS_BYTES:
+            return None, "progress payload exceeded 64 KiB"
+        try:
+            data = path.read_bytes()
+            after = path.stat()
+        except OSError as exc:
+            return None, f"progress read failed: {type(exc).__name__}"
+        before_identity = (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns)
+        after_identity = (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns)
+        if before_identity != after_identity or len(data) != after.st_size:
+            return None, "progress changed while being read"
+        try:
+            value = json.loads(data, parse_constant=_reject_json_constant)
+        except (UnicodeDecodeError, ValueError):
+            return None, "progress payload is not strict UTF-8 JSON"
+        if not isinstance(value, dict):
+            return None, "progress payload must be an object"
+        allowed = {"seq", "phase", "message", "current", "total", "heartbeat_interval_seconds"}
+        if set(value).difference(allowed):
+            return None, "progress payload has unknown fields"
+        progress: dict[str, Any] = {}
+        seq = value.get("seq")
+        if seq is not None:
+            if not isinstance(seq, int) or isinstance(seq, bool) or seq < 0:
+                return None, "progress seq must be a non-negative integer"
+            progress["seq"] = seq
+        for key, limit in (("phase", 120), ("message", 500)):
+            item = value.get(key)
+            if item is not None:
+                if not isinstance(item, str) or len(item) > limit:
+                    return None, f"progress {key} must be a string <= {limit} characters"
+                progress[key] = item
+        for key in ("current", "total"):
+            item = value.get(key)
+            if item is not None:
+                if (
+                    not isinstance(item, (int, float))
+                    or isinstance(item, bool)
+                    or not math.isfinite(float(item))
+                ):
+                    return None, f"progress {key} must be a finite number"
+                progress[key] = item
+        heartbeat = value.get("heartbeat_interval_seconds")
+        if heartbeat is not None:
+            if (
+                not isinstance(heartbeat, int)
+                or isinstance(heartbeat, bool)
+                or not MIN_JOB_PROGRESS_HEARTBEAT_SECONDS <= heartbeat <= MAX_JOB_PROGRESS_HEARTBEAT_SECONDS
+            ):
+                return None, (
+                    "progress heartbeat_interval_seconds must be an integer between "
+                    f"{MIN_JOB_PROGRESS_HEARTBEAT_SECONDS} and {MAX_JOB_PROGRESS_HEARTBEAT_SECONDS}"
+                )
+            progress["heartbeat_interval_seconds"] = heartbeat
+        observed_at = after.st_mtime
+        progress["observed_at"] = observed_at
+        progress["age_seconds"] = max(0.0, time.time() - observed_at)
+        return progress, None
+
+    @classmethod
+    def _runtime_health(cls, job: _ExtensionJob) -> dict[str, Any]:
+        now = time.time()
+        process_alive = job.process.poll() is None
+        elapsed = max(0.0, now - job.started_at)
+        if job.status not in ACTIVE_EXTENSION_JOB_STATUSES or not process_alive:
+            return {
+                "state": "finished",
+                "confidence": "high",
+                "process_alive": process_alive,
+                "elapsed_seconds": elapsed,
+                "stall_suspected": False,
+            }
+
+        progress, progress_error = cls._read_progress(job)
+        output_times = [
+            value
+            for value in (
+                getattr(job.stdout, "last_activity_at", None),
+                getattr(job.stderr, "last_activity_at", None),
+            )
+            if isinstance(value, (int, float))
+        ]
+        last_output_at = max(output_times) if output_times else None
+        output_age = max(0.0, now - last_output_at) if last_output_at is not None else None
+
+        state = "alive_quiet"
+        confidence = "low"
+        stall_suspected = False
+        if progress is not None:
+            age = float(progress["age_seconds"])
+            heartbeat = progress.get("heartbeat_interval_seconds")
+            stale_after = (
+                max(MIN_JOB_STALL_SUSPECT_SECONDS, float(heartbeat) * 3.0)
+                if isinstance(heartbeat, int)
+                else None
+            )
+            if stale_after is not None and age > stale_after:
+                state = "stalled_suspected"
+                confidence = "medium"
+                stall_suspected = True
+            elif age <= JOB_ACTIVITY_FRESH_SECONDS:
+                state = "progressing"
+                confidence = "high"
+        if state == "alive_quiet" and output_age is not None and output_age <= JOB_ACTIVITY_FRESH_SECONDS:
+            state = "active_output"
+            confidence = "medium"
+
+        payload: dict[str, Any] = {
+            "state": state,
+            "confidence": confidence,
+            "process_alive": process_alive,
+            "elapsed_seconds": elapsed,
+            "stall_suspected": stall_suspected,
+        }
+        if job.auto_promoted:
+            payload["auto_promoted"] = True
+            payload["promoted_at"] = job.promoted_at
+        if last_output_at is not None:
+            payload["last_output_activity_at"] = last_output_at
+            payload["last_output_activity_age_seconds"] = output_age
+        if progress is not None:
+            payload["progress"] = progress
+        if progress_error is not None:
+            payload["progress_diagnostic"] = progress_error
+        return payload
+
+    def list(
+        self,
+        *,
+        workspace: Workspace | None,
+        offset: int = 0,
+        limit: int = 100,
+    ) -> dict[str, Any]:
+        with self._lock:
+            jobs = list(self._jobs.values())
+        if workspace is not None:
+            root = str(workspace.root)
+            jobs = [job for job in jobs if job.workspace_root == root]
+        else:
+            jobs = [job for job in jobs if job.workspace_root is None]
+        jobs.sort(key=lambda job: job.started_at, reverse=True)
+        total = len(jobs)
+        page = jobs[offset:offset + limit]
+        rendered = [
+            {
+                "job_id": job.job_id,
+                "status": job.status,
+                "extension_id": job.extension_id,
+                "extension_action": job.action_name,
+                "timeout_seconds": job.timeout_seconds,
+                "worker_pid": getattr(job.process, "pid", None),
+                "started_at": job.started_at,
+                "finished_at": job.finished_at,
+                "runtime_health": self._runtime_health(job),
+            }
+            for job in page
+        ]
+        next_offset = offset + len(page) if offset + len(page) < total else None
+        return {
+            "jobs": rendered,
+            "total": total,
+            "offset": offset,
+            "next_offset": next_offset,
+            "truncated": next_offset is not None,
+        }
+
     def _get(self, job_id: str, *, workspace: Workspace | None) -> _ExtensionJob:
         if not isinstance(job_id, str) or not re.fullmatch(r"[0-9a-f]{32}", job_id):
             raise ToolError("INVALID_ARGUMENT", "job_id must be a FolderBridge extension job id")
@@ -1956,6 +2404,7 @@ class ExtensionJobManager:
                 "extension_id": job.extension_id,
                 "extension_action": job.action_name,
                 "timeout_seconds": job.timeout_seconds,
+                "worker_pid": getattr(job.process, "pid", None),
                 "started_at": job.started_at,
                 "finished_at": job.finished_at,
                 "exit_code": job.exit_code,
@@ -1964,7 +2413,8 @@ class ExtensionJobManager:
                 payload["result"] = job.result
             if job.error is not None:
                 payload["error"] = job.error
-            return payload
+        payload["runtime_health"] = self._runtime_health(job)
+        return payload
 
     def cancel(self, job_id: str, *, workspace: Workspace | None) -> dict[str, Any]:
         job = self._get(job_id, workspace=workspace)
@@ -2071,6 +2521,8 @@ class _BoundedCapture(threading.Thread):
         self.limit = limit
         self.data = bytearray()
         self.truncated = False
+        self.total_bytes = 0
+        self.last_activity_at: float | None = None
 
     def run(self) -> None:
         while True:
@@ -2080,6 +2532,8 @@ class _BoundedCapture(threading.Thread):
                 return
             if not chunk:
                 return
+            self.total_bytes += len(chunk)
+            self.last_activity_at = time.time()
             room = self.limit - len(self.data)
             if room > 0:
                 self.data.extend(chunk[:room])

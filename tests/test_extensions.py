@@ -777,6 +777,187 @@ class ExtensionTests(unittest.TestCase):
         self.assertIn("folderbridge-extension-job-", status["result"]["cancel_path"])
         self.assertTrue(job_finished.wait(timeout=1))
 
+    def test_long_foreground_auto_promotes_same_worker_without_duplicate_execution(self) -> None:
+        path = self.make_extension(
+            plugin_source=(
+                "import json, os, time\n"
+                "from pathlib import Path\n"
+                "def handle(action, params, context):\n"
+                "    count_path = Path(context['state_dir']) / 'count.txt'\n"
+                "    count = int(count_path.read_text(encoding='ascii')) + 1 if count_path.exists() else 1\n"
+                "    count_path.write_text(str(count), encoding='ascii')\n"
+                "    progress = context.get('job_progress_path')\n"
+                "    if progress:\n"
+                "        Path(progress).write_text(json.dumps({'seq': 1, 'phase': 'sleep', 'heartbeat_interval_seconds': 5}), encoding='utf-8')\n"
+                "    time.sleep(0.12)\n"
+                "    return {'count': count, 'pid': os.getpid(), 'cancel_path': context.get('job_cancel_path')}\n"
+            )
+        )
+        manifest_path = path / "folderbridge-extension.json"
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest["actions"]["echo"]["timeout_seconds"] = 2
+        manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+        record = self.registry.get("example")
+        self.trust.approve(record, enabled=True)
+
+        with mock.patch.object(extensions_module, "TRANSPORT_RESPONSE_BUDGET_SECONDS", 0.03):
+            started = self.registry.run(
+                "example",
+                "echo",
+                {"value": "ignored"},
+                workspace=Workspace(self.workspace_root),
+                read_only=True,
+            )
+
+        self.assertEqual(started["status"], "running")
+        self.assertTrue(started["auto_promoted"])
+        self.assertLess(started["promoted_after_seconds"], 0.2)
+        self.assertEqual(started["timeout_seconds"], 2)
+
+        listed = self.registry.job_list(workspace=Workspace(self.workspace_root))
+        self.assertIn(started["job_id"], {item["job_id"] for item in listed["jobs"]})
+        running = self.registry.job_status(started["job_id"], workspace=Workspace(self.workspace_root))
+        self.assertIn(running["runtime_health"]["state"], {"progressing", "alive_quiet", "active_output"})
+
+        deadline = time.monotonic() + 3
+        status = running
+        while status["status"] == "running" and time.monotonic() < deadline:
+            time.sleep(0.02)
+            status = self.registry.job_status(started["job_id"], workspace=Workspace(self.workspace_root))
+        self.assertEqual(status["status"], "succeeded")
+        self.assertEqual(status["result"]["count"], 1)
+        self.assertIsInstance(status["result"]["cancel_path"], str)
+
+    def test_shutdown_wins_extension_promotion_boundary_without_registering_new_job(self) -> None:
+        manager = extensions_module.ExtensionJobManager()
+        manager.close()
+        process = mock.Mock()
+        process.poll.return_value = None
+        worker = extensions_module._ForegroundWorker(
+            token="boundary-worker",
+            process=process,
+            stdout=mock.Mock(),
+            stderr=mock.Mock(),
+            on_finish=mock.Mock(),
+            job_slot_reserved=True,
+        )
+        record = mock.Mock()
+        record.manifest.extension_id = "example"
+        action = mock.Mock()
+        action.name = "echo"
+
+        promoted = manager.promote_foreground(
+            worker,
+            record,
+            action,
+            workspace=Workspace(self.workspace_root),
+            secrets=(),
+            timeout_seconds=2,
+        )
+
+        self.assertIsNone(promoted)
+        self.assertFalse(worker.promoted)
+        self.assertIsNotNone(worker.on_finish)
+        with manager._lock:
+            self.assertEqual(manager._jobs, {})
+
+    def test_auto_promoted_job_timeout_is_end_to_end_not_restarted_at_promotion(self) -> None:
+        manager = extensions_module.ExtensionJobManager()
+        observed_timeouts: list[float | None] = []
+
+        class FinishedProcess:
+            def wait(self, timeout=None):
+                observed_timeouts.append(timeout)
+                return 0
+            def poll(self):
+                return 0
+
+        job = extensions_module._ExtensionJob(
+            job_id="f" * 32,
+            extension_id="example",
+            action_name="echo",
+            workspace_root=str(self.workspace_root),
+            timeout_seconds=10,
+            process=FinishedProcess(),
+            stdout=mock.Mock(),
+            stderr=mock.Mock(),
+            started_at=time.time() - 4,
+            started_monotonic=time.monotonic() - 4,
+            secrets=(),
+            auto_promoted=True,
+            promoted_at=time.time(),
+        )
+        record = mock.Mock()
+        action = mock.Mock()
+        action.name = "echo"
+        with manager._lock:
+            manager._jobs[job.job_id] = job
+        try:
+            with mock.patch.object(extensions_module, "_close_worker_streams", return_value=""), mock.patch.object(
+                extensions_module, "_decode_worker_result", return_value={"done": True}
+            ):
+                manager._monitor(job, record, action, Workspace(self.workspace_root))
+            self.assertEqual(job.status, "succeeded")
+            self.assertEqual(len(observed_timeouts), 1)
+            self.assertIsNotNone(observed_timeouts[0])
+            self.assertGreater(observed_timeouts[0], 5.0)
+            self.assertLess(observed_timeouts[0], 7.0)
+        finally:
+            with manager._lock:
+                manager._jobs.pop(job.job_id, None)
+
+    def test_runtime_health_only_suspects_stall_with_explicit_stale_heartbeat_contract(self) -> None:
+        manager = extensions_module.ExtensionJobManager()
+        control_dir = self.base / "health-control"
+        control_dir.mkdir()
+        progress_path = control_dir / "progress.json"
+        progress_path.write_text(
+            json.dumps({"seq": 7, "phase": "round", "current": 3, "total": 10, "heartbeat_interval_seconds": 5}),
+            encoding="utf-8",
+        )
+
+        class RunningProcess:
+            pid = 12345
+            def poll(self):
+                return None
+
+        stdout = mock.Mock()
+        stdout.last_activity_at = None
+        stderr = mock.Mock()
+        stderr.last_activity_at = None
+        job = extensions_module._ExtensionJob(
+            job_id="e" * 32,
+            extension_id="example",
+            action_name="run",
+            workspace_root=str(self.workspace_root),
+            timeout_seconds=0,
+            process=RunningProcess(),
+            stdout=stdout,
+            stderr=stderr,
+            started_at=time.time() - 30,
+            secrets=(),
+            progress_path=str(progress_path),
+        )
+        with manager._lock:
+            manager._jobs[job.job_id] = job
+        try:
+            fresh = manager.status(job.job_id, workspace=Workspace(self.workspace_root))
+            self.assertEqual(fresh["runtime_health"]["state"], "progressing")
+            old = time.time() - 1000
+            os.utime(progress_path, (old, old))
+            stale = manager.status(job.job_id, workspace=Workspace(self.workspace_root))
+            self.assertEqual(stale["runtime_health"]["state"], "stalled_suspected")
+            self.assertEqual(stale["status"], "running")
+            self.assertIsNone(job.process.poll())
+
+            progress_path.unlink()
+            quiet = manager.status(job.job_id, workspace=Workspace(self.workspace_root))
+            self.assertEqual(quiet["runtime_health"]["state"], "alive_quiet")
+            self.assertFalse(quiet["runtime_health"]["stall_suspected"])
+        finally:
+            with manager._lock:
+                manager._jobs.pop(job.job_id, None)
+
     def test_foreground_shutdown_wakes_request_without_releasing_live_worker(self) -> None:
         manager = extensions_module.ExtensionJobManager()
         finished = threading.Event()

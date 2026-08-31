@@ -34,6 +34,69 @@ function Ensure-OutputFile([string]$Path, [bool]$CanOverwrite) {
     }
 }
 
+Add-Type @"
+using System;
+using System.Runtime.InteropServices;
+public static class FolderBridgeOfficePdfDpiNative {
+    [DllImport("user32.dll")]
+    public static extern IntPtr SetThreadDpiAwarenessContext(IntPtr dpiContext);
+    [DllImport("user32.dll")]
+    public static extern uint GetDpiForSystem();
+}
+"@
+
+function Get-SystemDpi {
+    $systemAware = [IntPtr](-2)
+    $previous = [FolderBridgeOfficePdfDpiNative]::SetThreadDpiAwarenessContext($systemAware)
+    try {
+        $dpi = [int][FolderBridgeOfficePdfDpiNative]::GetDpiForSystem()
+    }
+    finally {
+        if ($previous -ne [IntPtr]::Zero) {
+            [void][FolderBridgeOfficePdfDpiNative]::SetThreadDpiAwarenessContext($previous)
+        }
+    }
+    if ($dpi -lt 96) { return 96 }
+    return $dpi
+}
+
+function Convert-PixelsToDips([int]$Pixels, [int]$Dpi) {
+    return [Math]::Max(1, [int][Math]::Round($Pixels * 96.0 / $Dpi))
+}
+
+function Resize-PngToPixels([string]$Path, [int]$TargetWidth, [int]$TargetHeight) {
+    Add-Type -AssemblyName System.Drawing
+    $image = $null
+    $bitmap = $null
+    $graphics = $null
+    $temporary = "$Path.folderbridge-resize.png"
+    try {
+        $image = [System.Drawing.Image]::FromFile($Path)
+        if ($image.Width -eq $TargetWidth -and $image.Height -eq $TargetHeight) { return }
+        $bitmap = New-Object System.Drawing.Bitmap($TargetWidth, $TargetHeight)
+        $graphics = [System.Drawing.Graphics]::FromImage($bitmap)
+        $graphics.CompositingQuality = [System.Drawing.Drawing2D.CompositingQuality]::HighQuality
+        $graphics.InterpolationMode = [System.Drawing.Drawing2D.InterpolationMode]::HighQualityBicubic
+        $graphics.PixelOffsetMode = [System.Drawing.Drawing2D.PixelOffsetMode]::HighQuality
+        $graphics.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::HighQuality
+        $graphics.DrawImage($image, 0, 0, $TargetWidth, $TargetHeight)
+        $graphics.Dispose()
+        $graphics = $null
+        $bitmap.Save($temporary, [System.Drawing.Imaging.ImageFormat]::Png)
+        $bitmap.Dispose()
+        $bitmap = $null
+        $image.Dispose()
+        $image = $null
+        Move-Item -LiteralPath $temporary -Destination $Path -Force
+    }
+    finally {
+        if ($null -ne $graphics) { $graphics.Dispose() }
+        if ($null -ne $bitmap) { $bitmap.Dispose() }
+        if ($null -ne $image) { $image.Dispose() }
+        Remove-Item -LiteralPath $temporary -Force -ErrorAction SilentlyContinue
+    }
+}
+
 function Get-AwaitMethods {
     Add-Type -AssemblyName System.Runtime.WindowsRuntime
     $methods = [System.WindowsRuntimeSystemExtensions].GetMethods()
@@ -76,25 +139,29 @@ function Render-PdfToPng([string]$PdfPath, [string]$NamePrefix, [int]$RequestedS
     $pageCount = [int]$pdf.PageCount
     $bounds = Normalize-Range $pageCount $RequestedStart $RequestedEnd
     $files = New-Object System.Collections.Generic.List[string]
+    $systemDpi = Get-SystemDpi
     for ($pageNumber = $bounds[0]; $pageNumber -le $bounds[1]; $pageNumber++) {
         $page = $null
         $stream = $null
         try {
             $page = $pdf.GetPage([uint32]($pageNumber - 1))
             $size = $page.Size
-            $height = [Math]::Max(1, [int][Math]::Round($TargetWidth * $size.Height / $size.Width))
-            $fileName = "{0}-P{1:D4}.png" -f $NamePrefix, $pageNumber
+            $targetHeight = [Math]::Max(1, [int][Math]::Round($TargetWidth * $size.Height / $size.Width))
+            $widthDips = Convert-PixelsToDips $TargetWidth $systemDpi
+            $heightDips = Convert-PixelsToDips $targetHeight $systemDpi
+            $fileName = if ($NamePrefix -eq "P") { "P{0:D4}.png" -f $pageNumber } else { "{0}-P{1:D4}.png" -f $NamePrefix, $pageNumber }
             $pngPath = Join-Path $OutputDir $fileName
             Ensure-OutputFile $pngPath $CanOverwrite
             [System.IO.File]::WriteAllBytes($pngPath, [byte[]]@())
             $pngStorage = Await-Operation ([Windows.Storage.StorageFile]::GetFileFromPathAsync($pngPath)) ([Windows.Storage.StorageFile])
             $stream = Await-Operation ($pngStorage.OpenAsync([Windows.Storage.FileAccessMode]::ReadWrite)) ([Windows.Storage.Streams.IRandomAccessStream])
             $options = New-Object Windows.Data.Pdf.PdfPageRenderOptions
-            $options.DestinationWidth = [uint32]$TargetWidth
-            $options.DestinationHeight = [uint32]$height
+            $options.DestinationWidth = [uint32]$widthDips
+            $options.DestinationHeight = [uint32]$heightDips
             Await-Action ($page.RenderToStreamAsync($stream, $options))
             $stream.Dispose()
             $stream = $null
+            Resize-PngToPixels $pngPath $TargetWidth $targetHeight
             $files.Add($fileName)
         }
         finally {
@@ -140,57 +207,6 @@ function Render-PowerPoint([string]$SourcePath, [bool]$CanOverwrite) {
         if ($null -ne $presentation) {
             try { $presentation.Close() } catch {}
             [void][Runtime.InteropServices.Marshal]::ReleaseComObject($presentation)
-        }
-        if ($null -ne $app) {
-            try { $app.Quit() } catch {}
-            [void][Runtime.InteropServices.Marshal]::ReleaseComObject($app)
-        }
-        [GC]::Collect()
-        [GC]::WaitForPendingFinalizers()
-    }
-}
-
-function Render-Word([string]$SourcePath, [bool]$CanOverwrite) {
-    $app = $null
-    $doc = $null
-    try {
-        $app = New-Object -ComObject Word.Application
-        $app.Visible = $false
-        $app.DisplayAlerts = 0
-        $app.AutomationSecurity = 3
-        $doc = $app.Documents.Open($SourcePath, $false, $true, $false)
-        $count = [int]$doc.ComputeStatistics(2)
-        $bounds = Normalize-Range $count $PageStart $PageEnd
-        $pdfPath = Join-Path $TempDir "word-render.pdf"
-        # wdExportFormatPDF=17, wdExportOptimizeForPrint=0, wdExportFromTo=3, wdExportDocumentContent=0
-        $doc.ExportAsFixedFormat($pdfPath, 17, $false, 0, 3, $bounds[0], $bounds[1], 0, $true, $true, 0, $true, $true, $false)
-        $rendered = Render-PdfToPng $pdfPath "P" 1 ($bounds[1] - $bounds[0] + 1) $Width $CanOverwrite
-        # Rename PDF-local page numbers to source document page numbers.
-        $files = New-Object System.Collections.Generic.List[string]
-        for ($j = 0; $j -lt $rendered.Files.Count; $j++) {
-            $sourcePage = $bounds[0] + $j
-            $oldPath = Join-Path $OutputDir $rendered.Files[$j]
-            $newName = "P{0:D4}.png" -f $sourcePage
-            $newPath = Join-Path $OutputDir $newName
-            if ($oldPath -ne $newPath) {
-                Ensure-OutputFile $newPath $CanOverwrite
-                Move-Item -LiteralPath $oldPath -Destination $newPath -Force:$CanOverwrite
-            }
-            $files.Add($newName)
-        }
-        return @{
-            backend = "Microsoft Word ExportAsFixedFormat + Windows.Data.Pdf"
-            application = "Word"
-            source_units = $count
-            selected_range = @{ start = $bounds[0]; end = $bounds[1]; unit = "page" }
-            files = $files.ToArray()
-            notes = @("Word performs native pagination and PDF export; Windows.Data.Pdf rasterizes each exported page to PNG.", "Macros are force-disabled and the document is opened read-only.")
-        }
-    }
-    finally {
-        if ($null -ne $doc) {
-            try { $doc.Close(0) } catch {}
-            [void][Runtime.InteropServices.Marshal]::ReleaseComObject($doc)
         }
         if ($null -ne $app) {
             try { $app.Quit() } catch {}
@@ -302,7 +318,7 @@ try {
     $extension = [IO.Path]::GetExtension($inputFile).ToLowerInvariant()
     switch ($extension) {
         ".pptx" { $result = Render-PowerPoint $inputFile $canOverwrite }
-        ".docx" { $result = Render-Word $inputFile $canOverwrite }
+        ".docx" { throw "DOCX rendering is orchestrated by the Office extension worker and is not supported by this shared PowerPoint/Excel stage script." }
         ".xlsx" { $result = Render-Excel $inputFile $canOverwrite }
         default { throw "Unsupported Office format: $extension" }
     }

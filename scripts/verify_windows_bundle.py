@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
+import tempfile
 import tomllib
 from pathlib import Path
 from typing import Any
@@ -19,7 +20,7 @@ EXPECTED_ENGINEERING_SKILLS = {
     "code-review",
     "implement",
 }
-EXPECTED_EXTENSION_VERSIONS = {"git-publisher": "1.3.1", "office": "1.1.0"}
+EXPECTED_EXTENSION_VERSIONS = {"git-publisher": "1.3.1", "office": "1.1.4"}
 
 
 def _project_version() -> str:
@@ -54,6 +55,77 @@ def _json(executable: Path, *args: str) -> dict[str, Any]:
     return payload
 
 
+def _mcp_tool_catalog(executable: Path) -> dict[str, dict[str, Any]]:
+    with tempfile.TemporaryDirectory(prefix="folderbridge-bundle-smoke-") as temporary:
+        requests = [
+            {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "initialize",
+                "params": {
+                    "protocolVersion": "2025-11-25",
+                    "capabilities": {},
+                    "clientInfo": {"name": "bundle-verifier", "version": "1"},
+                },
+            },
+            {"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}},
+        ]
+        payload = b"".join(
+            json.dumps(request, separators=(",", ":")).encode("utf-8") + b"\n"
+            for request in requests
+        )
+        process = subprocess.Popen(
+            [
+                str(executable),
+                "serve",
+                "--workspace",
+                temporary,
+                "--allow-tasks",
+                "--capability",
+                "test",
+            ],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        try:
+            stdout, stderr = process.communicate(payload, timeout=30)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.communicate()
+            raise RuntimeError("packaged MCP tools/list smoke timed out")
+        if process.returncode != 0:
+            diagnostics = stderr.decode("utf-8", errors="replace")[-2000:]
+            raise RuntimeError(f"packaged MCP tools/list smoke failed with exit code {process.returncode}: {diagnostics}")
+        responses: dict[int, dict[str, Any]] = {}
+        for raw in stdout.splitlines():
+            try:
+                response = json.loads(raw)
+            except (UnicodeDecodeError, json.JSONDecodeError, ValueError):
+                continue
+            if isinstance(response, dict) and isinstance(response.get("id"), int):
+                responses[int(response["id"])] = response
+        catalog_response = responses.get(2)
+        tools = catalog_response.get("result", {}).get("tools") if isinstance(catalog_response, dict) else None
+        if not isinstance(tools, list):
+            raise RuntimeError("packaged MCP tools/list did not return a tool catalog")
+        return {
+            str(tool.get("name")): tool
+            for tool in tools
+            if isinstance(tool, dict) and isinstance(tool.get("name"), str)
+        }
+
+
+def _action_enum(tool: dict[str, Any]) -> set[str]:
+    schema = tool.get("inputSchema")
+    if not isinstance(schema, dict):
+        return set()
+    properties = schema.get("properties")
+    action = properties.get("action") if isinstance(properties, dict) else None
+    values = action.get("enum") if isinstance(action, dict) else None
+    return {str(value) for value in values} if isinstance(values, list) else set()
+
+
 def verify(executable: Path) -> dict[str, Any]:
     executable = executable.resolve(strict=True)
     if not executable.is_file():
@@ -63,6 +135,18 @@ def verify(executable: Path) -> dict[str, Any]:
     expected_version = f"folderbridge-mcp {_project_version()}"
     if version != expected_version:
         raise RuntimeError(f"version smoke mismatch: expected {expected_version!r}, got {version!r}")
+
+    mcp_tools = _mcp_tool_catalog(executable)
+    required_tools = {"flight_recorder", "extension", "run_task", "run_capability"}
+    missing_tools = sorted(required_tools.difference(mcp_tools))
+    if missing_tools:
+        raise RuntimeError(f"packaged MCP catalog is missing required tools: {missing_tools}")
+    if _action_enum(mcp_tools["extension"]) != {"list", "info", "run", "job_list", "job_status", "job_cancel"}:
+        raise RuntimeError("packaged Extension Job-management action contract mismatch")
+    expected_task_actions = {"run", "list", "status", "cancel"}
+    for tool_name in ("run_task", "run_capability"):
+        if _action_enum(mcp_tools[tool_name]) != expected_task_actions:
+            raise RuntimeError(f"packaged {tool_name} Job-management action contract mismatch")
 
     extension_catalog = _json(executable, "extensions", "--json")
     extensions = extension_catalog.get("extensions")
@@ -176,6 +260,7 @@ def verify(executable: Path) -> dict[str, Any]:
         "bundled_extensions": sorted(bundled_extensions),
         "bundled_skill_packs": sorted(bundled_skill_packs),
         "engineering_skills": sorted(actual_skills),
+        "mcp_job_management": True,
     }
 
 

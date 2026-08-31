@@ -22,8 +22,11 @@ from .concurrency import (
     CONTROL_WORKERS,
     DATA_MAX_INFLIGHT,
     DATA_WORKERS,
+    BoundedExecutorLane,
     MutationGateClosed,
     ResourceLockTable,
+    WORKSPACE_MUTATION_WAIT_SECONDS,
+    WorkspaceMutationBusy,
     WorkspaceMutationGate,
 )
 from .extensions import (
@@ -32,9 +35,15 @@ from .extensions import (
     MAX_RUNNING_EXTENSION_JOBS,
     ExtensionRegistry,
 )
+from .flight_recorder import FlightRecorder
 from .security import MAX_EDIT_TEXT_BYTES, MAX_SEARCH_TEXT_BYTES, ToolError, Workspace
+from .process_control import TRANSPORT_RESPONSE_BUDGET_SECONDS
 from .skills import SkillEngine
-from .task_runner import run_task
+from .task_runner import (
+    MAX_RETAINED_TASK_JOBS,
+    MAX_RUNNING_TASK_JOBS,
+    TaskJobManager,
+)
 from .text_writes import (
     MAX_ACTIVE_TEXT_TRANSACTIONS,
     MAX_TRANSACTION_CHUNK_BYTES,
@@ -123,11 +132,18 @@ class ToolRuntime:
             name for name in self.capabilities if name in EXECUTION_CAPABILITY_NAMES
         )
         self.extensions = ExtensionRegistry()
+        self.task_jobs = TaskJobManager()
         self.skills = SkillEngine()
+        self.flight_recorder = FlightRecorder("mcp")
+        self._mutation_event_lane = BoundedExecutorLane(
+            workers=1,
+            max_inflight=32,
+            thread_name_prefix="folderbridge-mutation-flight",
+        )
         self.text_writes: TextWriteManager | None = None
         self._text_writes_init_lock = threading.Lock()
         self._write_locks = ResourceLockTable()
-        self._workspace_mutations = WorkspaceMutationGate()
+        self._workspace_mutations = WorkspaceMutationGate(event_callback=self._record_workspace_mutation_event)
         self._shutdown_lock = threading.Lock()
         self._shutting_down = False
 
@@ -145,6 +161,7 @@ class ToolRuntime:
         # holders remain protected until they really release their leases.
         self._workspace_mutations.close()
         self.extensions.jobs.close()
+        self.task_jobs.close()
 
     def close(self) -> None:
         self.begin_shutdown()
@@ -152,6 +169,20 @@ class ToolRuntime:
             manager = self.text_writes
         if manager is not None:
             manager.close()
+        self._mutation_event_lane.close()
+
+    def _record_workspace_mutation_event(self, event: str, fields: dict[str, Any]) -> None:
+        severity = "warning" if event == "wait_timeout" else "info"
+        # Flight Recorder intentionally excludes workspace argument paths. Keep
+        # path detail in the immediate WORKSPACE_BUSY response only.
+        payload = {key: value for key, value in fields.items() if not key.endswith("_path")}
+        self._mutation_event_lane.submit(
+            lambda: self.flight_recorder.record(
+                f"workspace_mutation.{event}",
+                severity=severity,
+                **payload,
+            )
+        )
 
     @property
     def instructions(self) -> str:
@@ -179,7 +210,7 @@ class ToolRuntime:
         return base + self.skills.routing_index(max_chars=64 * 1024)
 
     def list_tools(self) -> list[dict[str, Any]]:
-        tools = [SERVER_INFO_TOOL, WORKSPACE_TOOL, FILE_INFO_TOOL, PPTX_INSPECT_TOOL, IMAGE_OPEN_TOOL, EXTENSION_TOOL]
+        tools = [SERVER_INFO_TOOL, FLIGHT_RECORDER_TOOL, WORKSPACE_TOOL, FILE_INFO_TOOL, PPTX_INSPECT_TOOL, IMAGE_OPEN_TOOL, EXTENSION_TOOL]
         if not self.read_only:
             tools.extend((EDIT_FILE_TOOL, WRITE_FILE_TOOL))
         if self.execution_capabilities:
@@ -202,6 +233,7 @@ class ToolRuntime:
     def call(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         handlers: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {
             "server_info": self._server_info,
+            "flight_recorder": self._flight_recorder,
             "workspace": self._workspace,
             "file_info": self._file_info,
             "pptx_inspect": self._pptx_inspect,
@@ -222,6 +254,12 @@ class ToolRuntime:
             return success_result(handler(arguments))
         except ToolError as exc:
             return error_result(exc.code, str(exc), exc.details)
+        except WorkspaceMutationBusy as exc:
+            return error_result(
+                "WORKSPACE_BUSY",
+                "Workspace mutation lease is busy; retry after the reported holder finishes.",
+                exc.details,
+            )
         except MutationGateClosed:
             return error_result("SERVER_SHUTTING_DOWN", "FolderBridge is shutting down; new workspace mutations are disabled.")
         except Exception as exc:  # keep protocol stdout clean while returning bounded diagnostics
@@ -241,11 +279,21 @@ class ToolRuntime:
             "task_execution_enabled": self.allow_tasks,
             "global_capabilities_enabled": list(self.capabilities),
             "builtin_tools": [
-                "workspace", "file_info", "pptx_inspect", "image_open", "extension",
+                "flight_recorder", "workspace", "file_info", "pptx_inspect", "image_open", "extension",
                 *([] if self.read_only else ["edit_file", "write_file"]),
             ],
             "extensions": self._extension_summary(None),
             "skill_engine": self._skill_summary(),
+            "flight_recorder": {
+                "enabled": True,
+                "window_minutes": 15,
+                "max_total_bytes": 20 * 1024 * 1024,
+                "captures_payload_bodies": False,
+                "captures_tunnel_diagnostics": True,
+                "best_effort_non_fatal": True,
+                "append_fsync": False,
+                "cleanup_async": True,
+            },
             "mcp_concurrency": {
                 "control_workers": CONTROL_WORKERS,
                 "control_max_inflight": CONTROL_MAX_INFLIGHT,
@@ -254,10 +302,14 @@ class ToolRuntime:
                 "busy_policy": "fail-fast",
                 "stdout_serialized": True,
                 "write_serialization": "per-target-resource",
+                "workspace_mutation_wait_seconds": WORKSPACE_MUTATION_WAIT_SECONDS,
+                "workspace_mutation_busy_policy": "bounded-wait-then-WORKSPACE_BUSY",
                 "shutdown_mutation_admission": "close-and-wake-waiters",
             },
             "extension_workers": {
                 "max_foreground": MAX_FOREGROUND_EXTENSION_WORKERS,
+                "inline_response_budget_seconds": TRANSPORT_RESPONSE_BUDGET_SECONDS,
+                "adaptive_foreground_to_job": True,
                 "holds_workspace_lease_until_process_exit": True,
                 "termination_pending_status": "termination_pending",
                 "process_local": True,
@@ -269,6 +321,21 @@ class ToolRuntime:
                 "process_local": True,
                 "survives_server_restart": False,
                 "independent_from_mcp_request_workers": True,
+                "rediscoverable_via_job_list": True,
+                "runtime_health": "process/output/optional-progress",
+                "quiet_never_auto_cancelled": True,
+            },
+            "task_jobs": {
+                "inline_response_budget_seconds": TRANSPORT_RESPONSE_BUDGET_SECONDS,
+                "max_running": MAX_RUNNING_TASK_JOBS,
+                "max_retained_finished": MAX_RETAINED_TASK_JOBS,
+                "covers": ["approved-task", "project-task-capability"],
+                "same_process_promotion": True,
+                "business_timeout_preserved": True,
+                "holds_workspace_lease_until_process_exit": True,
+                "rediscoverable_via_run_tool_list": True,
+                "runtime_health": "process/output",
+                "quiet_never_auto_cancelled": True,
             },
             "security": {
                 "workspace_confined": True,
@@ -302,6 +369,28 @@ class ToolRuntime:
             result.update(summaries[0])
             result["workspace"] = summaries[0]["name"]
         return result
+
+    def _flight_recorder(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        _require_only(arguments, {"action", "minutes", "limit", "role"})
+        action = arguments.get("action")
+        if action == "status":
+            return self.flight_recorder.status()
+        if action in {"recent", "errors"}:
+            minutes = arguments.get("minutes", 15)
+            limit = arguments.get("limit", 100 if action == "recent" else 50)
+            role = arguments.get("role")
+            if role == "all":
+                role = None
+            try:
+                return self.flight_recorder.recent(
+                    minutes=minutes,
+                    limit=limit,
+                    errors_only=action == "errors",
+                    role=role,
+                )
+            except ValueError as exc:
+                raise ToolError("INVALID_ARGUMENT", str(exc)) from exc
+        raise ToolError("INVALID_ARGUMENT", "action must be status, recent, or errors")
 
     def _target_summary(self, target: _WorkspaceTarget) -> dict[str, Any]:
         discovered = discover_capabilities(target.root)
@@ -485,8 +574,8 @@ class ToolRuntime:
     def _extension(self, arguments: dict[str, Any]) -> dict[str, Any]:
         _require_only(arguments, {"workspace_id", "action", "extension_id", "extension_action", "params", "job_id", "offset", "limit"})
         operation = arguments.get("action")
-        if operation not in {"list", "info", "run", "job_status", "job_cancel"}:
-            raise ToolError("INVALID_ARGUMENT", "action must be list, info, run, job_status, or job_cancel")
+        if operation not in {"list", "info", "run", "job_list", "job_status", "job_cancel"}:
+            raise ToolError("INVALID_ARGUMENT", "action must be list, info, run, job_list, job_status, or job_cancel")
         raw_workspace_id = arguments.get("workspace_id")
         target = self._select_target(raw_workspace_id) if raw_workspace_id is not None else None
 
@@ -513,6 +602,17 @@ class ToolRuntime:
                 "truncated": next_offset is not None,
                 "errors": description["errors"],
             }
+
+        if operation == "job_list":
+            offset = arguments.get("offset", 0)
+            limit = arguments.get("limit", 100)
+            if not isinstance(offset, int) or isinstance(offset, bool) or offset < 0:
+                raise ToolError("INVALID_ARGUMENT", "offset must be a non-negative integer")
+            if not isinstance(limit, int) or isinstance(limit, bool) or not 1 <= limit <= 200:
+                raise ToolError("INVALID_ARGUMENT", "limit must be between 1 and 200")
+            workspace = target.workspace if target is not None else None
+            result = self.extensions.job_list(workspace=workspace, offset=offset, limit=limit)
+            return self._scope_result(result, target) if target is not None else result
 
         if operation in {"job_status", "job_cancel"}:
             job_id = arguments.get("job_id")
@@ -558,10 +658,19 @@ class ToolRuntime:
         def invoke_extension(*, on_job_finish: Callable[[], None] | None = None) -> dict[str, Any]:
             return self.extensions.execute_prepared(prepared, on_job_finish=on_job_finish)
 
+        lease = None
+        lease_owner = {
+            "action": "extension/run",
+            "extension_id": extension_id,
+            "extension_action": extension_action,
+        }
         if action_spec.run_mode == "job":
-            lease = None
             if target is not None and not action_spec.read_only:
-                lease = self._workspace_mutations.acquire_exclusive(target.workspace_id)
+                lease = self._workspace_mutations.acquire_exclusive(
+                    target.workspace_id,
+                    timeout_seconds=WORKSPACE_MUTATION_WAIT_SECONDS,
+                    owner=lease_owner,
+                )
             try:
                 with self._shutdown_lock:
                     if self._shutting_down:
@@ -572,10 +681,18 @@ class ToolRuntime:
                     lease.release()
                 raise
         elif target is not None and not action_spec.read_only:
-            lease = self._workspace_mutations.acquire_exclusive(target.workspace_id)
+            lease = self._workspace_mutations.acquire_exclusive(
+                target.workspace_id,
+                timeout_seconds=WORKSPACE_MUTATION_WAIT_SECONDS,
+                owner=lease_owner,
+            )
             result = invoke_extension(on_job_finish=lease.release)
         else:
             result = invoke_extension()
+        if lease is not None and isinstance(result, dict):
+            update_owner = getattr(lease, "update_owner", None)
+            if callable(update_owner):
+                update_owner(job_id=result.get("job_id"), pid=result.get("worker_pid"))
         return self._scope_result(result, target) if target is not None else result
 
     def _edit_file(self, arguments: dict[str, Any]) -> dict[str, Any]:
@@ -586,8 +703,16 @@ class ToolRuntime:
             raise ToolError("INVALID_ARGUMENT", "path is required")
         resolved = target.workspace.resolve(path, for_write=True)
         resource_key = _write_resource_key(target, resolved)
-        with self._workspace_mutations.shared(target.workspace_id):
-            with self._write_locks.hold(resource_key):
+        with self._workspace_mutations.shared(
+            target.workspace_id,
+            timeout_seconds=WORKSPACE_MUTATION_WAIT_SECONDS,
+            owner={"action": "edit_file", "path": path},
+        ):
+            with self._write_locks.hold(
+                resource_key,
+                timeout_seconds=WORKSPACE_MUTATION_WAIT_SECONDS,
+                owner={"action": "edit_file", "path": path},
+            ):
                 result = target.workspace.edit_file(
                     path,
                     expected_sha256=arguments.get("expected_sha256"),
@@ -646,8 +771,16 @@ class ToolRuntime:
             transaction = manager.status(target.workspace, transaction_id)
             resolved = target.workspace.resolve(transaction["path"], for_write=True)
             resource_key = _write_resource_key(target, resolved)
-            with self._workspace_mutations.shared(target.workspace_id):
-                with self._write_locks.hold(resource_key):
+            with self._workspace_mutations.shared(
+                target.workspace_id,
+                timeout_seconds=WORKSPACE_MUTATION_WAIT_SECONDS,
+                owner={"action": "write_file/commit", "path": transaction["path"]},
+            ):
+                with self._write_locks.hold(
+                    resource_key,
+                    timeout_seconds=WORKSPACE_MUTATION_WAIT_SECONDS,
+                    owner={"action": "write_file/commit", "path": transaction["path"]},
+                ):
                     result = manager.commit(
                         target.workspace,
                         transaction_id,
@@ -659,27 +792,112 @@ class ToolRuntime:
         return self._scope_result(result, target)
 
     def _run_capability(self, arguments: dict[str, Any]) -> dict[str, Any]:
-        _require_only(arguments, {"workspace_id", "name"})
+        _require_only(arguments, {"workspace_id", "action", "name", "job_id", "offset", "limit"})
         target = self._select_target(arguments.get("workspace_id"))
+        action = arguments.get("action", "run")
+        if action == "list":
+            return self._scope_result(
+                self.task_jobs.list(
+                    workspace=target.root,
+                    expected_kind="capability",
+                    offset=arguments.get("offset", 0),
+                    limit=arguments.get("limit", 100),
+                ),
+                target,
+            )
+        if action in {"status", "cancel"}:
+            job_id = arguments.get("job_id")
+            if not isinstance(job_id, str) or not job_id:
+                raise ToolError("INVALID_ARGUMENT", "job_id is required for status/cancel")
+            result = (
+                self.task_jobs.status(job_id, workspace=target.root, expected_kind="capability")
+                if action == "status"
+                else self.task_jobs.cancel(job_id, workspace=target.root, expected_kind="capability")
+            )
+            return self._scope_result(result, target)
+        if action != "run":
+            raise ToolError("INVALID_ARGUMENT", "action must be run, list, status, or cancel")
+
         name = arguments.get("name")
         if not isinstance(name, str):
-            raise ToolError("INVALID_ARGUMENT", "name is required")
+            raise ToolError("INVALID_ARGUMENT", "name is required for run")
         if name not in self.execution_capabilities:
             raise ToolError(
                 "CAPABILITY_NOT_AUTHORIZED",
                 "This execution capability is not globally pre-authorized in the FolderBridge launcher.",
                 enabled=list(self.execution_capabilities),
             )
-        with self._workspace_mutations.exclusive(target.workspace_id):
-            result = run_capability(target.root, name)
+
+        lease = self._workspace_mutations.acquire_exclusive(
+            target.workspace_id,
+            timeout_seconds=WORKSPACE_MUTATION_WAIT_SECONDS,
+            owner={"action": "run_capability", "capability": name},
+        )
+        release_lock = threading.Lock()
+        released = False
+
+        def release_once() -> None:
+            nonlocal released
+            with release_lock:
+                if released:
+                    return
+                released = True
+            lease.release()
+
+        def managed_task_runner(root: Path, task: Any) -> dict[str, object]:
+            return self.task_jobs.run_or_promote(
+                root,
+                task,
+                job_kind="capability",
+                logical_name=name,
+                on_finish=release_once,
+            )
+
+        try:
+            with self._shutdown_lock:
+                if self._shutting_down:
+                    raise ToolError("SERVER_SHUTTING_DOWN", "FolderBridge is shutting down; new capabilities are disabled.")
+            result = run_capability(target.root, name, task_runner=managed_task_runner)
+        except Exception:
+            release_once()
+            raise
+        update_owner = getattr(lease, "update_owner", None)
+        if callable(update_owner):
+            update_owner(job_id=result.get("job_id"), pid=result.get("worker_pid"))
+        if not isinstance(result.get("job_id"), str):
+            release_once()
         return self._scope_result(result, target)
 
     def _run_task(self, arguments: dict[str, Any]) -> dict[str, Any]:
-        _require_only(arguments, {"workspace_id", "name"})
+        _require_only(arguments, {"workspace_id", "action", "name", "job_id", "offset", "limit"})
         target = self._select_target(arguments.get("workspace_id"))
+        action = arguments.get("action", "run")
+        if action == "list":
+            return self._scope_result(
+                self.task_jobs.list(
+                    workspace=target.root,
+                    expected_kind="task",
+                    offset=arguments.get("offset", 0),
+                    limit=arguments.get("limit", 100),
+                ),
+                target,
+            )
+        if action in {"status", "cancel"}:
+            job_id = arguments.get("job_id")
+            if not isinstance(job_id, str) or not job_id:
+                raise ToolError("INVALID_ARGUMENT", "job_id is required for status/cancel")
+            result = (
+                self.task_jobs.status(job_id, workspace=target.root, expected_kind="task")
+                if action == "status"
+                else self.task_jobs.cancel(job_id, workspace=target.root, expected_kind="task")
+            )
+            return self._scope_result(result, target)
+        if action != "run":
+            raise ToolError("INVALID_ARGUMENT", "action must be run, list, status, or cancel")
+
         name = arguments.get("name")
         if not isinstance(name, str):
-            raise ToolError("INVALID_ARGUMENT", "name is required")
+            raise ToolError("INVALID_ARGUMENT", "name is required for run")
         if not config_is_trusted(target.root, target.config):
             raise ToolError(
                 "CONFIG_NOT_TRUSTED",
@@ -688,8 +906,42 @@ class ToolRuntime:
         task = target.config.tasks.get(name)
         if task is None:
             raise ToolError("UNKNOWN_TASK", "Only locally approved named tasks can run.", available=sorted(target.config.tasks))
-        with self._workspace_mutations.exclusive(target.workspace_id):
-            result = run_task(target.root, task)
+
+        lease = self._workspace_mutations.acquire_exclusive(
+            target.workspace_id,
+            timeout_seconds=WORKSPACE_MUTATION_WAIT_SECONDS,
+            owner={"action": "run_task", "task": name},
+        )
+        release_lock = threading.Lock()
+        released = False
+
+        def release_once() -> None:
+            nonlocal released
+            with release_lock:
+                if released:
+                    return
+                released = True
+            lease.release()
+
+        try:
+            with self._shutdown_lock:
+                if self._shutting_down:
+                    raise ToolError("SERVER_SHUTTING_DOWN", "FolderBridge is shutting down; new tasks are disabled.")
+            result = self.task_jobs.run_or_promote(
+                target.root,
+                task,
+                job_kind="task",
+                logical_name=name,
+                on_finish=release_once,
+            )
+        except Exception:
+            release_once()
+            raise
+        update_owner = getattr(lease, "update_owner", None)
+        if callable(update_owner):
+            update_owner(job_id=result.get("job_id"), pid=result.get("worker_pid"))
+        if not isinstance(result.get("job_id"), str):
+            release_once()
         return self._scope_result(result, target)
 
 
@@ -783,6 +1035,28 @@ WORKSPACE_TOOL = {
     "annotations": {"readOnlyHint": True, "destructiveHint": False, "openWorldHint": False},
 }
 
+FLIGHT_RECORDER_TOOL = {
+    "name": "flight_recorder",
+    "title": "Read recent FolderBridge flight diagnostics",
+    "description": (
+        "Read FolderBridge's compact local reliability flight recorder. It keeps only the latest 15 minutes with a 20 MiB total cap, "
+        "records MCP/Tunnel metadata and bounded redacted diagnostics, and never stores full MCP request/response bodies. "
+        "Use action=status for storage health, recent for a bounded timeline, or errors for warning/error events only."
+    ),
+    "inputSchema": {
+        "type": "object",
+        "properties": {
+            "action": {"type": "string", "enum": ["status", "recent", "errors"]},
+            "minutes": {"type": "integer", "minimum": 1, "maximum": 15, "default": 15},
+            "limit": {"type": "integer", "minimum": 1, "maximum": 200, "default": 100},
+            "role": {"type": "string", "enum": ["all", "mcp", "launcher"], "default": "all"},
+        },
+        "required": ["action"],
+        "additionalProperties": False,
+    },
+    "annotations": {"readOnlyHint": True, "destructiveHint": False, "openWorldHint": False},
+}
+
 FILE_INFO_TOOL = {
     "name": "file_info",
     "title": "Inspect file metadata and SHA-256",
@@ -849,8 +1123,8 @@ EXTENSION_TOOL = {
     "title": "Use FolderBridge extensions",
     "description": (
         "Stable extension gateway. action=list returns a compact pageable catalog of installed/hot-reloaded extensions and action names; "
-        "action=info returns the full schema for one extension; action=run invokes one declared extension action. Job-mode actions return a host-owned job_id; "
-        "use action=job_status to inspect completion/results and action=job_cancel to terminate the owned worker process tree. "
+        "action=info returns the full schema for one extension; action=run invokes one declared extension action. Long foreground actions may be transport-safely promoted in-place to a host-owned Job; "
+        "use action=job_list to rediscover workspace Jobs, action=job_status to inspect completion/runtime health/results, and action=job_cancel to terminate the owned worker process tree. "
         "Installing more extensions does not add MCP tool names. External extension code requires exact-hash local approval; "
         "globally authorized actions must also be enabled in the FolderBridge extension sidebar. "
         "Dynamic workspace adapters are re-evaluated at call time, so later project changes do not require workspace task injection."
@@ -859,13 +1133,13 @@ EXTENSION_TOOL = {
         "type": "object",
         "properties": {
             "workspace_id": {"type": "string", "description": "Optional for list/info; required by workspace-bound run/job operations when multiple workspaces are configured."},
-            "action": {"type": "string", "enum": ["list", "info", "run", "job_status", "job_cancel"]},
+            "action": {"type": "string", "enum": ["list", "info", "run", "job_list", "job_status", "job_cancel"]},
             "extension_id": {"type": "string", "description": "Required for info/run."},
             "extension_action": {"type": "string", "description": "Required for run; choose an action declared by extension info/list."},
             "params": {"type": "object", "description": "Action parameters validated against the extension's declared input_schema."},
-            "job_id": {"type": "string", "description": "Required for job_status/job_cancel; returned by a run_mode=job action."},
-            "offset": {"type": "integer", "minimum": 0, "default": 0, "description": "Catalog result offset for action=list."},
-            "limit": {"type": "integer", "minimum": 1, "maximum": 200, "default": 100, "description": "Catalog page size for action=list."},
+            "job_id": {"type": "string", "description": "Required for job_status/job_cancel; returned by an explicit or auto-promoted Job action."},
+            "offset": {"type": "integer", "minimum": 0, "default": 0, "description": "Catalog/job result offset for action=list/job_list."},
+            "limit": {"type": "integer", "minimum": 1, "maximum": 200, "default": 100, "description": "Catalog/job page size for action=list/job_list."},
         },
         "required": ["action"],
         "additionalProperties": False,
@@ -937,19 +1211,23 @@ WRITE_FILE_TOOL = {
 
 RUN_CAPABILITY_TOOL = {
     "name": "run_capability",
-    "title": "Run a globally pre-authorized capability",
+    "title": "Run or manage a globally pre-authorized capability",
     "description": (
-        "Run one capability that the user enabled once in the FolderBridge launcher. "
-        "Availability is detected from the selected workspace at call time, so a capability can become usable later without editing workspace config. "
-        "Build/package capabilities may execute repository code. git-push is restricted to a GitHub HTTPS origin and the current branch, without force push."
+        "Run one capability enabled in the FolderBridge launcher. Short executions keep the legacy synchronous result; "
+        "project-task executions that outlive the transport-safe inline window are promoted in-place to a host-owned Job without restarting the process. "
+        "Use action=list/status/cancel to recover and manage those Jobs. Built-in bounded smoke/safe-build fallbacks remain synchronous. "
+        "git-push is restricted to a GitHub HTTPS origin and the current branch, without force push."
     ),
     "inputSchema": {
         "type": "object",
         "properties": {
             "workspace_id": {"type": "string", "description": "Required when server_info lists multiple workspaces."},
-            "name": {"type": "string"},
+            "action": {"type": "string", "enum": ["run", "list", "status", "cancel"], "default": "run"},
+            "name": {"type": "string", "description": "Required for action=run."},
+            "job_id": {"type": "string", "description": "Required for action=status/cancel; returned when a long execution is auto-promoted."},
+            "offset": {"type": "integer", "minimum": 0, "default": 0, "description": "Job result offset for action=list."},
+            "limit": {"type": "integer", "minimum": 1, "maximum": 200, "default": 100, "description": "Job page size for action=list."},
         },
-        "required": ["name"],
         "additionalProperties": False,
     },
     "annotations": {"readOnlyHint": False, "destructiveHint": True, "idempotentHint": False, "openWorldHint": True},
@@ -957,18 +1235,22 @@ RUN_CAPABILITY_TOOL = {
 
 RUN_TASK_TOOL = {
     "name": "run_task",
-    "title": "Run a locally approved task",
+    "title": "Run or manage a locally approved task",
     "description": (
-        "Run one exact, locally approved task by name. No command text or arguments come from MCP. "
-        "Repository code still executes with the current OS user's permissions."
+        "Run one exact locally approved task by name; no command text or arguments come from MCP. Short tasks keep the legacy synchronous result. "
+        "Tasks that outlive the transport-safe inline window are promoted in-place to a host-owned Job without restarting the process; "
+        "use action=list/status/cancel to recover and manage them. Repository code still executes with the current OS user's permissions."
     ),
     "inputSchema": {
         "type": "object",
         "properties": {
             "workspace_id": {"type": "string", "description": "Required when server_info lists multiple workspaces."},
-            "name": {"type": "string"},
+            "action": {"type": "string", "enum": ["run", "list", "status", "cancel"], "default": "run"},
+            "name": {"type": "string", "description": "Required for action=run."},
+            "job_id": {"type": "string", "description": "Required for action=status/cancel; returned when a long task is auto-promoted."},
+            "offset": {"type": "integer", "minimum": 0, "default": 0, "description": "Job result offset for action=list."},
+            "limit": {"type": "integer", "minimum": 1, "maximum": 200, "default": 100, "description": "Job page size for action=list."},
         },
-        "required": ["name"],
         "additionalProperties": False,
     },
     "annotations": {"readOnlyHint": False, "destructiveHint": True, "idempotentHint": False, "openWorldHint": True},

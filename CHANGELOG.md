@@ -2,6 +2,53 @@
 
 All notable changes to FolderBridge MCP are documented here.
 
+## 0.8.20 — 2026-08-31
+
+- Prevented workspace mutation contention from consuming the Tunnel response deadline. `edit_file`, `write_file(commit)`, non-read-only Extension launches, approved Tasks, and project Task capabilities now use a bounded 2-second workspace mutation wait and return `WORKSPACE_BUSY` with blocker diagnostics instead of silently waiting behind a long exclusive Job for minutes.
+- Applied the same bounded-wait rule to per-resource file locks, preserving normal short same-file serialization while preventing a second synchronous file mutation from waiting indefinitely behind an unusually long write.
+- Added mutation-lease Flight Recorder diagnostics for wait start/acquire/timeout and exclusive acquire/update/release, including workspace, shared/exclusive/resource mode, wait time, blocking reason, holder/requester action, Job id, worker pid, Extension action, and capability/task. Workspace argument paths remain excluded from persisted Flight Recorder records; path detail is available only in the immediate `WORKSPACE_BUSY` response. Recorder writes are dispatched through a bounded single-worker lane so diagnostic I/O cannot hold the mutation scheduler lock.
+- Preserved writer preference and true-process-lifetime lease protection: long Jobs still own their exclusive mutation lease until the worker actually exits; the new behavior changes only how competing synchronous MCP calls wait for admission. Timed-out exclusive waiters now wake blocked shared callers correctly.
+- Added regression coverage for the original long-Job-versus-`edit_file` failure, holder metadata, waiter wake-up, non-blocking flight recording, preserved original blocker attribution, and same-file resource-lock fail-fast behavior.
+- The external Tunnel client's post-deadline main-channel recovery is intentionally not emulated by restarting Tunnel from FolderBridge: a launcher-side restart would terminate process-local Jobs. FolderBridge 0.8.20 instead removes its known >response-budget lock-wait trigger; automatic main-channel reconstruction remains a Tunnel-client concern.
+
+## 0.8.19 — 2026-08-30
+
+- Added transport-safe adaptive execution for long FolderBridge-owned work. Extension foreground actions and fixed-argv Task/project-capability executions can now keep their original worker/process and promote in place to a host-owned Job after the shared 60-second synchronous response budget, without restarting or repeating paid/long work; business timeouts remain independent and Extension `timeout=0` remains unlimited.
+- Added recoverable Job control surfaces: Extension `job_list/job_status/job_cancel` plus Task/Capability `list/status/cancel`. All Job discovery/status/cancel operations run on the MCP control lane so they remain available while data workers are saturated, while actual execution stays on the data lane.
+- Hardened process ownership and workspace mutation leases across promotion, cancellation, timeout, and shutdown. Shutdown now wins foreground-to-Job boundary races, promoted Task/Capability Jobs expose `termination_pending` instead of pretending an unkillable process has exited, and mutation leases are released only after the owned process is confirmed dead.
+- Centralized the transport response budget in `process_control.py` so Extension and Task/Capability execution cannot drift onto different lifecycle thresholds. Runtime health distinguishes active output from quiet-but-alive work and never auto-cancels a task merely because it is quiet; Extension stall suspicion still requires an explicit stale heartbeat contract.
+- Added a launcher button immediately to the right of **Official docs** to export the complete recent 15-minute built-in Flight Recorder window as redacted JSONL. Export stays local, honors the recorder's 20 MiB bound, tolerates malformed individual records, and does not route through the Tunnel being diagnosed.
+
+## 0.8.18 — 2026-08-30
+
+- Added a built-in reliability Flight Recorder for diagnosing MCP/Tunnel disconnects without storing workspace payload bodies. The MCP server records compact request ingress/completion metadata, lane saturation, parse/EOF/shutdown events, dispatch exceptions, response byte counts, and stdout write failures; the Launcher records Tunnel process lifecycle plus only warning/error-classified `tunnel-client` output after existing secret redaction.
+- Flight data is local-only under the FolderBridge user configuration root, split into independent per-process/per-minute JSONL shards so Launcher and MCP writers never need a cross-process file lock. The recorder keeps only the latest 15 minutes, enforces a 20 MiB total cap, bounds diagnostic text to 16 KiB, asynchronously prunes old shards, and treats every recorder I/O failure as best-effort telemetry loss rather than an MCP/Tunnel failure.
+- Added the read-only control-lane `flight_recorder` tool with `status`, `recent`, and `errors` actions. Results are bounded and expose only compact metadata; file paths, search queries, write chunks, request/response bodies, API keys, Runtime keys, and other credential-like values are not recorded. This lets a post-reconnect diagnosis distinguish failures before local MCP ingress, during local dispatch, at stdout/BrokenPipe, or in diagnostics surfaced by the local `tunnel-client`, while correctly leaving remote Tunnel service internals outside FolderBridge's visibility.
+
+## 0.8.17 — 2026-08-27
+
+- Fixed the Office PDF rasterizer `width` contract on scaled Windows desktops. `Windows.Data.Pdf.PdfPageRenderOptions.DestinationWidth` / `DestinationHeight` are DIPs rather than physical pixels, so Word/Excel output could be enlarged by the system DPI scale (for example, a requested 1600-wide page rendered as 3600 physical pixels at 225% scaling).
+- Word and Excel PDF rasterization now resolve the actual system DPI from a system-aware thread context, convert the requested physical pixel dimensions to DIPs before WinRT rendering, then apply a bounded final `System.Drawing` correction only when DIP quantization leaves the bitmap off the exact requested pixel dimensions. PowerPoint `Slide.Export` remains unchanged because its width contract is already physical pixels.
+- Strengthened the real Word end-to-end regression: `width=800` must now produce an actual 800-pixel PNG while still proving no render-owned `WINWORD.EXE` survives. Bundled Office Native is now 1.1.4.
+
+## 0.8.16 — 2026-08-27
+
+- Fixed the remaining Word native-render hang by separating DOCX rendering across process boundaries: `word_export.ps1` now performs only Word COM `ExportAsFixedFormat` and exits before the independent `pdf_render.ps1` process initializes `Windows.Data.Pdf`. Real-machine diagnosis proved Word COM, COM cleanup, and WinRT PDF rasterization each completed normally in isolation while the combined lifetime could stall even for a one-line DOCX.
+- Added fail-closed ownership for COM-launched `WINWORD.EXE`: the export stage snapshots pre-existing Word PIDs, accepts exactly one newly created Word process, publishes that PID privately, and the plugin verifies/holds a Windows process handle so only the render-owned Word instance can be reaped on completion, cancellation, or timeout. Existing user Word instances are never targeted by process-name-wide termination.
+- Removed the obsolete single-process Word path from the shared Office stage script, preserved the existing `P0001.png` page naming contract, and added a real Windows end-to-end regression proving a minimal DOCX renders to PNG without changing the pre/post WINWORD PID set. Bundled Office Native is now 1.1.3.
+
+## 0.8.15 — 2026-08-27
+
+- Fixed the second Word-native rendering bottleneck found by real DOCX regression: the renderer no longer calls `Document.ComputeStatistics(wdStatisticPages)` before `ExportAsFixedFormat`. That call forced a redundant full-document pagination pass before Word immediately paginated again for PDF export and could leave text/table-heavy documents apparently hung before the first PNG was produced.
+- Word now performs one native full-document PDF export, then uses the PDF's authoritative page count to validate `page_start`/`page_end` and rasterizes only the requested pages. This preserves Word-native layout while avoiding duplicate pagination work and simplifies source-page numbering.
+- Added a Windows regression proving the existing STA `Windows.Data.Pdf` async bridge completes successfully, ruling out the PDF rasterizer as the incident cause, and locked the no-`ComputeStatistics` Word path in tests. Bundled Office Native is now 1.1.2.
+
+## 0.8.14 — 2026-08-27
+
+- Moved bundled Microsoft Office Native `render` from a foreground MCP request to a host-owned Extension Job. Native PowerPoint/Word/Excel rendering can legitimately take much longer than ordinary control-plane calls, so the caller now receives a `job_id` immediately and polls `job_status`; slow or failed Office automation can no longer keep one MCP request open until the client/tunnel tears down with a TaskGroup transport failure.
+- Updated bundled Office Native to 1.1.1 and locked the Job-mode contract in regression tests and Windows bundle verification while preserving the existing PowerPoint `Slide.Export` and Word/Excel fixed-format + `Windows.Data.Pdf` rendering backends.
+- Updated the Extension documentation to describe the Job lifecycle and completed-result contract for native Office rendering.
+
 ## 0.8.13 — 2026-08-26
 
 - Fixed Extension ABI state provisioning so declaring `extension.state` is sufficient for FolderBridge to create and inject `context.state_dir`, even when `workspace_adapter.mode=none` and `workspace_adapter.state=none`; plugins no longer need a fake profile adapter just to obtain private persistent state.

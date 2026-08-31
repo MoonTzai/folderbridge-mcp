@@ -8,6 +8,12 @@ from pathlib import Path
 from typing import Any
 
 
+# Maximum time a synchronous MCP-facing external-process execution may own the
+# transport response. This is a transport safety budget, never a business
+# timeout; longer work must remain host-owned and become queryable as a Job.
+TRANSPORT_RESPONSE_BUDGET_SECONDS = 60.0
+
+
 def owned_process_group_kwargs(*, hide_window: bool = False) -> dict[str, Any]:
     """Return the subprocess kwargs needed to own a child process tree.
 

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import ctypes
+from ctypes import wintypes
 import hashlib
 import json
 import os
@@ -10,6 +12,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import time
 import zipfile
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -579,6 +582,145 @@ def _inspect_xlsx(
         }
 
 
+def _cancel_requested(raw_path: Any) -> bool:
+    return isinstance(raw_path, str) and bool(raw_path) and Path(raw_path).is_file()
+
+
+def _open_owned_windows_process(pid: int, expected_image: str) -> tuple[Any, Any] | None:
+    if sys.platform != "win32" or pid <= 0:
+        return None
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    kernel32.OpenProcess.restype = wintypes.HANDLE
+    kernel32.QueryFullProcessImageNameW.argtypes = [wintypes.HANDLE, wintypes.DWORD, wintypes.LPWSTR, ctypes.POINTER(wintypes.DWORD)]
+    kernel32.QueryFullProcessImageNameW.restype = wintypes.BOOL
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel32.CloseHandle.restype = wintypes.BOOL
+    access = 0x0001 | 0x1000 | 0x00100000  # TERMINATE | QUERY_LIMITED_INFORMATION | SYNCHRONIZE
+    handle = kernel32.OpenProcess(access, False, pid)
+    if not handle:
+        return None
+    buffer = ctypes.create_unicode_buffer(32768)
+    length = wintypes.DWORD(len(buffer))
+    if not kernel32.QueryFullProcessImageNameW(handle, 0, buffer, ctypes.byref(length)):
+        kernel32.CloseHandle(handle)
+        raise RuntimeError("Could not verify the owned Office process image.")
+    if Path(buffer.value).name.lower() != expected_image.lower():
+        kernel32.CloseHandle(handle)
+        raise RuntimeError("Owned Office PID marker did not point to the expected executable.")
+    return kernel32, handle
+
+
+def _capture_owned_process(marker: Path, expected_image: str) -> tuple[Any, Any] | None:
+    try:
+        raw = marker.read_text(encoding="utf-8-sig").strip()
+        pid = int(raw)
+    except (FileNotFoundError, OSError, UnicodeError, ValueError):
+        return None
+    return _open_owned_windows_process(pid, expected_image)
+
+
+def _wait_owned_process(owned: tuple[Any, Any], timeout_ms: int) -> bool:
+    kernel32, handle = owned
+    kernel32.WaitForSingleObject.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+    kernel32.WaitForSingleObject.restype = wintypes.DWORD
+    return int(kernel32.WaitForSingleObject(handle, timeout_ms)) == 0
+
+
+def _terminate_owned_process(owned: tuple[Any, Any]) -> None:
+    kernel32, handle = owned
+    kernel32.TerminateProcess.argtypes = [wintypes.HANDLE, wintypes.UINT]
+    kernel32.TerminateProcess.restype = wintypes.BOOL
+    if not _wait_owned_process(owned, 0):
+        if not kernel32.TerminateProcess(handle, 1):
+            raise RuntimeError("Could not terminate the owned Office process.")
+        if not _wait_owned_process(owned, 3000):
+            raise RuntimeError("Owned Office process did not exit after termination.")
+
+
+def _close_owned_process(owned: tuple[Any, Any] | None) -> None:
+    if owned is None:
+        return
+    kernel32, handle = owned
+    kernel32.CloseHandle(handle)
+
+
+def _run_managed_powershell(
+    argv: list[str],
+    *,
+    cwd: Path,
+    timeout_seconds: float,
+    cancel_path: Any,
+    owned_pid_path: Path | None = None,
+    expected_owned_image: str | None = None,
+) -> subprocess.CompletedProcess[bytes]:
+    try:
+        process = subprocess.Popen(
+            argv,
+            cwd=cwd,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            shell=False,
+            close_fds=True,
+            **owned_process_group_kwargs(hide_window=True),
+        )
+    except OSError as exc:
+        raise RuntimeError(f"could not start Microsoft Office renderer: {exc}") from exc
+
+    owned: tuple[Any, Any] | None = None
+    deadline = time.monotonic() + timeout_seconds
+    try:
+        while True:
+            if owned is None and owned_pid_path is not None and expected_owned_image is not None:
+                owned = _capture_owned_process(owned_pid_path, expected_owned_image)
+
+            if _cancel_requested(cancel_path):
+                # Give a just-started COM server a short opportunity to publish
+                # its private ownership marker before terminating the script.
+                ownership_deadline = min(deadline, time.monotonic() + 0.5)
+                while owned is None and process.poll() is None and time.monotonic() < ownership_deadline:
+                    if owned_pid_path is not None and expected_owned_image is not None:
+                        owned = _capture_owned_process(owned_pid_path, expected_owned_image)
+                    if owned is None:
+                        time.sleep(0.05)
+                if owned is not None:
+                    _terminate_owned_process(owned)
+                terminate_owned_process_tree(process, hide_window=True)
+                try:
+                    stdout_bytes, stderr_bytes = process.communicate(timeout=3)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    stdout_bytes, stderr_bytes = process.communicate(timeout=3)
+                raise RuntimeError("Microsoft Office rendering was cancelled.")
+
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                if owned is not None:
+                    _terminate_owned_process(owned)
+                terminate_owned_process_tree(process, hide_window=True)
+                try:
+                    stdout_bytes, stderr_bytes = process.communicate(timeout=3)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    stdout_bytes, stderr_bytes = process.communicate(timeout=3)
+                raise RuntimeError(f"Microsoft Office rendering exceeded {int(timeout_seconds)} seconds")
+
+            try:
+                stdout_bytes, stderr_bytes = process.communicate(timeout=min(0.2, remaining))
+                break
+            except subprocess.TimeoutExpired:
+                continue
+
+        if owned is None and owned_pid_path is not None and expected_owned_image is not None:
+            owned = _capture_owned_process(owned_pid_path, expected_owned_image)
+        if owned is not None and not _wait_owned_process(owned, 3000):
+            _terminate_owned_process(owned)
+        return subprocess.CompletedProcess(argv, process.returncode, stdout_bytes, stderr_bytes)
+    finally:
+        _close_owned_process(owned)
+
+
 def _render(params: dict[str, Any], context: dict[str, Any], root: Path) -> dict[str, Any]:
     path = _resolve_input(root, params["path"], {".pptx", ".docx", ".xlsx"})
     output_dir = _resolve_output_dir(root, params["output_dir"])
@@ -595,9 +737,12 @@ def _render(params: dict[str, Any], context: dict[str, Any], root: Path) -> dict
         raise RuntimeError("extension state_dir is unavailable")
     state_dir = Path(state_dir_raw).resolve(strict=True)
     temp_dir = Path(tempfile.mkdtemp(prefix="office-render-", dir=state_dir))
-    script = Path(__file__).resolve().with_name("office.ps1")
-    if not script.is_file():
-        raise RuntimeError("bundled Office renderer script is missing")
+    extension_dir = Path(__file__).resolve().parent
+    office_script = extension_dir / "office.ps1"
+    word_export_script = extension_dir / "word_export.ps1"
+    pdf_render_script = extension_dir / "pdf_render.ps1"
+    if not office_script.is_file() or not word_export_script.is_file() or not pdf_render_script.is_file():
+        raise RuntimeError("bundled Office renderer scripts are incomplete")
 
     page_start = params.get("page_start")
     page_end = params.get("page_end")
@@ -605,60 +750,100 @@ def _render(params: dict[str, Any], context: dict[str, Any], root: Path) -> dict
         raise RuntimeError("page_start must be <= page_end")
     width = int(params.get("width", 1920))
     sheets = params.get("sheets") or []
-    argv = [
-        str(powershell), "-NoProfile", "-NonInteractive", "-Sta", "-ExecutionPolicy", "Bypass",
-        "-File", str(script),
-        "-InputPath", str(path),
-        "-OutputDir", str(output_dir),
-        "-TempDir", str(temp_dir),
-        "-Width", str(width),
-        "-Overwrite", ("true" if overwrite else "false"),
-    ]
-    if page_start is not None:
-        argv += ["-PageStart", str(int(page_start))]
-    if page_end is not None:
-        argv += ["-PageEnd", str(int(page_end))]
-    if sheets:
-        argv += ["-SheetsJson", json.dumps(sheets, ensure_ascii=False, separators=(",", ":"))]
-
+    cancel_path = context.get("job_cancel_path")
+    overall_deadline = time.monotonic() + 570.0
     try:
-        try:
-            process = subprocess.Popen(
-                argv,
-                cwd=script.parent,
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                shell=False,
-                close_fds=True,
-                **owned_process_group_kwargs(hide_window=True),
+        if path.suffix.lower() == ".docx":
+            pdf_path = temp_dir / "word-render.pdf"
+            owned_pid_path = temp_dir / "word-owned.pid"
+            export_argv = [
+                str(powershell), "-NoProfile", "-NonInteractive", "-Sta", "-ExecutionPolicy", "Bypass",
+                "-File", str(word_export_script),
+                "-InputPath", str(path),
+                "-PdfPath", str(pdf_path),
+                "-PidPath", str(owned_pid_path),
+            ]
+            export_completed = _run_managed_powershell(
+                export_argv,
+                cwd=word_export_script.parent,
+                timeout_seconds=max(1.0, overall_deadline - time.monotonic()),
+                cancel_path=cancel_path,
+                owned_pid_path=owned_pid_path,
+                expected_owned_image="WINWORD.EXE",
             )
-        except OSError as exc:
-            raise RuntimeError(f"could not start Microsoft Office renderer: {exc}") from exc
+            export_stdout = export_completed.stdout.decode("utf-8-sig", errors="replace").strip()
+            export_stderr = export_completed.stderr.decode("utf-8-sig", errors="replace").strip()
+            if export_completed.returncode != 0:
+                detail = export_stderr or export_stdout or f"exit code {export_completed.returncode}"
+                raise RuntimeError(f"native Word PDF export failed: {detail[:4000]}")
+            if not pdf_path.is_file() or pdf_path.stat().st_size <= 0:
+                raise RuntimeError("native Word PDF export produced no PDF file")
+
+            render_argv = [
+                str(powershell), "-NoProfile", "-NonInteractive", "-Sta", "-ExecutionPolicy", "Bypass",
+                "-File", str(pdf_render_script),
+                "-PdfPath", str(pdf_path),
+                "-OutputDir", str(output_dir),
+                "-Width", str(width),
+                "-Overwrite", ("true" if overwrite else "false"),
+            ]
+            if page_start is not None:
+                render_argv += ["-PageStart", str(int(page_start))]
+            if page_end is not None:
+                render_argv += ["-PageEnd", str(int(page_end))]
+            completed = _run_managed_powershell(
+                render_argv,
+                cwd=pdf_render_script.parent,
+                timeout_seconds=max(1.0, overall_deadline - time.monotonic()),
+                cancel_path=cancel_path,
+            )
+        else:
+            argv = [
+                str(powershell), "-NoProfile", "-NonInteractive", "-Sta", "-ExecutionPolicy", "Bypass",
+                "-File", str(office_script),
+                "-InputPath", str(path),
+                "-OutputDir", str(output_dir),
+                "-TempDir", str(temp_dir),
+                "-Width", str(width),
+                "-Overwrite", ("true" if overwrite else "false"),
+            ]
+            if page_start is not None:
+                argv += ["-PageStart", str(int(page_start))]
+            if page_end is not None:
+                argv += ["-PageEnd", str(int(page_end))]
+            if sheets:
+                argv += ["-SheetsJson", json.dumps(sheets, ensure_ascii=False, separators=(",", ":"))]
+            completed = _run_managed_powershell(
+                argv,
+                cwd=office_script.parent,
+                timeout_seconds=max(1.0, overall_deadline - time.monotonic()),
+                cancel_path=cancel_path,
+            )
+
+        stdout = completed.stdout.decode("utf-8-sig", errors="replace").strip()
+        stderr = completed.stderr.decode("utf-8-sig", errors="replace").strip()
+        if completed.returncode != 0:
+            detail = stderr or stdout or f"exit code {completed.returncode}"
+            raise RuntimeError(f"native Office render failed: {detail[:4000]}")
         try:
-            stdout_bytes, stderr_bytes = process.communicate(timeout=570)
-        except subprocess.TimeoutExpired as exc:
-            terminate_owned_process_tree(process, hide_window=True)
-            try:
-                stdout_bytes, stderr_bytes = process.communicate(timeout=5)
-            except subprocess.TimeoutExpired:
-                process.kill()
-                stdout_bytes, stderr_bytes = process.communicate(timeout=5)
-            raise RuntimeError("Microsoft Office rendering exceeded 570 seconds") from exc
-        completed = subprocess.CompletedProcess(argv, process.returncode, stdout_bytes, stderr_bytes)
+            result = json.loads(stdout)
+        except json.JSONDecodeError as exc:
+            raise RuntimeError(f"native Office renderer returned invalid JSON: {stdout[:1000]}") from exc
+        if not isinstance(result, dict) or not isinstance(result.get("files"), list):
+            raise RuntimeError("native Office renderer returned an invalid result envelope")
+        if path.suffix.lower() == ".docx":
+            result = {
+                **result,
+                "backend": "Microsoft Word ExportAsFixedFormat + Windows.Data.Pdf",
+                "application": "Word",
+                "notes": [
+                    "Word PDF export and Windows.Data.Pdf rasterization run in separate PowerShell processes.",
+                    "The owned WINWORD process is PID-tracked and reaped on completion, cancellation, or timeout.",
+                    "Macros are force-disabled and the document is opened read-only.",
+                ],
+            }
     finally:
         shutil.rmtree(temp_dir, ignore_errors=True)
-    stdout = completed.stdout.decode("utf-8-sig", errors="replace").strip()
-    stderr = completed.stderr.decode("utf-8-sig", errors="replace").strip()
-    if completed.returncode != 0:
-        detail = stderr or stdout or f"exit code {completed.returncode}"
-        raise RuntimeError(f"native Office render failed: {detail[:4000]}")
-    try:
-        result = json.loads(stdout)
-    except json.JSONDecodeError as exc:
-        raise RuntimeError(f"native Office renderer returned invalid JSON: {stdout[:1000]}") from exc
-    if not isinstance(result, dict) or not isinstance(result.get("files"), list):
-        raise RuntimeError("native Office renderer returned an invalid result envelope")
 
     generated: list[dict[str, Any]] = []
     for raw_name in result["files"]:

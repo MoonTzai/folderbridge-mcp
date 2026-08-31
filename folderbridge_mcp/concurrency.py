@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
-from dataclasses import dataclass
-from typing import Callable, Hashable, Iterator
+from dataclasses import dataclass, field
+from typing import Any, Callable, Hashable, Iterator
 
 
 CONTROL_WORKERS = 2
@@ -12,10 +13,19 @@ DATA_WORKERS = 6
 CONTROL_MAX_INFLIGHT = 8
 DATA_MAX_INFLIGHT = 12
 SERVER_BUSY_CODE = -32001
+WORKSPACE_MUTATION_WAIT_SECONDS = 2.0
 
 
 class MutationGateClosed(RuntimeError):
     """Raised when shutdown has closed mutation admission for a workspace."""
+
+
+class WorkspaceMutationBusy(RuntimeError):
+    """Raised when a bounded workspace-mutation lease wait expires."""
+
+    def __init__(self, details: dict[str, Any]) -> None:
+        super().__init__("Workspace is busy with another mutation")
+        self.details = details
 
 
 class BoundedExecutorLane:
@@ -68,23 +78,72 @@ class BoundedExecutorLane:
 class _ResourceLockEntry:
     lock: threading.Lock
     users: int = 0
+    owner: dict[str, Any] | None = None
+
+
+@dataclass
+class _ExclusiveWaiter:
+    owner: dict[str, Any]
+    wait_started: float
+    wait_started_monotonic: float
 
 
 @dataclass
 class _WorkspaceGateState:
     condition: threading.Condition
     shared_holders: int = 0
+    shared_owners: dict[object, dict[str, Any]] = field(default_factory=dict)
     exclusive_holder: bool = False
-    waiting_exclusive: int = 0
+    exclusive_owner: dict[str, Any] | None = None
+    waiting_exclusive: list[_ExclusiveWaiter] = field(default_factory=list)
+
+
+def _owner_metadata(owner: dict[str, Any] | None) -> dict[str, Any]:
+    if not isinstance(owner, dict):
+        return {}
+    result: dict[str, Any] = {}
+    for key in (
+        "action", "job_id", "pid", "path", "extension_id", "extension_action",
+        "capability", "task", "name",
+    ):
+        value = owner.get(key)
+        if isinstance(value, (str, int, float)) and not isinstance(value, bool):
+            result[key] = value
+    return result
 
 
 class MutationLease:
     """Idempotent cross-thread lease used by long-lived opaque mutations."""
 
-    def __init__(self, state: _WorkspaceGateState) -> None:
+    def __init__(
+        self,
+        gate: WorkspaceMutationGate,
+        key: Hashable,
+        state: _WorkspaceGateState,
+        owner: dict[str, Any],
+    ) -> None:
+        self._gate = gate
+        self._key = key
         self._state = state
+        self._owner = owner
         self._release_lock = threading.Lock()
         self._released = False
+        self._acquired_monotonic = time.monotonic()
+
+    def update_owner(self, **fields: Any) -> None:
+        updates = _owner_metadata(fields)
+        if not updates:
+            return
+        with self._release_lock:
+            if self._released:
+                return
+            with self._state.condition:
+                if self._state.exclusive_holder and self._state.exclusive_owner is self._owner:
+                    self._owner.update(updates)
+                    snapshot = dict(self._owner)
+                else:
+                    return
+        self._gate._emit("holder_update", self._gate._holder_event_fields(self._key, snapshot))
 
     def release(self) -> None:
         with self._release_lock:
@@ -92,8 +151,14 @@ class MutationLease:
                 return
             self._released = True
         with self._state.condition:
-            self._state.exclusive_holder = False
-            self._state.condition.notify_all()
+            if self._state.exclusive_holder and self._state.exclusive_owner is self._owner:
+                self._state.exclusive_holder = False
+                self._state.exclusive_owner = None
+                self._state.condition.notify_all()
+            snapshot = dict(self._owner)
+        fields = self._gate._holder_event_fields(self._key, snapshot)
+        fields["held_ms"] = round((time.monotonic() - self._acquired_monotonic) * 1000, 3)
+        self._gate._emit("exclusive_released", fields)
 
 
 class WorkspaceMutationGate:
@@ -101,14 +166,24 @@ class WorkspaceMutationGate:
 
     Writer preference prevents a stream of independent file writes from starving
     a queued task/build/plugin mutation whose touched paths cannot be predicted.
-    The table is intentionally tiny because FolderBridge accepts at most a small
-    fixed set of workspaces per server.
+    Tool-facing callers should use a bounded timeout so a workspace lease can
+    never consume the transport response budget while waiting.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, *, event_callback: Callable[[str, dict[str, Any]], None] | None = None) -> None:
         self._guard = threading.Lock()
         self._states: dict[Hashable, _WorkspaceGateState] = {}
         self._closed = threading.Event()
+        self._event_callback = event_callback
+
+    def _emit(self, event: str, fields: dict[str, Any]) -> None:
+        callback = self._event_callback
+        if callback is None:
+            return
+        try:
+            callback(event, fields)
+        except Exception:
+            pass
 
     def _state(self, key: Hashable) -> _WorkspaceGateState:
         with self._guard:
@@ -132,40 +207,203 @@ class WorkspaceMutationGate:
         if self._closed.is_set():
             raise MutationGateClosed("Workspace mutation admission is closed during shutdown")
 
+    @staticmethod
+    def _blocking_owner(state: _WorkspaceGateState, *, requested_mode: str) -> tuple[str, dict[str, Any]]:
+        if state.exclusive_holder:
+            return "exclusive_holder", dict(state.exclusive_owner or {})
+        if requested_mode == "shared" and state.waiting_exclusive:
+            return "waiting_exclusive", dict(state.waiting_exclusive[0].owner)
+        if state.shared_holders:
+            owner = next(iter(state.shared_owners.values()), {})
+            return "shared_holder", dict(owner)
+        return "unknown", {}
+
+    @staticmethod
+    def _holder_event_fields(key: Hashable, owner: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "workspace_id": str(key),
+            "holder_action": owner.get("action"),
+            "holder_job_id": owner.get("job_id"),
+            "holder_pid": owner.get("pid"),
+            "holder_extension_id": owner.get("extension_id"),
+            "holder_extension_action": owner.get("extension_action"),
+            "holder_capability": owner.get("capability"),
+            "holder_task": owner.get("task"),
+            "holder_path": owner.get("path"),
+        }
+
+    def _wait_details(
+        self,
+        key: Hashable,
+        state: _WorkspaceGateState,
+        *,
+        requested_mode: str,
+        requester: dict[str, Any],
+        wait_started: float,
+        wait_started_monotonic: float,
+    ) -> dict[str, Any]:
+        blocking_reason, holder = self._blocking_owner(state, requested_mode=requested_mode)
+        details = self._holder_event_fields(key, holder)
+        details.update(
+            {
+                "requested_mode": requested_mode,
+                "requester_action": requester.get("action"),
+                "requester_path": requester.get("path"),
+                "requester_extension_id": requester.get("extension_id"),
+                "requester_extension_action": requester.get("extension_action"),
+                "requester_capability": requester.get("capability"),
+                "requester_task": requester.get("task"),
+                "wait_started": round(wait_started, 6),
+                "wait_ms": round((time.monotonic() - wait_started_monotonic) * 1000, 3),
+                "blocking_reason": blocking_reason,
+                "shared_holders": state.shared_holders,
+                "waiting_exclusive": len(state.waiting_exclusive),
+            }
+        )
+        return details
+
+    @staticmethod
+    def _remaining(timeout_seconds: float | None, started_monotonic: float) -> float | None:
+        if timeout_seconds is None:
+            return None
+        if timeout_seconds < 0:
+            raise ValueError("timeout_seconds must be non-negative or None")
+        return timeout_seconds - (time.monotonic() - started_monotonic)
+
     @contextmanager
-    def shared(self, key: Hashable) -> Iterator[None]:
+    def shared(
+        self,
+        key: Hashable,
+        *,
+        timeout_seconds: float | None = None,
+        owner: dict[str, Any] | None = None,
+    ) -> Iterator[None]:
         state = self._state(key)
+        requester = _owner_metadata(owner)
+        token = object()
+        wait_started = 0.0
+        wait_started_monotonic = 0.0
+        initial_wait_details: dict[str, Any] | None = None
+        acquired = False
         with state.condition:
             while state.exclusive_holder or state.waiting_exclusive:
                 self._ensure_open()
-                state.condition.wait()
+                if wait_started_monotonic == 0.0:
+                    wait_started = time.time()
+                    wait_started_monotonic = time.monotonic()
+                    initial_wait_details = self._wait_details(
+                        key,
+                        state,
+                        requested_mode="shared",
+                        requester=requester,
+                        wait_started=wait_started,
+                        wait_started_monotonic=wait_started_monotonic,
+                    )
+                    self._emit("wait_started", initial_wait_details)
+                remaining = self._remaining(timeout_seconds, wait_started_monotonic)
+                if remaining is not None and remaining <= 0:
+                    details = self._wait_details(
+                        key,
+                        state,
+                        requested_mode="shared",
+                        requester=requester,
+                        wait_started=wait_started,
+                        wait_started_monotonic=wait_started_monotonic,
+                    )
+                    self._emit("wait_timeout", details)
+                    raise WorkspaceMutationBusy(details)
+                state.condition.wait(timeout=remaining)
             self._ensure_open()
             state.shared_holders += 1
+            state.shared_owners[token] = requester
+            acquired = True
+            if wait_started_monotonic and initial_wait_details is not None:
+                acquired_details = dict(initial_wait_details)
+                acquired_details["wait_ms"] = round((time.monotonic() - wait_started_monotonic) * 1000, 3)
+                acquired_details["shared_holders"] = state.shared_holders
+                acquired_details["waiting_exclusive"] = len(state.waiting_exclusive)
+                self._emit("wait_acquired", acquired_details)
         try:
             yield
         finally:
-            with state.condition:
-                state.shared_holders -= 1
-                if state.shared_holders == 0:
-                    state.condition.notify_all()
+            if acquired:
+                with state.condition:
+                    state.shared_owners.pop(token, None)
+                    state.shared_holders -= 1
+                    if state.shared_holders == 0:
+                        state.condition.notify_all()
 
-    def acquire_exclusive(self, key: Hashable) -> MutationLease:
+    def acquire_exclusive(
+        self,
+        key: Hashable,
+        *,
+        timeout_seconds: float | None = None,
+        owner: dict[str, Any] | None = None,
+    ) -> MutationLease:
         state = self._state(key)
+        requester = _owner_metadata(owner)
+        waiter = _ExclusiveWaiter(requester, time.time(), time.monotonic())
+        acquired = False
+        wait_event_emitted = False
+        initial_wait_details: dict[str, Any] | None = None
         with state.condition:
-            state.waiting_exclusive += 1
+            state.waiting_exclusive.append(waiter)
             try:
                 while state.exclusive_holder or state.shared_holders:
                     self._ensure_open()
-                    state.condition.wait()
+                    if not wait_event_emitted:
+                        initial_wait_details = self._wait_details(
+                            key,
+                            state,
+                            requested_mode="exclusive",
+                            requester=requester,
+                            wait_started=waiter.wait_started,
+                            wait_started_monotonic=waiter.wait_started_monotonic,
+                        )
+                        self._emit("wait_started", initial_wait_details)
+                        wait_event_emitted = True
+                    remaining = self._remaining(timeout_seconds, waiter.wait_started_monotonic)
+                    if remaining is not None and remaining <= 0:
+                        details = self._wait_details(
+                            key,
+                            state,
+                            requested_mode="exclusive",
+                            requester=requester,
+                            wait_started=waiter.wait_started,
+                            wait_started_monotonic=waiter.wait_started_monotonic,
+                        )
+                        self._emit("wait_timeout", details)
+                        raise WorkspaceMutationBusy(details)
+                    state.condition.wait(timeout=remaining)
                 self._ensure_open()
                 state.exclusive_holder = True
+                state.exclusive_owner = requester
+                acquired = True
+                if wait_event_emitted and initial_wait_details is not None:
+                    acquired_details = dict(initial_wait_details)
+                    acquired_details["wait_ms"] = round((time.monotonic() - waiter.wait_started_monotonic) * 1000, 3)
+                    acquired_details["shared_holders"] = state.shared_holders
+                    acquired_details["waiting_exclusive"] = len(state.waiting_exclusive)
+                    self._emit("wait_acquired", acquired_details)
             finally:
-                state.waiting_exclusive -= 1
-        return MutationLease(state)
+                try:
+                    state.waiting_exclusive.remove(waiter)
+                except ValueError:
+                    pass
+                if not acquired:
+                    state.condition.notify_all()
+        self._emit("exclusive_acquired", self._holder_event_fields(key, requester))
+        return MutationLease(self, key, state, requester)
 
     @contextmanager
-    def exclusive(self, key: Hashable) -> Iterator[None]:
-        lease = self.acquire_exclusive(key)
+    def exclusive(
+        self,
+        key: Hashable,
+        *,
+        timeout_seconds: float | None = None,
+        owner: dict[str, Any] | None = None,
+    ) -> Iterator[None]:
+        lease = self.acquire_exclusive(key, timeout_seconds=timeout_seconds, owner=owner)
         try:
             yield
         finally:
@@ -180,17 +418,51 @@ class ResourceLockTable:
         self._entries: dict[Hashable, _ResourceLockEntry] = {}
 
     @contextmanager
-    def hold(self, key: Hashable) -> Iterator[None]:
+    def hold(
+        self,
+        key: Hashable,
+        *,
+        timeout_seconds: float | None = None,
+        owner: dict[str, Any] | None = None,
+    ) -> Iterator[None]:
+        if timeout_seconds is not None and timeout_seconds < 0:
+            raise ValueError("timeout_seconds must be non-negative or None")
+        requester = _owner_metadata(owner)
         with self._guard:
             entry = self._entries.get(key)
             if entry is None:
                 entry = _ResourceLockEntry(threading.Lock())
                 self._entries[key] = entry
             entry.users += 1
-        entry.lock.acquire()
+        if timeout_seconds is None:
+            acquired = entry.lock.acquire()
+        else:
+            acquired = entry.lock.acquire(timeout=timeout_seconds)
+        if not acquired:
+            with self._guard:
+                holder = dict(entry.owner or {})
+                entry.users -= 1
+                if entry.users == 0 and self._entries.get(key) is entry:
+                    self._entries.pop(key, None)
+            details: dict[str, Any] = {
+                "requested_mode": "resource",
+                "blocking_reason": "resource_lock",
+                "requester_action": requester.get("action"),
+                "requester_path": requester.get("path"),
+                "holder_action": holder.get("action"),
+                "holder_path": holder.get("path"),
+                "wait_ms": round(timeout_seconds * 1000, 3),
+            }
+            if isinstance(key, tuple) and key:
+                details["workspace_id"] = str(key[0])
+            raise WorkspaceMutationBusy(details)
+        with self._guard:
+            entry.owner = requester
         try:
             yield
         finally:
+            with self._guard:
+                entry.owner = None
             entry.lock.release()
             with self._guard:
                 entry.users -= 1

@@ -62,6 +62,15 @@ class Gui041RegressionTests(unittest.TestCase):
         self.assertNotIn('text="应用配置", style="Compact.TButton"', self.gui)
         self.assertNotIn('text="诊断", style="Compact.TButton"', self.gui)
 
+    def test_recent_flight_export_button_is_next_to_official_docs_and_uses_builtin_recorder(self) -> None:
+        actions = self.gui.split("def _build_actions", 1)[1].split("def _set_all_capabilities", 1)[0]
+        self.assertIn('text="官方文档"', actions)
+        self.assertIn('text="导出最近15min飞行日志"', actions)
+        self.assertLess(actions.index('text="官方文档"'), actions.index('text="导出最近15min飞行日志"'))
+        self.assertIn("def _export_recent_flight_log", self.gui)
+        self.assertIn("self.flight_recorder.export_recent_jsonl(minutes=15)", self.gui)
+        self.assertIn('defaultextension=".jsonl"', self.gui)
+
     def test_managed_service_status_is_polled_and_color_coded(self) -> None:
         self.assertIn("MANAGED_SERVICE_STATUS_POLL_MS = 2_000", self.gui)
         self.assertIn("def _poll_managed_service_statuses", self.gui)

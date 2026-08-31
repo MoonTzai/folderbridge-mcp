@@ -78,8 +78,11 @@ class McpWorkflowTests(unittest.TestCase):
         tools = self.call(2, "tools/list", {})
         self.assertEqual(
             [tool["name"] for tool in tools["result"]["tools"]],
-            ["server_info", "workspace", "file_info", "pptx_inspect", "image_open", "extension", "edit_file", "write_file"],
+            ["server_info", "flight_recorder", "workspace", "file_info", "pptx_inspect", "image_open", "extension", "edit_file", "write_file"],
         )
+        flight = self.call(20, "tools/call", {"name": "flight_recorder", "arguments": {"action": "status"}})
+        self.assertTrue(flight["result"]["structuredContent"]["enabled"])
+        self.assertEqual(flight["result"]["structuredContent"]["window_minutes"], 15)
         read = self.call(3, "tools/call", {"name": "workspace", "arguments": {"action": "read", "path": "calc.py"}})
         content = read["result"]["structuredContent"]
         self.assertIn("return a - b", content["text"])

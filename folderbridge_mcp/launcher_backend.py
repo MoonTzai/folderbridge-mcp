@@ -17,6 +17,7 @@ from typing import BinaryIO, Callable, Iterable
 from . import __version__
 from .capabilities import CAPABILITY_NAMES, normalize_capability_names
 from .config import ConfigError, MAX_WORKSPACES, canonical_workspaces, config_is_trusted, load_config
+from .flight_recorder import FlightRecorder
 from .process_control import owned_process_group_kwargs, terminate_owned_process_tree
 from .user_paths import user_config_root
 
@@ -506,8 +507,14 @@ def run_short_command(
 
 
 class TunnelSupervisor:
-    def __init__(self, output_callback: Callable[[str], None]) -> None:
+    def __init__(
+        self,
+        output_callback: Callable[[str], None],
+        *,
+        flight_recorder: FlightRecorder | None = None,
+    ) -> None:
         self._output_callback = output_callback
+        self._flight_recorder = flight_recorder
         self._process: subprocess.Popen[bytes] | None = None
         self._reader: threading.Thread | None = None
         self._lock = threading.Lock()
@@ -545,6 +552,7 @@ class TunnelSupervisor:
             self._process = process
             self._reader = threading.Thread(target=self._read_output, args=(process,), daemon=True)
             self._reader.start()
+            self._record("tunnel.process_start", pid=process.pid)
             return process.pid
 
     def stop(self) -> int | None:
@@ -564,7 +572,16 @@ class TunnelSupervisor:
                 process.wait(timeout=5)
         if process.stdout:
             process.stdout.close()
+        self._record("tunnel.process_stop", pid=process.pid, exit_code=process.returncode)
         return process.returncode
+
+    def _record(self, event: str, *, severity: str = "info", text: str | None = None, **fields: object) -> None:
+        if self._flight_recorder is None:
+            return
+        try:
+            self._flight_recorder.record(event, severity=severity, text=text, **fields)
+        except Exception:
+            pass
 
     def _read_output(self, process: subprocess.Popen[bytes]) -> None:
         if process.stdout is None:
@@ -572,9 +589,11 @@ class TunnelSupervisor:
         while True:
             try:
                 chunk = process.stdout.read(4096)
-            except (OSError, ValueError):
+            except (OSError, ValueError) as exc:
+                self._record("tunnel.output_read_error", severity="error", text=str(exc), exception_type=type(exc).__name__, pid=process.pid)
                 return
             if not chunk:
+                self._record("tunnel.output_eof", pid=process.pid, exit_code=process.poll())
                 return
             self._output_callback(chunk.decode("utf-8", errors="replace"))
 

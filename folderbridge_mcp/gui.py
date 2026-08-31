@@ -39,6 +39,7 @@ from .launcher_backend import (
     render_client_config,
     run_short_command,
 )
+from .flight_recorder import FlightRecorder, classify_tunnel_output
 from .i18n import contains_cjk, normalize_language, translate_text
 from .managed_services import ManagedServiceError, default_managed_service_manager
 from .security import ToolError
@@ -153,7 +154,9 @@ class FolderBridgeLauncher:
         self._connection_state = "stopped"
         self._connection_pid: int | None = None
         self.events: queue.Queue[tuple[str, object]] = queue.Queue(maxsize=1_000)
-        self.supervisor = TunnelSupervisor(self._queue_tunnel_output)
+        self.flight_recorder = FlightRecorder("launcher")
+        self.supervisor = TunnelSupervisor(self._queue_tunnel_output, flight_recorder=self.flight_recorder)
+        self.flight_recorder.record("launcher.start")
         self.extension_registry = ExtensionRegistry()
         self.skill_engine = SkillEngine()
         self.managed_services = default_managed_service_manager()
@@ -1737,9 +1740,39 @@ class FolderBridgeLauncher:
         self.log.grid(row=1, column=0, sticky="nsew")
         return card
 
+    def _export_recent_flight_log(self) -> None:
+        try:
+            exported = self.flight_recorder.export_recent_jsonl(minutes=15)
+        except (OSError, ValueError) as exc:
+            self._show_error(f"无法导出飞行日志：{exc}")
+            return
+        selected = filedialog.asksaveasfilename(
+            title=self._t("导出最近 15 分钟飞行日志"),
+            initialfile=f"FolderBridge-flight-15min-{time.strftime('%Y%m%d-%H%M%S')}.jsonl",
+            defaultextension=".jsonl",
+            filetypes=((self._t("JSONL 飞行日志"), "*.jsonl"), (self._t("所有文件"), "*.*")),
+            parent=self.root,
+        )
+        if not selected:
+            return
+        try:
+            data = exported.get("data")
+            if not isinstance(data, bytes):
+                raise OSError("invalid flight export payload")
+            Path(selected).write_bytes(data)
+        except OSError as exc:
+            self._show_error(f"无法导出飞行日志：{exc}")
+            return
+        detail = f"{self._t('飞行日志导出完成。')} {exported.get('event_count', 0)} {self._t('条记录')}"
+        if exported.get("truncated"):
+            detail += f" {self._t('（已按 20 MiB 上限保留最新记录）')}"
+        detail += f"\n{self._t('已保存到：')}{selected}"
+        self._log(detail)
+        self._show_info("飞行日志已导出", detail)
+
     def _build_actions(self, parent: ttk.Frame) -> ttk.Frame:
         frame = ttk.Frame(parent, style="Page.TFrame")
-        frame.columnconfigure(4, weight=1)
+        frame.columnconfigure(5, weight=1)
         self.copy_button = ttk.Button(frame, text="复制本地 MCP 命令", command=self._copy_mcp_command)
         self.copy_button.grid(row=0, column=0, padx=(0, 8))
         self.apply_button = ttk.Button(frame, text="应用配置", command=self._apply_config)
@@ -1747,8 +1780,10 @@ class FolderBridgeLauncher:
         self.doctor_button = ttk.Button(frame, text="诊断", command=self._diagnose)
         self.doctor_button.grid(row=0, column=2, padx=(0, 8))
         ttk.Button(frame, text="官方文档", command=lambda: webbrowser.open(DOCS_URL)).grid(row=0, column=3)
+        self.export_flight_button = ttk.Button(frame, text="导出最近15min飞行日志", command=self._export_recent_flight_log)
+        self.export_flight_button.grid(row=0, column=4, padx=(8, 0))
         self.exit_button = ttk.Button(frame, text="退出", command=self._exit_application)
-        self.exit_button.grid(row=0, column=5, sticky="e", padx=(0, 8))
+        self.exit_button.grid(row=0, column=6, sticky="e", padx=(0, 8))
         self.start_button = tk.Button(
             frame,
             text="启动连接",
@@ -1764,7 +1799,7 @@ class FolderBridgeLauncher:
             padx=self._px(24),
             pady=self._px(9),
         )
-        self.start_button.grid(row=0, column=6, sticky="e")
+        self.start_button.grid(row=0, column=7, sticky="e")
         return frame
 
     def _set_all_capabilities(self, enabled: bool) -> None:
@@ -2472,7 +2507,11 @@ class FolderBridgeLauncher:
         self._log("已打开 OpenAI Tunnel 设置、Runtime API Keys、官方客户端下载页（如需要）和 ChatGPT Plugins。")
 
     def _queue_tunnel_output(self, text: str) -> None:
-        self._queue_event("log", text)
+        safe = redact_text(str(text), (self._active_secret,))
+        severity = classify_tunnel_output(safe)
+        if severity is not None:
+            self.flight_recorder.record("tunnel.output", severity=severity, text=safe)
+        self._queue_event("log", safe)
 
     def _queue_event(self, kind: str, payload: object) -> None:
         if kind == "log":
@@ -2482,6 +2521,7 @@ class FolderBridgeLauncher:
         except queue.Full:
             if not self._log_drop_reported:
                 self._log_drop_reported = True
+                self.flight_recorder.record("launcher.event_queue_full", severity="warning", queue_maxsize=1000)
                 try:
                     self.events.get_nowait()
                     self.events.put_nowait(("log", "日志过多，已丢弃部分旧输出。"))
@@ -2572,6 +2612,7 @@ class FolderBridgeLauncher:
             code = process.poll()
             if code is not None and self._last_exit_reported is None and self._connection_state == "running":
                 self._last_exit_reported = code
+                self.flight_recorder.record("tunnel.unexpected_exit", severity="error", exit_code=code, pid=process.pid)
                 self._set_connection_state("error")
                 self._log(f"Tunnel 进程意外退出（退出码 {code}）。请运行诊断。")
         self.root.after(500, self._poll_process)

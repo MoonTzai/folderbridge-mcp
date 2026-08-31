@@ -14,7 +14,7 @@ from unittest.mock import patch
 
 from folderbridge_mcp.config import load_config
 from folderbridge_mcp.concurrency import WorkspaceMutationGate
-from folderbridge_mcp.mcp import McpServer
+from folderbridge_mcp.mcp import McpServer, _request_lane
 from folderbridge_mcp.text_writes import TextWriteManager
 from folderbridge_mcp.tools import ToolRuntime
 import folderbridge_mcp.text_writes as text_writes
@@ -107,6 +107,22 @@ class McpConcurrencyTests(unittest.TestCase):
         response = json.loads(destination.getvalue())
         self.assertEqual(response["id"], 1)
 
+    def test_job_management_actions_stay_on_control_lane(self) -> None:
+        def request(tool: str, action: str) -> dict[str, object]:
+            return {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "tools/call",
+                "params": {"name": tool, "arguments": {"action": action}},
+            }
+
+        for action in ("job_list", "job_status", "job_cancel"):
+            self.assertEqual(_request_lane(request("extension", action)), "control")
+        for tool in ("run_task", "run_capability"):
+            for action in ("list", "status", "cancel"):
+                self.assertEqual(_request_lane(request(tool, action)), "control")
+            self.assertEqual(_request_lane(request(tool, "run")), "data")
+
     def test_control_lane_responds_while_slow_data_call_is_running(self) -> None:
         runtime = _FakeRuntime()
         server = McpServer(runtime)
@@ -187,6 +203,46 @@ class McpConcurrencyTests(unittest.TestCase):
                     first.result(timeout=2)
                     second.result(timeout=2)
                 self.assertGreaterEqual(max_total, 2)
+
+    def test_same_file_resource_lock_fails_fast_before_transport_budget(self) -> None:
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "a.txt").write_text("a", encoding="utf-8")
+            runtime = ToolRuntime(root, load_config(root, required=False))
+            first_entered = threading.Event()
+            release_first = threading.Event()
+
+            def slow_edit(*args, **kwargs):
+                first_entered.set()
+                release_first.wait(timeout=1)
+                return {"path": "a.txt", "created": False, "size": 1, "sha256": "0" * 64}
+
+            try:
+                with patch.object(runtime.workspace, "edit_file", side_effect=slow_edit), patch.object(
+                    tools_module, "WORKSPACE_MUTATION_WAIT_SECONDS", 0.05
+                ):
+                    with ThreadPoolExecutor(max_workers=1) as executor:
+                        first = executor.submit(
+                            runtime.call,
+                            "edit_file",
+                            {"path": "a.txt", "expected_sha256": "0" * 64, "replacements": [{"old": "a", "new": "x"}]},
+                        )
+                        self.assertTrue(first_entered.wait(timeout=0.5))
+                        started = time.monotonic()
+                        second = runtime.call(
+                            "edit_file",
+                            {"path": "a.txt", "expected_sha256": "0" * 64, "replacements": [{"old": "a", "new": "y"}]},
+                        )["structuredContent"]
+                        elapsed = time.monotonic() - started
+                        self.assertLess(elapsed, 0.5)
+                        self.assertFalse(second["ok"])
+                        self.assertEqual(second["error"]["code"], "WORKSPACE_BUSY")
+                        self.assertEqual(second["error"]["details"]["blocking_reason"], "resource_lock")
+                        release_first.set()
+                        self.assertTrue(first.result(timeout=1)["structuredContent"]["ok"])
+            finally:
+                release_first.set()
+                runtime.close()
 
     def test_lazy_text_write_manager_is_singleton_under_concurrent_begin(self) -> None:
         with TemporaryDirectory() as temporary:
@@ -457,6 +513,177 @@ class McpConcurrencyTests(unittest.TestCase):
                     second.result(timeout=2)
             manager.close()
             self.assertGreaterEqual(max_active, 2)
+
+
+    def test_workspace_mutation_gate_timeout_reports_holder_metadata(self) -> None:
+        events: list[tuple[str, dict[str, object]]] = []
+        gate = WorkspaceMutationGate(event_callback=lambda event, fields: events.append((event, fields)))
+        lease = gate.acquire_exclusive(
+            "workspace",
+            owner={"action": "extension/run", "job_id": "job-1", "pid": 4321},
+        )
+        try:
+            started = time.monotonic()
+            with self.assertRaises(RuntimeError) as raised:
+                with gate.shared(
+                    "workspace",
+                    timeout_seconds=0.05,
+                    owner={"action": "edit_file", "path": "a.txt"},
+                ):
+                    self.fail("shared lease must not enter while exclusive holder is live")
+            elapsed = time.monotonic() - started
+            self.assertLess(elapsed, 0.5)
+            details = getattr(raised.exception, "details", {})
+            self.assertEqual(details.get("workspace_id"), "workspace")
+            self.assertEqual(details.get("requested_mode"), "shared")
+            self.assertEqual(details.get("holder_action"), "extension/run")
+            self.assertEqual(details.get("holder_job_id"), "job-1")
+            self.assertEqual(details.get("holder_pid"), 4321)
+            self.assertGreaterEqual(details.get("wait_ms", 0), 40)
+            self.assertTrue(any(event == "wait_timeout" for event, _ in events))
+        finally:
+            lease.release()
+
+    def test_edit_file_fails_fast_instead_of_waiting_behind_long_workspace_job(self) -> None:
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "a.txt").write_text("a", encoding="utf-8")
+            runtime = ToolRuntime(root, load_config(root, required=False))
+            lease = runtime._workspace_mutations.acquire_exclusive(
+                runtime._targets[0].workspace_id,
+                owner={"action": "extension/run", "job_id": "job-2", "pid": 9876},
+            )
+            try:
+                with patch.object(tools_module, "WORKSPACE_MUTATION_WAIT_SECONDS", 0.05):
+                    started = time.monotonic()
+                    result = runtime.call(
+                        "edit_file",
+                        {
+                            "path": "a.txt",
+                            "expected_sha256": "ca978112ca1bbdcafac231b39a23dc4da786eff8147c4e72b9807785afee48bb",
+                            "replacements": [{"old": "a", "new": "b"}],
+                        },
+                    )["structuredContent"]
+                    elapsed = time.monotonic() - started
+                self.assertLess(elapsed, 0.5)
+                self.assertFalse(result["ok"])
+                self.assertEqual(result["error"]["code"], "WORKSPACE_BUSY")
+                self.assertEqual(result["error"]["details"]["holder_job_id"], "job-2")
+                self.assertEqual((root / "a.txt").read_text(encoding="utf-8"), "a")
+            finally:
+                lease.release()
+
+    def test_wait_acquired_keeps_original_blocker_metadata(self) -> None:
+        events: list[tuple[str, dict[str, object]]] = []
+        gate = WorkspaceMutationGate(event_callback=lambda event, fields: events.append((event, fields)))
+        lease = gate.acquire_exclusive(
+            "workspace",
+            owner={"action": "extension/run", "job_id": "job-original", "pid": 2468},
+        )
+        entered = threading.Event()
+
+        def wait_shared() -> None:
+            with gate.shared(
+                "workspace",
+                timeout_seconds=0.5,
+                owner={"action": "edit_file", "path": "a.txt"},
+            ):
+                entered.set()
+
+        worker = threading.Thread(target=wait_shared, daemon=True)
+        worker.start()
+        time.sleep(0.05)
+        lease.release()
+        self.assertTrue(entered.wait(timeout=0.5))
+        worker.join(timeout=1)
+        acquired = [fields for event, fields in events if event == "wait_acquired"]
+        self.assertEqual(len(acquired), 1)
+        self.assertEqual(acquired[0].get("holder_action"), "extension/run")
+        self.assertEqual(acquired[0].get("holder_job_id"), "job-original")
+        self.assertEqual(acquired[0].get("holder_pid"), 2468)
+
+    def test_mutation_flight_recording_does_not_block_gate_wait_timeout(self) -> None:
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "a.txt").write_text("a", encoding="utf-8")
+            runtime = ToolRuntime(root, load_config(root, required=False))
+            record_started = threading.Event()
+            release_record = threading.Event()
+
+            def slow_record(*args, **kwargs):
+                record_started.set()
+                release_record.wait(timeout=1)
+                return True
+
+            lease = runtime._workspace_mutations.acquire_exclusive(
+                runtime._targets[0].workspace_id,
+                owner={"action": "extension/run", "job_id": "job-flight", "pid": 1357},
+            )
+            try:
+                with patch.object(runtime.flight_recorder, "record", side_effect=slow_record), patch.object(
+                    tools_module, "WORKSPACE_MUTATION_WAIT_SECONDS", 0.05
+                ):
+                    started = time.monotonic()
+                    result = runtime.call(
+                        "edit_file",
+                        {
+                            "path": "a.txt",
+                            "expected_sha256": "ca978112ca1bbdcafac231b39a23dc4da786eff8147c4e72b9807785afee48bb",
+                            "replacements": [{"old": "a", "new": "b"}],
+                        },
+                    )["structuredContent"]
+                    elapsed = time.monotonic() - started
+                    self.assertTrue(record_started.wait(timeout=0.5))
+                self.assertLess(elapsed, 0.5)
+                self.assertEqual(result["error"]["code"], "WORKSPACE_BUSY")
+            finally:
+                release_record.set()
+                lease.release()
+                runtime.close()
+
+    def test_timed_out_exclusive_waiter_wakes_shared_waiters(self) -> None:
+        gate = WorkspaceMutationGate()
+        shared_entered = threading.Event()
+        release_first_shared = threading.Event()
+
+        def first_shared() -> None:
+            with gate.shared("workspace", owner={"action": "edit_file", "path": "a.txt"}):
+                release_first_shared.wait(timeout=1)
+
+        first = threading.Thread(target=first_shared, daemon=True)
+        first.start()
+        time.sleep(0.03)
+
+        exclusive_done = threading.Event()
+
+        def timed_exclusive() -> None:
+            try:
+                gate.acquire_exclusive(
+                    "workspace",
+                    timeout_seconds=0.05,
+                    owner={"action": "extension/run", "job_id": "job-3"},
+                )
+            except RuntimeError:
+                pass
+            finally:
+                exclusive_done.set()
+
+        waiter = threading.Thread(target=timed_exclusive, daemon=True)
+        waiter.start()
+        time.sleep(0.02)
+
+        def second_shared() -> None:
+            with gate.shared("workspace", timeout_seconds=0.5, owner={"action": "edit_file", "path": "b.txt"}):
+                shared_entered.set()
+
+        second = threading.Thread(target=second_shared, daemon=True)
+        second.start()
+        self.assertTrue(exclusive_done.wait(timeout=0.5))
+        self.assertTrue(shared_entered.wait(timeout=0.5))
+        release_first_shared.set()
+        first.join(timeout=1)
+        waiter.join(timeout=1)
+        second.join(timeout=1)
 
 
 if __name__ == "__main__":

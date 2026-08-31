@@ -6,7 +6,7 @@ import re
 import stat
 import subprocess
 from pathlib import Path
-from typing import Iterable
+from typing import Callable, Iterable
 
 from .config import Task
 from .security import ToolError, clean_environment, resolve_task_executable
@@ -95,7 +95,12 @@ def discover_capabilities(workspace: Path) -> dict[str, dict[str, str]]:
     return discovered
 
 
-def run_capability(workspace: Path, name: str) -> dict[str, object]:
+def run_capability(
+    workspace: Path,
+    name: str,
+    *,
+    task_runner: Callable[[Path, Task], dict[str, object]] | None = None,
+) -> dict[str, object]:
     if name not in EXECUTION_CAPABILITY_NAMES:
         raise ToolError(
             "UNKNOWN_CAPABILITY",
@@ -103,8 +108,9 @@ def run_capability(workspace: Path, name: str) -> dict[str, object]:
             available=list(EXECUTION_CAPABILITY_NAMES),
         )
     root = workspace.resolve(strict=True)
+    runner = task_runner or run_task
     if name == "git-push":
-        return _run_github_push(root)
+        return _run_github_push(root, task_runner=runner)
 
     builders = {
         "test": _test_task,
@@ -126,7 +132,7 @@ def run_capability(workspace: Path, name: str) -> dict[str, object]:
                 capability=name,
             )
     else:
-        result = run_task(root, task)
+        result = runner(root, task)
         result["provider"] = "project-task"
         result["provider_kind"] = "workspace-code"
     result["capability"] = name
@@ -235,7 +241,11 @@ def _android_package_task(root: Path) -> Task | None:
     return None
 
 
-def _run_github_push(root: Path) -> dict[str, object]:
+def _run_github_push(
+    root: Path,
+    *,
+    task_runner: Callable[[Path, Task], dict[str, object]] | None = None,
+) -> dict[str, object]:
     top = Path(_git_text(root, "rev-parse", "--show-toplevel")).resolve(strict=True)
     if top != root:
         raise ToolError(
@@ -266,7 +276,7 @@ def _run_github_push(root: Path) -> dict[str, object]:
         ),
         300,
     )
-    result = run_task(root, task)
+    result = (task_runner or run_task)(root, task)
     result["capability"] = "git-push"
     result["label"] = CAPABILITY_LABELS["git-push"]
     result["branch"] = branch
