@@ -22,7 +22,7 @@ class PublishedFtpToolkitTests(unittest.TestCase):
     def test_manifest_is_generic_and_secret_free(self) -> None:
         manifest = json.loads((PLUGIN_ROOT / "folderbridge-extension.json").read_text(encoding="utf-8"))
         self.assertEqual(manifest["id"], "ftp-toolkit")
-        self.assertEqual(manifest["version"], "0.2.0")
+        self.assertEqual(manifest["version"], "0.2.1")
         self.assertEqual(
             set(manifest["actions"]),
             {"status", "configure", "forget", "check", "list", "stat", "mkdir", "rename", "delete", "upload", "upload-tree", "download"},

@@ -1,4 +1,4 @@
-# FTP Toolkit 0.2.0
+# FTP Toolkit 0.2.1
 
 Generic external FolderBridge Extension for workspace-confined FTP / explicit-FTPS transfers.
 
@@ -127,7 +127,9 @@ That ordering belongs to the Debate-Coach release workflow. FTP Toolkit itself r
 
 ## Deliberate exclusions
 
-Version 0.2.0 does not expose:
+Version 0.2.1 preserves the complete 0.2.0 FTP/FTPS action contract and moves process-tree ownership to the public `folderbridge_mcp.extension_api` import seam, with a narrow compatibility fallback for already-built FolderBridge 0.8.21 hosts.
+
+The 0.2.x line does not expose:
 
 - wildcard or recursive remote delete
 - directory removal

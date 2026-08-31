@@ -2,6 +2,15 @@ from __future__ import annotations
 
 from typing import Any
 
+from .process_control import owned_process_group_kwargs, terminate_owned_process_tree
+
+
+__all__ = (
+    "ExtensionError",
+    "owned_process_group_kwargs",
+    "terminate_owned_process_tree",
+)
+
 
 class ExtensionError(Exception):
     """Stable public error ABI for out-of-process FolderBridge extensions."""

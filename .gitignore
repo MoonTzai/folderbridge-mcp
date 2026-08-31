@@ -8,6 +8,13 @@ venv/
 .build/
 /release/
 /FolderBridge.exe
+/local-private/
+/Plugins/extensions/debate-judge-adapter/
+/Plugins/skill-packs/folderbridge-discipline/
+/FolderBridge - Copy*.exe
+*.bak-taskfix
+/_probe*.txt
+/write-probe-*.txt
 .coverage
 htmlcov/
 dist/

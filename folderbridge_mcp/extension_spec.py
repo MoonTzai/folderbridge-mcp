@@ -20,7 +20,7 @@ EXTENSION_FORMAT_SUMMARY = """FolderBridge Extension ABI v1
 8. 插件持久状态优先使用 context.state_dir（FolderBridge 用户配置目录），不要污染仓库。声明 extension.state 即授权 FolderBridge 提供并创建该目录：有工作区时按 extension_id/workspace_id 隔离，无工作区时使用该扩展的 global 状态目录；workspace_adapter.state=profile 需要 extension.state，但不是 state_dir 的开关。确实需要写工作区时必须声明 workspace.write，并由 action 参数明确触发。
 9. action 的 input_schema 使用受限 JSON Schema 子集：type/properties/required/additionalProperties/items/enum/minimum/maximum/minLength/maxLength/minItems/maxItems/description/default。action 还可声明 `run_mode: "foreground"|"job"` 与可选 `timeout_seconds`；Job 模式通过 extension 的 `job_status` / `job_cancel` 管理。
 10. action.authorization=global 表示侧栏一次批准并启用后全局可用；authorization=none 只允许 bundled 插件的只读状态/发现动作。
-11. ABI v1 的 plugin.py 应只依赖 FolderBridge 已打包模块与 Python 标准库；不要假设用户能在单文件 EXE 内 pip 安装第三方包。额外软件能力优先通过精确的本地 HTTP API 或 process.execute:<程序名> 调用。若需要继承宿主环境变量，必须逐个声明 `environment.inherit:NAME`；`CONTROL_PLANE_API_KEY` 与 FolderBridge/control-plane 内部变量禁止继承。
+11. ABI v1 的 plugin.py 应只依赖 Python 标准库、同插件目录代码，以及明确公开的 `folderbridge_mcp.extension_api` ABI；不要 import 其它 FolderBridge 产品私有模块，也不要假设用户能在单文件 EXE 内 pip 安装第三方包。`extension_api` 当前公开 `ExtensionError`、`owned_process_group_kwargs` 与 `terminate_owned_process_tree`。额外软件能力优先通过精确的本地 HTTP API 或 process.execute:<程序名> 调用。若需要继承宿主环境变量，必须逐个声明 `environment.inherit:NAME`；`CONTROL_PLANE_API_KEY` 与 FolderBridge/control-plane 内部变量禁止继承。
 12. 插件可在结果中返回 `workspace_artifacts`（字符串路径或 `{path,label,kind}`）；FolderBridge 会重新按工作区安全策略验证这些相对路径，并返回 size/SHA-256。不要把凭据文件作为 artifact。
 13. 公开 action 应保持“小而固定”：一个 action 对应一个有界、可解释的语义单元。不要暴露 `run-all`、`verification-suite`、`do-everything` 之类把大量独立测试或多阶段流水线聚合进一次前台调用的总入口。需要编排时拆成固定白名单动作，由客户端依次调用；可提供纯数据 `verification-plan` 返回推荐顺序。每个动作都应有可预测的超时和有界输出。
 
@@ -82,7 +82,7 @@ EXTENSION_LLM_PROMPT = """你正在为 FolderBridge MCP 编写 Extension。请�
 9. action.input_schema 要尽量精确，拒绝未知参数；对路径使用 workspace-relative 参数语义，不接受任意绝对路径，除非 FolderBridge ABI 未来明确提供这种权限。
 10. action.authorization 默认使用 global。只有随 FolderBridge 打包的 bundled 插件，且动作真正只读/无危险副作用时，才可以建议 authorization=none。
 11. 若某能力会执行工作区代码（构建、打包、脚本），在 README 和 manifest 权限说明里明确写出风险，并使用动态 workspace adapter，而不是静默预置任务。
-12. ABI v1 不要新增 Python 第三方依赖。若能力依赖 FFmpeg、Blender、ADB 等外部程序，声明精确 process.execute:<basename> 并在 README 说明用户需要安装的软件；若依赖本地服务，使用固定 loopback 权限。
+12. ABI v1 不要新增 Python 第三方依赖，也不要直接 import `folderbridge_mcp` 的私有实现模块；需要结构化错误或 owned subprocess tree 时只使用 `folderbridge_mcp.extension_api` 公开 helper。若能力依赖 FFmpeg、Blender、ADB 等外部程序，声明精确 process.execute:<basename> 并在 README 说明用户需要安装的软件；若依赖本地服务，使用固定 loopback 权限。
 13. 公开 action 保持小而固定，禁止把大量相互独立的测试、检查或多阶段流水线聚合成 `run-all`、`verification-suite`、`do-everything` 一类总入口。优先拆成按语义命名的固定白名单动作，由客户端逐项调用；如需提示标准顺序，可提供纯数据 `verification-plan`，但它自身不得启动子进程或执行流水线。不要为了减少 action 数量而牺牲可诊断性、超时边界或平台兼容性。
 14. 真正属于一个原子语义单元的长任务，且当前客户端/网关明确支持 Job 状态查询与取消时，才优先声明 `run_mode=job`；不要用 Job 包装一个本应拆分的聚合总入口。`timeout_seconds` 可设 0..86400，其中 0 代表不按超时自动终止；即使 timeout=0，也必须支持 FolderBridge 的显式取消 / 退出清理。若当前网关不能可靠取得 Job 最终状态，应继续拆成可在 foreground 内有界完成的固定动作。
 15. 若插件生成需要交给模型继续处理的文件，优先通过返回 `workspace_artifacts` 声明工作区相对路径，让 FolderBridge 做二次路径校验与 SHA-256/size 标注；不要直接返回绝对路径冒充可信产物。

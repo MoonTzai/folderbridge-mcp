@@ -2,7 +2,7 @@
   "schema_version": 1,
   "id": "gpt-sovits-local",
   "name": "Local GPT-SoVITS",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Workspace-confined adapter for a dedicated GPT-SoVITS Windows runtime under GPT-SoVITS/. Runs only the fixed GPT-SoVITS-Bridge/runner.ps1 entrypoint for bootstrap, dataset preparation, ASR, training, inference, and status checks.",
   "entrypoint": "plugin.py",
   "permissions": [

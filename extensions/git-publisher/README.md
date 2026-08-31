@@ -23,7 +23,7 @@ If browser OAuth is unavailable, a PAT may still be configured outside the MCP c
 
 ## Commit safety
 
-`commit` requires an explicit list of individual files. It never runs `git add .`, does not support directory commits or deletions, rejects credential/key-like files and generated/dependency/VCS directories, refuses to operate when unrelated staged changes already exist, rejects selected files with content-transforming Git attributes, disables Git hooks and commit signing for the bounded commit, and verifies the staged set exactly matches the requested allowlist before committing.
+`commit` requires an explicit list of individual workspace paths. It never runs `git add .` and does not support directory commits. Existing selections must be regular workspace files; missing selections are accepted only when they are already Git-tracked and currently deleted. Credential/key-like files, generated/dependency/VCS directories, missing untracked paths, unrelated pre-existing staged changes, and selected files with content-transforming Git attributes are rejected. Existing files are staged normally, validated tracked deletions are removed from the index explicitly, Git hooks and commit signing are disabled for the bounded commit, and staged-set verification uses `--no-renames` so Git's rename detection cannot collapse a delete+add migration and falsely report a missing allowlist path.
 
 ## Push safety
 

@@ -1,6 +1,6 @@
 # FFmpeg Toolkit — FolderBridge External Extension
 
-Version 0.1.1.
+Version 0.1.2.
 
 A reusable external FolderBridge ABI v1 Extension for workspace-confined local FFmpeg/FFprobe work.
 
@@ -15,6 +15,8 @@ Copy this entire `ffmpeg-toolkit` directory to:
 The destination directory must directly contain `folderbridge-extension.json`, `plugin.py`, `README.md`, and `tests/`. Then open FolderBridge **Extensions & Skills**, rescan if needed, approve the exact directory hash + declared permissions, and enable **FFmpeg Toolkit**.
 
 No installer script, FolderBridge rebuild, Tunnel restart, or MCP tool re-registration is required for normal hot loading.
+
+Version 0.1.2 keeps the complete 0.1.1 action/argv behavior and moves process-tree ownership to the public `folderbridge_mcp.extension_api` import seam, with a narrow compatibility fallback for already-built FolderBridge 0.8.21 hosts.
 
 ## Actions
 

@@ -5,8 +5,9 @@ This directory contains **external / non-bundled FolderBridge Extensions** that 
 Do not confuse this directory with the repository-root `extensions/` directory:
 
 - `extensions/` = bundled extensions shipped as part of FolderBridge.
-- `Plugins/extensions/` = optional external extensions that users copy into their per-user Extension directory and approve explicitly.
-- `Plugins/skill-packs/` = optional Skill Packs; these are methodology text and use a separate trust model.
+- `Plugins/extensions/` = optional **public** external extensions that users copy into their per-user Extension directory and approve explicitly.
+- `Plugins/skill-packs/` = optional **public** Skill Packs; these are methodology text and use a separate trust model.
+- `local-private/` = preferred ignored repository-local source for new private/local-only integrations. Existing explicitly ignored local-only integrations may remain where operationally convenient; their presence under the workspace does not make them public or eligible for synchronization.
 
 ## Install an external Extension
 
@@ -27,7 +28,7 @@ Any later change to a hash-covered Extension file makes the old approval stale a
 | Extension | Version | Scope |
 | --- | --- | --- |
 | `comfyui` | 1.3.0 | Hot-load bridge to local ComfyUI with host-owned Jobs, prompt-scoped cancel, bounded artifact metadata, and optional scoped workspace output. |
-| `gpt-sovits-local` | 0.1.1 | Workspace adapter for the fixed `GPT-SoVITS-Bridge/runner.ps1` workflow. |
-| `ffmpeg-toolkit` | 0.1.1 | Workspace-confined FFmpeg/FFprobe probe, capability discovery, and long-running media jobs. |
-| `ftp-toolkit` | 0.2.0 | Generic workspace-confined FTP/FTPS profiles with optional local HTTP CONNECT proxy, listing/stat, upload/download, recursive upload, automatic parent mkdir, rename and exact-file delete. |
+| `gpt-sovits-local` | 0.1.2 | Workspace adapter for the fixed `GPT-SoVITS-Bridge/runner.ps1` workflow. |
+| `ffmpeg-toolkit` | 0.1.2 | Workspace-confined FFmpeg/FFprobe probe, capability discovery, and long-running media jobs. |
+| `ftp-toolkit` | 0.2.1 | Generic workspace-confined FTP/FTPS profiles with optional local HTTP CONNECT proxy, listing/stat, upload/download, recursive upload, automatic parent mkdir, rename and exact-file delete. |
 | `godot-ai` | 0.1.0 | Hot-loadable workspace adapter for a local Godot AI MCP server, with bounded editor, scene, run, log, screenshot, and runtime-input actions. |

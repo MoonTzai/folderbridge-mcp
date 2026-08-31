@@ -5,9 +5,18 @@ import unittest
 from unittest import mock
 
 from folderbridge_mcp import process_control
+from folderbridge_mcp import extension_api
 
 
 class ProcessControlTests(unittest.TestCase):
+    def test_extension_api_reexports_exact_process_control_helpers(self) -> None:
+        self.assertIs(extension_api.owned_process_group_kwargs, process_control.owned_process_group_kwargs)
+        self.assertIs(extension_api.terminate_owned_process_tree, process_control.terminate_owned_process_tree)
+        self.assertEqual(
+            set(extension_api.__all__),
+            {"ExtensionError", "owned_process_group_kwargs", "terminate_owned_process_tree"},
+        )
+
     def test_owned_process_group_kwargs_hide_windows_children_without_shell_helpers(self) -> None:
         with mock.patch.object(process_control.sys, "platform", "win32"), mock.patch.object(
             subprocess, "CREATE_NEW_PROCESS_GROUP", 0x200, create=True

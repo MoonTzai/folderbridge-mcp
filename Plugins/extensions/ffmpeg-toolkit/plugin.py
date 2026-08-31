@@ -11,7 +11,10 @@ import time
 from pathlib import Path, PurePosixPath
 from typing import Any
 
-from folderbridge_mcp.process_control import owned_process_group_kwargs, terminate_owned_process_tree
+try:
+    from folderbridge_mcp.extension_api import owned_process_group_kwargs, terminate_owned_process_tree
+except ImportError:  # FolderBridge 0.8.21 compatibility before the public process-helper re-export.
+    from folderbridge_mcp.process_control import owned_process_group_kwargs, terminate_owned_process_tree
 
 
 MAX_ARGS = 512

@@ -254,7 +254,7 @@ JSON 示例采用许多桌面客户端使用的 `mcpServers` 约定：
 - `edit_file`：读写模式下创建小型内联 UTF-8 文件，或精确编辑不超过 128 MiB 的已有 UTF-8 文本；编辑已有文件必须携带当前整文件 SHA-256，大文件整文件新建使用 `write_file`；
 - `write_file`：读写模式下提供 `begin`、`append`、`status`、`commit`、`abort` 五个固定事务动作，用于最大 512 MiB 的整文件 UTF-8 新建或替换，同时保持 MCP 单消息上限仍为 1 MiB。
 
-只有一个工作区时，旧客户端可以继续省略 `workspace_id`。存在多个工作区时，所有工作区作用域工具都必须携带 `server_info` 返回的 `workspace_id`；缺失或未知 ID 会被拒绝。重复目录、父子重叠目录和超过 8 项的列表也会在启动前被拒绝。
+只有一个工作区时，旧客户端可以继续省略 `workspace_id`。存在多个工作区时，所有工作区作用域工具都必须携带 `server_info` 返回的 `workspace_id`；缺失或未知 ID 会被拒绝。重复目录、父子重叠目录和超过 16 项的列表也会在启动前被拒绝。
 
 做局部精确替换时：先列出/搜索并读取所需片段，保留当前整文件 SHA-256，再调用 `edit_file`，最后检查 Git diff。`workspace(read)` 会为不超过 1 MiB 的文件返回整文件 SHA；更大的文件改用 `file_info`。新建文件采用 no-clobber 发布；已有文件会在原子发布前再次复核预期 SHA。如果底层文件系统不能提供安全的原子 no-clobber 发布，新建会安全失败，而不会退化成覆盖已有文件。
 
@@ -264,7 +264,7 @@ JSON 示例采用许多桌面客户端使用的 `mcpServers` 约定：
 
 Skill 路由也采用同样的规模化策略。初始化只携带 64 KiB 的紧凑 round-robin 路由索引，不嵌入 Skill 正文；如果启用的 Skill 放不下，会明确报告遗漏数量，而 `skill-engine match` 始终保留为完整的任务级发现入口。Extension `list` 同样保持紧凑可分页，完整 schema 延后到 `extension(info)` 获取。
 
-外部 Skill Pack 与 Extension 属于用户安装内容，不属于 Release payload。它们的精确 hash 批准记录保存在用户级 FolderBridge 配置目录中；只要外部文件内容／声明权限没有变化，升级 EXE 不会要求重新批准。源码仓库里的 `skill_packs` 与 `extensions` 是 Release 自身的源目录；Windows 构建现在只封装显式 bundled allowlist，因此其中临时放置的 untracked／第三方目录不会再被误打进 EXE。若未来某个外部组件被正式收编为 bundled，且与旧外部安装使用同一个 ID，则 bundled 版本安全优先，旧外部副本被忽略而不是持续报 duplicate-ID；外部代码始终不能覆盖 bundled ID。
+外部 Skill Pack 与 Extension 属于用户安装内容，不属于 EXE payload。它们的精确 hash 批准记录保存在用户级 FolderBridge 配置目录中；只要外部文件内容／声明权限没有变化，升级 EXE 不会要求重新批准。仓库源码位置按语义严格分开：`extensions/` 与 `skill_packs/` 只放 bundled／Release-owned 源；`Plugins/extensions/` 与 `Plugins/skill-packs/` 只放可公开分发的可选外源组件。新的本地私有集成优先放在被 Git 忽略的 `local-private/`；已有且已明确忽略的本地专用集成可以继续留在实际使用方便的位置，无需为了目录整齐强行迁移，但始终不属于公开仓库边界。Windows 构建只封装显式 bundled allowlist，因此公开外源源代码、本地私有资产和其它 untracked 目录都不会被误打进 EXE。若未来某个外部组件被正式收编为 bundled，且与旧外部安装使用同一个 ID，则 bundled 版本安全优先，旧外部副本被忽略而不是持续报 duplicate-ID；外部代码始终不能覆盖 bundled ID。
 
 ### 有界 MCP 并发
 
@@ -296,7 +296,7 @@ FolderBridge Extension ABI v1 用于以后增加 ComfyUI、FFmpeg、Blender、Ol
 
 公开 Extension action 应保持**小而固定、语义有界**。不要暴露 `run-all`、`verification-suite`、`do-everything` 这类把几十个互相独立的测试/检查或多阶段流水线塞进一次前台 MCP 调用的聚合总入口。应拆成固定白名单、语义明确、超时和输出可预测的小 action，由客户端按顺序逐项调用；如需告诉客户端标准顺序，可额外提供只返回计划、不执行子进程的只读 `verification-plan`。真正属于一个原子语义单元的长任务，在当前客户端能可靠查询/取消 Job 时可使用 host-owned Job；但不要用 Job 把本应拆分的聚合入口藏起来。
 
-ComfyUI 是第一个 bundled extension。状态检查固定访问 `127.0.0.1:8188`；执行 workflow 需要在 Extensions 侧栏一次批准。从 FolderBridge 0.4.1 开始，Windows Launcher 还可以自己托管本地 ComfyUI 进程：只需选择一次受支持的 Portable 根目录（`python_embeded\\python.exe` + `ComfyUI\\main.py`），或源码安装根目录（`main.py` + `.venv\\Scripts\\python.exe` / `venv\\Scripts\\python.exe`），之后可用明确的 Python/main.py 参数、`shell=False` 和固定 `127.0.0.1:8188` 自动启动。如果 8188 在 FolderBridge 启动前已经在线，则标记为外部服务并直接复用，不会再启动第二份。
+ComfyUI 现在是标准的**外源热加载 Extension**，公开源位于 `Plugins/extensions/comfyui`，并且明确不再打进 `FolderBridge.exe`。状态检查固定访问 `127.0.0.1:8188`；执行 workflow 需要在 Extensions 侧栏对精确目录 hash 批准。Windows Launcher 仍可以独立托管本地 ComfyUI 进程：只需选择一次受支持的 Portable 根目录（`python_embeded\\python.exe` + `ComfyUI\\main.py`），或源码安装根目录（`main.py` + `.venv\\Scripts\\python.exe` / `venv\\Scripts\\python.exe`），之后可用明确的 Python/main.py 参数、`shell=False` 和固定 `127.0.0.1:8188` 自动启动。如果 8188 在 FolderBridge 启动前已经在线，则标记为外部服务并直接复用，不会再启动第二份。Launcher managed-service controller 与外源 Extension runtime 是刻意分离的两层。
 
 Managed Service 的 ownership 比 Extension 权限更严格：持久配置只保存 `install_root` 和 `auto_start`，不保存 PID 或任意启动命令；只有当前 Launcher 本次运行亲自创建并保留在内存中的 `Popen` handle 才算 owned、才允许停止。FolderBridge 不会执行用户选择的 BAT/CMD，也不会因为未知程序占用了 8188 就按端口查 PID 后终止。退出时先停止 owned managed services，再停止 Tunnel/MCP；外部 ComfyUI 保持运行。
 
@@ -359,7 +359,7 @@ python -m venv .build-venv
 
 ### 发布 GitHub Release
 
-仓库 push 与 GitHub Release 明确分离。Git Publisher 1.3.1 保留零参数 `release` 动作作为 FolderBridge 自身的兼容锁定发布路径：版本只允许从 `pyproject.toml` 读取稳定的 `x.y.z`，只允许在 `main`、tracked 工作树干净且 `origin/main` 已与当前 HEAD 一致时发布；标签固定为 `v<version>`，资产固定为 `release/windows-x64/FolderBridge.exe` 与 `FolderBridge.exe.sha256`。独立的通用 `release-assets` 动作只作用于当前选中的工作区仓库，接受受限 tag/title 与显式普通文件白名单；tracked 内容必须干净、当前分支必须已与 origin 对齐，禁止移动既有 tag 与 force push，同时允许显式未跟踪构建产物使用 GitHub 稳定的 ASCII Release 文件名上传，并可附带面向用户显示的独立标签。资产在任何远端修改前都会做 SHA-256 校验并复制为临时快照，长时间上传以宿主托管 Job 运行。Release 认证直接复用已经通过浏览器授权的 Git Credential Manager 账号：隔离 worker 从 GCM 取得凭据，只在本次操作期间通过子进程环境交给 `gh.exe`，因此不再要求额外执行 `gh auth login`。模型不能传入 token/PAT/password 或任意 Git/`gh` 命令参数，凭据也不会由 FolderBridge 持久化或通过 MCP 返回。
+仓库 push 与 GitHub Release 明确分离。Git Publisher 1.3.4 保留零参数 `release` 动作作为 FolderBridge 自身的兼容锁定发布路径：版本只允许从 `pyproject.toml` 读取稳定的 `x.y.z`，只允许在 `main`、tracked 工作树干净且 `origin/main` 已与当前 HEAD 一致时发布；标签固定为 `v<version>`，资产固定为 `release/windows-x64/FolderBridge.exe` 与 `FolderBridge.exe.sha256`。选择性 `commit` 只接受显式路径白名单，并支持经过严格确认的 Git tracked deletion；staged 集合核验会关闭 rename detection，因此“旧路径删除 + 新路径新增”的迁移不会再被误判成白名单缺项。独立的通用 `release-assets` 动作只作用于当前选中的工作区仓库，接受受限 tag/title 与显式普通文件白名单；tracked 内容必须干净、当前分支必须已与 origin 对齐，禁止移动既有 tag 与 force push，同时允许显式未跟踪构建产物使用 GitHub 稳定的 ASCII Release 文件名上传，并可附带面向用户显示的独立标签。资产在任何远端修改前都会做 SHA-256 校验并复制为临时快照，长时间上传以宿主托管 Job 运行。Release 认证直接复用已经通过浏览器授权的 Git Credential Manager 账号：隔离 worker 从 GCM 取得凭据，只在本次操作期间通过子进程环境交给 `gh.exe`，因此不再要求额外执行 `gh auth login`。模型不能传入 token/PAT/password 或任意 Git/`gh` 命令参数，凭据也不会由 FolderBridge 持久化或通过 MCP 返回。
 
 仓库端 `.github/workflows/release-windows.yml` 仍保留为第二条发布路径：当最终 commit 标题严格为 `Release FolderBridge <version>` 时，它会独立重新读取版本、执行完整 Windows 测试、构建并验证 EXE，然后创建或修复对应 Release。已有 tag 只有在确实指向同一个 release commit 时才会被接受；已有 Release 可以重新上传两个固定资产并重新标记为 Latest。
 

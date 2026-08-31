@@ -2,7 +2,7 @@
   "schema_version": 1,
   "id": "ffmpeg-toolkit",
   "name": "FFmpeg Toolkit",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Workspace-confined FFmpeg/FFprobe adapter with a full local-media argv surface, declared path placeholders, bounded diagnostics, capability discovery, and host-owned long-running jobs.",
   "entrypoint": "plugin.py",
   "permissions": [

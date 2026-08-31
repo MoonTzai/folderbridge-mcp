@@ -2,7 +2,7 @@
   "schema_version": 1,
   "id": "ftp-toolkit",
   "name": "FTP Toolkit",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Generic workspace-confined FTP/FTPS transfer extension with reusable local profiles, Windows Credential Manager credentials, optional local HTTP CONNECT proxy transport, bounded listing/stat/upload/download/tree transfer, mkdir/rename/delete actions, automatic parent-directory creation, and no arbitrary URL or command surface.",
   "entrypoint": "plugin.py",
   "permissions": [

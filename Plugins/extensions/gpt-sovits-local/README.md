@@ -1,5 +1,7 @@
 # Local GPT-SoVITS — FolderBridge External Extension
 
+Version 0.1.2.
+
 An optional external FolderBridge Extension for a workspace that already contains a dedicated `GPT-SoVITS-Bridge` and local GPT-SoVITS runtime.
 
 The Extension itself is intentionally thin. It does not download models, accept arbitrary commands, or embed GPT-SoVITS binaries. It only invokes the fixed workspace entrypoint:
@@ -19,6 +21,8 @@ Copy this entire `gpt-sovits-local` directory to:
 Then open FolderBridge **Extensions & Skills**, rescan if needed, approve the exact directory hash + declared permissions, and enable **Local GPT-SoVITS**.
 
 Normal external Extension hot loading does not require rebuilding FolderBridge or re-registering MCP tools.
+
+Version 0.1.2 preserves the complete 0.1.1 operation contract and moves process-tree ownership to the public `folderbridge_mcp.extension_api` import seam, with a narrow compatibility fallback for already-built FolderBridge 0.8.21 hosts.
 
 ## Expected workspace layout
 

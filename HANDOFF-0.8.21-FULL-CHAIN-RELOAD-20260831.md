@@ -70,9 +70,9 @@
 
 ## 4. 测试与实包状态
 
-最后一次版本化后的全量测试：
+仓库卫生审计与外源插件 ABI 收口后的正式全量测试已连续通过三次；最终基线：
 
-- `Ran 384 tests`
+- `Ran 387 tests`
 - `OK (skipped=2)`
 
 两个 skip 均为既有平台条件：
@@ -83,8 +83,8 @@
 Windows 0.8.21 实包已经成功构建并通过构建脚本内置 verifier：
 
 - `C:\Claude\Project\folderbridge-mcp\release\windows-x64\FolderBridge.exe`
-- size：`12137205` bytes
-- SHA-256：`05d8a4086bbe1e070616e55d8d8a59f4c41dcfad448db267021ba2ca5df22a00`
+- size：`12135309` bytes
+- SHA-256：`dbf20d2692172207a5469815da2aad83cfb2697ef82b4a89828f06bc285bac4c`
 - smoke：`folderbridge-mcp 0.8.21`
 
 PyInstaller 新构建产物中已进一步检查：
@@ -150,7 +150,7 @@ Start-Process -FilePath '.\release\windows-x64\FolderBridge.exe'
 
 SHA 正确值应为：
 
-`05D8A4086BBE1E070616E55D8D8A59F4C41DCFAD448DB267021BA2CA5DF22A00`
+`DBF20D2692172207A5469815DA2AAD83CFB2697EF82B4A89828F06BC285BAC4C`
 
 启动 0.8.21 后，在 Launcher 右侧 `Extensions & Skills`：
 
@@ -206,34 +206,29 @@ SHA 正确值应为：
 - `tests/test_comfyui.py`：已删除，完整行为覆盖已迁移到 `Plugins/extensions/comfyui/tests/test_plugin.py`，并由 `tests/test_external_comfyui.py` 主套件显式加载
 - 当前 `scripts/` 无 `folderbridge_mcp.comfyui` 引用
 - 当前 PyInstaller `PYZ-00.toc` 无 `folderbridge_mcp.comfyui`
-- final full suite：`384 tests / OK / skipped=2`
+- final full suite：`387 tests / OK / skipped=2`
 - final Windows build + verifier：通过
-- final EXE SHA-256：`05d8a4086bbe1e070616e55d8d8a59f4c41dcfad448db267021ba2ca5df22a00`
+- final EXE SHA-256：`dbf20d2692172207a5469815da2aad83cfb2697ef82b4a89828f06bc285bac4c`
+- Git Publisher source：`1.3.4`
+- public external source versions：ComfyUI `1.3.0`、FFmpeg Toolkit `0.1.2`、FTP Toolkit `0.2.1`、Godot AI `0.1.0`、GPT-SoVITS Local `0.1.2`
+- FFmpeg / FTP / GPT-SoVITS 的业务 action、权限、Job、timeout、进程树终止与输出契约未改；仅改为优先使用公共 `folderbridge_mcp.extension_api` 进程 helper，并保留针对既有 0.8.21 host 的窄 `ImportError` fallback
+- Godot 与 GPT-SoVITS 已补入主仓库 full-suite 覆盖；仓库卫生/文档/公共 ABI 关系有专门回归测试
 
-仓库内仍可能在 `.build/staged-snapshot-*` 历史快照、文档描述和负向回归断言中看到字符串 `folderbridge_mcp.comfyui`；它们不是当前运行源码依赖，不应为了“搜索零结果”而扩大清理范围。
+清理后旧 `.build/staged-snapshot-godot-workspace16` 已删除。正式源码、打包 verifier 与当前 build archive 均不再包含 legacy `folderbridge_mcp.comfyui` 运行依赖；历史文字或负向回归断言中的名称不代表运行依赖。
 
-## 9. 当前工作树纪律
+## 9. 仓库卫生审计与私有边界
 
-当前工作树本来就存在大量本轮及此前未提交文件。特别包括但不限于：
+2026-08-31 已对工作树、ignored/build 区、公开 external/bundled 目录、测试入口、打包 allowlist、文档版本与私有资产边界完成全量复核，并经 MATT deletion test / code review 连续两轮收敛后一次性清理。
 
-- `FolderBridge - Copy.exe`
-- `_probe.txt`
-- `*.bak-taskfix`
-- `tools.py`
-- `tools_plus_compat_ready.py`
-- `write-probe-chatgpt.txt`
-- 多个 Plugins / external-extensions / skill-packs 工作副本
+已删除的明确冗余包括：deprecated InfinityFree Publisher、孤立 Project Run Manager、旧 `external-extensions/ffmpeg-toolkit` 工作副本、重复/错位 Skill Pack、副本 `tools*.py`、废弃原型测试、debug bak/probe、`FolderBridge - Copy.exe` 与旧 Godot staged snapshot。
 
-**不得为了“干净”而批量删除、reset、clean 或覆盖这些文件。**
+`debate-judge-adapter` 是本地专用私有资产，不属于公开仓库同步范围。FolderBridge 仓库中的陈旧 `0.2.3` 副本已删除；正式私有主源位于 Debate-Judge 项目并为 `0.5.6`，当前安装运行态也是 `0.5.6`。`Plugins/skill-packs/folderbridge-discipline/` 同样属于明确忽略的本地私有资产，不上传。
 
-必须逐项判断来源。禁止：
+公开仓库纪律已固化到 `.gitignore` 与 `CONTRIBUTING.md`：untracked 文件必须先分成 public source / generated-temporary / local-only-private；私有资产不是同步遗漏，不得为了让 `git status` 干净而上传。禁止 `git add .`、broad clean/reset 与 force push。
 
-- `git reset --hard`
-- `git clean -fd/-fdx`
-- force push
-- 用旧 release / 旧 EXE 覆盖 0.8.21 产物
+根目录被忽略的 `FolderBridge.exe` 暂时保留，因为它可能仍是当前客户端/隧道启动入口；正式构建产物唯一以 `release/windows-x64/FolderBridge.exe` 为准。待受控全链路重载确认客户端已指向新版 release EXE 后，再决定是否删除根目录旧副本。
 
-本轮最终提交前应只纳入经过确认的 0.8.21 目标文件，避免把 probe、copy、bak、无关外源插件工作副本混入提交。
+注意：当前正在运行的 0.8.21 EXE 仍可显示 Git Publisher `1.3.1`、FFmpeg `0.1.1`、FTP `0.2.0`、GPT-SoVITS `0.1.1`，这是运行中旧 EXE/已安装 external tree 尚未重载更新，不是磁盘源码同步遗漏。磁盘/公开源码基线以本文件第 8 节版本为准。
 
 ## 10. 后续新会话入口
 
