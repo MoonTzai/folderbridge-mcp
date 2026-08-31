@@ -11,7 +11,7 @@ import tkinter.font as tkfont
 from tkinter import filedialog, messagebox, scrolledtext, ttk
 
 from .capabilities import CAPABILITY_LABELS, CAPABILITY_NAMES
-from .config import canonical_workspaces, workspace_id
+from .config import MAX_WORKSPACES, canonical_workspaces, workspace_id
 from .extensions import ExtensionRegistry, extension_root_path
 from .extension_spec import EXTENSION_FORMAT_SUMMARY, EXTENSION_LLM_PROMPT
 from .dpi import (
@@ -292,7 +292,11 @@ class FolderBridgeLauncher:
             variable.relocalize()
         self._localize_widget_tree(self.root)
         if hasattr(self, "workspace_tree"):
-            self.workspace_tree.heading("path", text=self._t("已允许的本地目录（最多 8 个）"), anchor="w")
+            self.workspace_tree.heading(
+                "path",
+                text=self._t(f"已允许的本地目录（最多 {MAX_WORKSPACES} 个）"),
+                anchor="w",
+            )
         self.root.after_idle(self._fit_window_to_content)
 
     def _toggle_language(self) -> None:
@@ -1528,7 +1532,7 @@ class FolderBridgeLauncher:
             selectmode="extended",
             style="Workspace.Treeview",
         )
-        self.workspace_tree.heading("path", text="已允许的本地目录（最多 8 个）", anchor="w")
+        self.workspace_tree.heading("path", text=f"已允许的本地目录（最多 {MAX_WORKSPACES} 个）", anchor="w")
         self.workspace_tree.heading("workspace_id", text="Workspace ID", anchor="w")
         self.workspace_tree.column("path", anchor="w", stretch=True)
         self.workspace_tree.column("workspace_id", anchor="w", stretch=False, width=self._px(115))
@@ -2166,7 +2170,7 @@ class FolderBridgeLauncher:
             notebook,
             "FolderBridge 主界面这样填",
             (
-                "1. 文件夹列表：逐个添加明确的工作区，最多 8 个；重复或父子重叠目录会被拒绝。全局权限首次使用保持“只读（推荐）”。",
+                f"1. 文件夹列表：逐个添加明确的工作区，最多 {MAX_WORKSPACES} 个；重复或父子重叠目录会被拒绝。全局权限首次使用保持“只读（推荐）”。",
                 "2. tunnel-client：只选择完整包中准确名为 tunnel-client.exe 的主程序；不要选 tunnel-client-runtime-*。Profile 保持 folderbridge 即可。",
                 "3. Tunnel ID：粘贴 Platform 中 tunnel_ 开头的 ID；Runtime API Key：粘贴控制面 Key（仅留内存，不保存）。",
                 "4. 按需勾选一次“全局预授权”（测试/构建/EXE/APK/发布同步/GitHub），以后所有工作区继承；插件授权与本地 ComfyUI 在右侧 Extensions 单独管理。“高级：自定义任务”通常保持关闭。点击“启动连接”，等待顶部状态变成“运行中”。",

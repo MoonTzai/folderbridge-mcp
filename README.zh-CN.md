@@ -145,7 +145,7 @@ ChatGPT 不能直接连接本地 stdio 进程。FolderBridge 通过 OpenAI 官�
 
 ### 3. 启动 FolderBridge
 
-1. 在文件夹列表中逐个添加明确的工作区（最多 8 个），首次使用保持“只读（推荐）”；全局权限作用于列表内全部目录。
+1. 在文件夹列表中逐个添加明确的工作区（最多 16 个），首次使用保持“只读（推荐）”；全局权限作用于列表内全部目录。
 2. `tunnel-client` 只选择完整包中的 `tunnel-client.exe`，不要选择 `tunnel-client-runtime-*`；Profile 保持 `folderbridge` 即可。
 3. 填写相同的 Tunnel ID 和 Runtime API Key；可按需一次勾选要全局预授权的常用能力，逐工作区“高级：自定义任务”没有特殊需求时保持关闭。
 4. 点击“启动连接”；启动器会执行官方 `init`、`doctor`、`run` 流程。顶部变成“运行中”后再进行下一步。以后更换文件夹或权限时，可直接再次点击“应用配置”；启动器会更新自己管理的同名 Profile。

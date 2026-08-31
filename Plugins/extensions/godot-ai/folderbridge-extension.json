@@ -1,0 +1,232 @@
+{
+  "schema_version": 1,
+  "id": "godot-ai",
+  "name": "Godot AI Local Bridge",
+  "version": "0.1.0",
+  "description": "Hot-loadable FolderBridge adapter for the local Godot AI MCP server at 127.0.0.1:8000. It binds calls to the Godot session matching the selected workspace and exposes only bounded editor, scene, run, log, screenshot, and runtime-input actions.",
+  "entrypoint": "plugin.py",
+  "permissions": [
+    "network.loopback:127.0.0.1:8000",
+    "workspace.read",
+    "workspace.write",
+    "workspace.adapter"
+  ],
+  "execution": {
+    "mode": "isolated-process",
+    "timeout_seconds": 45
+  },
+  "workspace_adapter": {
+    "mode": "dynamic",
+    "state": "none",
+    "detect": {
+      "any_of": [
+        "Godot/project.godot",
+        "project.godot"
+      ],
+      "all_of": []
+    }
+  },
+  "actions": {
+    "status": {
+      "read_only": true,
+      "requires_workspace": true,
+      "authorization": "global",
+      "input_schema": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false
+      }
+    },
+    "inspect-editor": {
+      "read_only": true,
+      "requires_workspace": true,
+      "authorization": "global",
+      "input_schema": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false
+      }
+    },
+    "inspect-scene": {
+      "read_only": true,
+      "requires_workspace": true,
+      "authorization": "global",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "depth": {"type": "integer", "minimum": 1, "maximum": 32, "default": 10},
+          "offset": {"type": "integer", "minimum": 0, "maximum": 10000, "default": 0},
+          "limit": {"type": "integer", "minimum": 1, "maximum": 500, "default": 100}
+        },
+        "additionalProperties": false
+      }
+    },
+    "inspect-node": {
+      "read_only": true,
+      "requires_workspace": true,
+      "authorization": "global",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "path": {"type": "string", "minLength": 1, "maxLength": 1024},
+          "fields": {"type": "array", "maxItems": 64, "items": {"type": "string", "minLength": 1, "maxLength": 128}}
+        },
+        "required": ["path"],
+        "additionalProperties": false
+      }
+    },
+    "read-logs": {
+      "read_only": true,
+      "requires_workspace": true,
+      "authorization": "global",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "source": {"type": "string", "enum": ["plugin", "editor", "game", "all"], "default": "all"},
+          "count": {"type": "integer", "minimum": 1, "maximum": 200, "default": 50},
+          "offset": {"type": "integer", "minimum": 0, "maximum": 10000, "default": 0},
+          "include_details": {"type": "boolean", "default": true}
+        },
+        "additionalProperties": false
+      }
+    },
+    "screenshot": {
+      "read_only": true,
+      "requires_workspace": true,
+      "authorization": "global",
+      "timeout_seconds": 60,
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "source": {"type": "string", "enum": ["viewport", "viewport_2d", "cinematic", "game"], "default": "viewport_2d"},
+          "max_resolution": {"type": "integer", "minimum": 128, "maximum": 1920, "default": 640},
+          "user_prompt": {"type": "string", "maxLength": 1000, "default": ""}
+        },
+        "additionalProperties": false
+      }
+    },
+    "open-scene": {
+      "read_only": false,
+      "requires_workspace": true,
+      "authorization": "global",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "path": {"type": "string", "minLength": 1, "maxLength": 1024},
+          "force_reload": {"type": "boolean", "default": false}
+        },
+        "required": ["path"],
+        "additionalProperties": false
+      }
+    },
+    "save-scene": {
+      "read_only": false,
+      "requires_workspace": true,
+      "authorization": "global",
+      "input_schema": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false
+      }
+    },
+    "create-node": {
+      "read_only": false,
+      "requires_workspace": true,
+      "authorization": "global",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "type": {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"},
+          "name": {"type": "string", "maxLength": 128, "default": ""},
+          "parent_path": {"type": "string", "maxLength": 1024, "default": ""},
+          "scene_file": {"type": "string", "maxLength": 1024, "default": ""}
+        },
+        "required": ["type"],
+        "additionalProperties": false
+      }
+    },
+    "set-node-property": {
+      "read_only": false,
+      "requires_workspace": true,
+      "authorization": "global",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "path": {"type": "string", "minLength": 1, "maxLength": 1024},
+          "property": {"type": "string", "minLength": 1, "maxLength": 256},
+          "value": {},
+          "scene_file": {"type": "string", "maxLength": 1024, "default": ""}
+        },
+        "required": ["path", "property", "value"],
+        "additionalProperties": false
+      }
+    },
+    "delete-node": {
+      "read_only": false,
+      "requires_workspace": true,
+      "authorization": "global",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "path": {"type": "string", "minLength": 1, "maxLength": 1024},
+          "scene_file": {"type": "string", "maxLength": 1024, "default": ""}
+        },
+        "required": ["path"],
+        "additionalProperties": false
+      }
+    },
+    "run-project": {
+      "read_only": false,
+      "requires_workspace": true,
+      "authorization": "global",
+      "timeout_seconds": 60,
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "mode": {"type": "string", "enum": ["main", "current", "custom"], "default": "main"},
+          "scene": {"type": "string", "maxLength": 1024, "default": ""},
+          "autosave": {"type": "boolean", "default": true}
+        },
+        "additionalProperties": false
+      }
+    },
+    "stop-project": {
+      "read_only": false,
+      "requires_workspace": true,
+      "authorization": "global",
+      "input_schema": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false
+      }
+    },
+    "inspect-runtime-tree": {
+      "read_only": true,
+      "requires_workspace": true,
+      "authorization": "global",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "depth": {"type": "integer", "minimum": 1, "maximum": 32, "default": 10},
+          "root_path": {"type": "string", "maxLength": 1024, "default": ""}
+        },
+        "additionalProperties": false
+      }
+    },
+    "send-action": {
+      "read_only": false,
+      "requires_workspace": true,
+      "authorization": "global",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "action": {"type": "string", "minLength": 1, "maxLength": 128},
+          "pressed": {"type": "boolean", "default": true},
+          "strength": {"type": "number", "minimum": 0.0, "maximum": 1.0, "default": 1.0}
+        },
+        "required": ["action"],
+        "additionalProperties": false
+      }
+    }
+  }
+}

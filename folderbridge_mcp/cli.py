@@ -14,6 +14,7 @@ from .capabilities import CAPABILITY_NAMES
 from .config import (
     CONFIG_NAME,
     ConfigError,
+    MAX_WORKSPACES,
     approve_config,
     canonical_workspace,
     canonical_workspaces,
@@ -98,7 +99,7 @@ def _workspace_arguments(parser: argparse.ArgumentParser) -> None:
         "--workspace",
         dest="workspaces",
         action="append",
-        help="An allowed directory. Repeat for up to eight separate workspaces.",
+        help=f"An allowed directory. Repeat for up to {MAX_WORKSPACES} separate workspaces.",
     )
 
 

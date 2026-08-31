@@ -53,7 +53,7 @@ See [CHANGELOG.md](CHANGELOG.md) for the full release history and [Extension ABI
 
 ## Why FolderBridge?
 
-- **Independent folder boundaries:** one connection can contain up to eight canonical workspaces; every multi-workspace tool call selects a `workspace_id` instead of merging roots.
+- **Independent folder boundaries:** one connection can contain up to 16 canonical workspaces; every multi-workspace tool call selects a `workspace_id` instead of merging roots.
 - **Read-only by default:** switch to read/write explicitly in the launcher.
 - **Conflict-safe edits:** existing files require the SHA-256 returned by the last read; stale edits fail instead of overwriting newer work.
 - **No arbitrary shell:** optional tasks are named, locally reviewed, and approved by exact config hash.
@@ -145,7 +145,7 @@ Create the key for `tunnel-client` under the same Platform organization's [Runti
 
 ### 3. Start FolderBridge
 
-1. Add one or more explicit workspace folders (up to eight) and keep **Read only (recommended)** for the first run. The global access mode applies to every listed folder.
+1. Add one or more explicit workspace folders (up to 16) and keep **Read only (recommended)** for the first run. The global access mode applies to every listed folder.
 2. Select `tunnel-client.exe` from the complete archive, never a `tunnel-client-runtime-*` component; the default `folderbridge` profile is suitable.
 3. Enter the same Tunnel ID and Runtime API key. Optionally enable the global capabilities you want once; leave per-workspace advanced named tasks disabled unless you need a custom command.
 4. Click **Start connection**. The launcher runs the official `init`, `doctor`, and `run` flow. Continue only after the top status reads **运行中** (Running). When changing the folder or access mode later, click **应用配置** (Apply configuration) again; the launcher updates the same profile that it manages.

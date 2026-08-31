@@ -15,7 +15,7 @@ from typing import Any
 CONFIG_NAME = ".folderbridge.json"
 CONFIG_VERSION = 1
 MAX_CONFIG_BYTES = 256 * 1024
-MAX_WORKSPACES = 8
+MAX_WORKSPACES = 16
 TASK_NAME_RE = re.compile(r"^[a-zA-Z][a-zA-Z0-9_-]{0,39}$")
 INLINE_RUNNERS = {
     "bash": {"-c"},
