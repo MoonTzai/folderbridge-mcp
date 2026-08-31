@@ -359,9 +359,9 @@ python -m venv .build-venv
 
 ### 发布 GitHub Release
 
-仓库 push 与 GitHub Release 明确分离。Git Publisher 1.3.4 保留零参数 `release` 动作作为 FolderBridge 自身的兼容锁定发布路径：版本只允许从 `pyproject.toml` 读取稳定的 `x.y.z`，只允许在 `main`、tracked 工作树干净且 `origin/main` 已与当前 HEAD 一致时发布；标签固定为 `v<version>`，资产固定为 `release/windows-x64/FolderBridge.exe` 与 `FolderBridge.exe.sha256`。选择性 `commit` 只接受显式路径白名单，并支持经过严格确认的 Git tracked deletion；staged 集合核验会关闭 rename detection，因此“旧路径删除 + 新路径新增”的迁移不会再被误判成白名单缺项。独立的通用 `release-assets` 动作只作用于当前选中的工作区仓库，接受受限 tag/title 与显式普通文件白名单；tracked 内容必须干净、当前分支必须已与 origin 对齐，禁止移动既有 tag 与 force push，同时允许显式未跟踪构建产物使用 GitHub 稳定的 ASCII Release 文件名上传，并可附带面向用户显示的独立标签。资产在任何远端修改前都会做 SHA-256 校验并复制为临时快照，长时间上传以宿主托管 Job 运行。Release 认证直接复用已经通过浏览器授权的 Git Credential Manager 账号：隔离 worker 从 GCM 取得凭据，只在本次操作期间通过子进程环境交给 `gh.exe`，因此不再要求额外执行 `gh auth login`。模型不能传入 token/PAT/password 或任意 Git/`gh` 命令参数，凭据也不会由 FolderBridge 持久化或通过 MCP 返回。
+仓库 push 与 GitHub Release 明确分离。Git Publisher 1.4.0 已完全项目无关，只暴露 `status`、`connect`、`commit`、`push`、`release-assets` 五个通用动作。选择性 `commit` 只接受显式路径白名单，并支持经过严格确认的 Git tracked deletion；staged 集合核验会关闭 rename detection，因此“旧路径删除 + 新路径新增”的迁移不会再被误判成白名单缺项。`push` 只作用于当前选中仓库的当前命名分支和既有、无凭据的 GitHub HTTPS `origin`，禁止 force push。通用 `release-assets` 只作用于当前选中的工作区仓库，接受受限 tag/title 与显式普通文件白名单；tracked 内容必须干净、当前分支必须已与 origin 对齐，禁止移动既有 tag 与 force push，同时允许显式未跟踪构建产物使用 GitHub 稳定的 ASCII Release 文件名上传，并可附带面向用户显示的独立标签。资产在任何远端修改前都会做 SHA-256 校验并复制为临时快照，长时间上传以宿主托管 Job 运行。Release 认证直接复用已经通过浏览器授权的 Git Credential Manager 账号：隔离 worker 从 GCM 取得凭据，只在本次操作期间通过子进程环境交给 `gh.exe`。任何项目专用的版本读取、构建规则、release commit 约定、固定资产名，以及 token/PAT/password 或任意 Git/`gh` 命令输入，都不属于 Git Publisher。
 
-仓库端 `.github/workflows/release-windows.yml` 仍保留为第二条发布路径：当最终 commit 标题严格为 `Release FolderBridge <version>` 时，它会独立重新读取版本、执行完整 Windows 测试、构建并验证 EXE，然后创建或修复对应 Release。已有 tag 只有在确实指向同一个 release commit 时才会被接受；已有 Release 可以重新上传两个固定资产并重新标记为 Latest。
+FolderBridge 自己的仓库级 `.github/workflows/release-windows.yml` 是项目专用发布路径：当最终 commit 标题严格为 `Release FolderBridge <version>` 时，它会独立重新读取版本、执行完整 Windows 测试、构建并验证 EXE，然后创建或修复对应 Release。已有 tag 只有在确实指向同一个 release commit 时才会被接受；已有 Release 可以重新上传两个固定资产并重新标记为 Latest。
 
 ## 许可证
 

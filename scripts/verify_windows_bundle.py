@@ -20,7 +20,7 @@ EXPECTED_ENGINEERING_SKILLS = {
     "code-review",
     "implement",
 }
-EXPECTED_EXTENSION_VERSIONS = {"git-publisher": "1.3.4", "office": "1.1.4"}
+EXPECTED_EXTENSION_VERSIONS = {"git-publisher": "1.4.0", "office": "1.1.4"}
 
 
 def _project_version() -> str:
@@ -183,13 +183,9 @@ def verify(executable: Path) -> dict[str, Any]:
         for item in publisher_actions
         if isinstance(item, dict) and isinstance(item.get("name"), str)
     }
-    legacy_release = publisher_action_by_name.get("release")
+    if "release" in publisher_action_by_name:
+        raise RuntimeError("git-publisher must not expose a project-specific legacy release action")
     generic_release = publisher_action_by_name.get("release-assets")
-    if not isinstance(legacy_release, dict):
-        raise RuntimeError("git-publisher compatibility release action is missing")
-    legacy_schema = legacy_release.get("input_schema")
-    if not isinstance(legacy_schema, dict) or legacy_schema.get("properties") != {}:
-        raise RuntimeError("git-publisher compatibility release action is no longer parameterless")
     if not isinstance(generic_release, dict):
         raise RuntimeError("git-publisher generic release-assets action is missing")
     if generic_release.get("run_mode") != "job" or generic_release.get("timeout_seconds") != 7200:

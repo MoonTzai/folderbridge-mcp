@@ -83,8 +83,8 @@
 Windows 0.8.21 实包已经成功构建并通过构建脚本内置 verifier：
 
 - `C:\Claude\Project\folderbridge-mcp\release\windows-x64\FolderBridge.exe`
-- size：`12135309` bytes
-- SHA-256：`dbf20d2692172207a5469815da2aad83cfb2697ef82b4a89828f06bc285bac4c`
+- size：`12133501` bytes
+- SHA-256：`2b541108850254aed0aa43919c3e4273bc3088cb3f37e41e20cc8135d232b18b`
 - smoke：`folderbridge-mcp 0.8.21`
 
 PyInstaller 新构建产物中已进一步检查：
@@ -150,7 +150,7 @@ Start-Process -FilePath '.\release\windows-x64\FolderBridge.exe'
 
 SHA 正确值应为：
 
-`DBF20D2692172207A5469815DA2AAD83CFB2697EF82B4A89828F06BC285BAC4C`
+`2B541108850254AED0AA43919C3E4273BC3088CB3F37E41E20CC8135D232B18B`
 
 启动 0.8.21 后，在 Launcher 右侧 `Extensions & Skills`：
 
@@ -208,8 +208,9 @@ SHA 正确值应为：
 - 当前 PyInstaller `PYZ-00.toc` 无 `folderbridge_mcp.comfyui`
 - final full suite：`387 tests / OK / skipped=2`
 - final Windows build + verifier：通过
-- final EXE SHA-256：`dbf20d2692172207a5469815da2aad83cfb2697ef82b4a89828f06bc285bac4c`
-- Git Publisher source：`1.3.4`
+- final EXE SHA-256：`2b541108850254aed0aa43919c3e4273bc3088cb3f37e41e20cc8135d232b18b`
+- Git Publisher source：`1.4.0`
+- Git Publisher 已彻底移除 FolderBridge 专用 legacy `release` action；当前只保留 `status / connect / commit / push / release-assets` 五个项目无关动作。FolderBridge 自身版本读取、测试/构建、release commit、tag 与固定 Windows 资产发布只存在于仓库级 `.github/workflows/release-windows.yml`，不再进入通用 Git Publisher。
 - public external source versions：ComfyUI `1.3.0`、FFmpeg Toolkit `0.1.2`、FTP Toolkit `0.2.1`、Godot AI `0.1.0`、GPT-SoVITS Local `0.1.2`
 - FFmpeg / FTP / GPT-SoVITS 的业务 action、权限、Job、timeout、进程树终止与输出契约未改；仅改为优先使用公共 `folderbridge_mcp.extension_api` 进程 helper，并保留针对既有 0.8.21 host 的窄 `ImportError` fallback
 - Godot 与 GPT-SoVITS 已补入主仓库 full-suite 覆盖；仓库卫生/文档/公共 ABI 关系有专门回归测试
@@ -228,7 +229,7 @@ SHA 正确值应为：
 
 根目录被忽略的 `FolderBridge.exe` 暂时保留，因为它可能仍是当前客户端/隧道启动入口；正式构建产物唯一以 `release/windows-x64/FolderBridge.exe` 为准。待受控全链路重载确认客户端已指向新版 release EXE 后，再决定是否删除根目录旧副本。
 
-注意：当前正在运行的 0.8.21 EXE 仍可显示 Git Publisher `1.3.1`、FFmpeg `0.1.1`、FTP `0.2.0`、GPT-SoVITS `0.1.1`，这是运行中旧 EXE/已安装 external tree 尚未重载更新，不是磁盘源码同步遗漏。磁盘/公开源码基线以本文件第 8 节版本为准。
+注意：本次清理前用户已重启到包含 Git Publisher `1.3.4` 的 0.8.21 EXE；随后源码已升级并重新构建为 Git Publisher `1.4.0`，因此当前未再次重启的会话仍可能显示 `1.3.4`，这是正常的运行中旧进程状态。FFmpeg `0.1.1`、FTP `0.2.0`、GPT-SoVITS `0.1.1` 也仍是用户级 external 安装树的旧版本；磁盘/公开源码基线分别为 `0.1.2 / 0.2.1 / 0.1.2`，后续可独立 hot-update。
 
 ## 10. 后续新会话入口
 

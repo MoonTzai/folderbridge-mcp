@@ -2,8 +2,8 @@
   "schema_version": 1,
   "id": "git-publisher",
   "name": "Git Publisher",
-  "version": "1.3.4",
-  "description": "Safely connect GitHub in a browser, commit explicit files, push only the current branch, publish the locked FolderBridge release, or publish explicit Release assets from the selected GitHub repository.",
+  "version": "1.4.0",
+  "description": "Safely connect GitHub in a browser, commit explicit files, push only the current branch, or publish explicit Release assets from the selected GitHub repository.",
   "entrypoint": "plugin.py",
   "permissions": [
     "workspace.read",
@@ -69,16 +69,6 @@
       }
     },
     "push": {
-      "read_only": false,
-      "requires_workspace": true,
-      "authorization": "global",
-      "input_schema": {
-        "type": "object",
-        "properties": {},
-        "additionalProperties": false
-      }
-    },
-    "release": {
       "read_only": false,
       "requires_workspace": true,
       "authorization": "global",

@@ -62,8 +62,6 @@ def handle(action: str, params: dict[str, Any], context: dict[str, Any]) -> dict
         return _commit(root, params.get("paths"), params.get("message"))
     if action == "push":
         return _push(root)
-    if action == "release":
-        return _release(root)
     if action == "release-assets":
         return _release_assets(
             root,
@@ -257,7 +255,7 @@ def _repo_info(root: Path) -> dict[str, str]:
     top = _text(_run_git(root, "-c", "core.fsmonitor=false", "rev-parse", "--show-toplevel"))
     try:
         if Path(top).resolve(strict=True) != root:
-            raise RuntimeError("selected FolderBridge workspace must itself be the Git repository root")
+            raise RuntimeError("selected workspace must itself be the Git repository root")
     except OSError as exc:
         raise RuntimeError("could not validate Git repository root") from exc
     branch = _text(_run_git(root, "-c", "core.fsmonitor=false", "symbolic-ref", "--quiet", "--short", "HEAD"))
@@ -852,7 +850,7 @@ def _release_assets(
     token = _github_token_from_gcm(root)
     repo_name = f"{repo['owner']}/{repo['repo']}"
 
-    with tempfile.TemporaryDirectory(prefix="folderbridge-release-") as temp_dir:
+    with tempfile.TemporaryDirectory(prefix="git-publisher-release-") as temp_dir:
         uploads = _prepare_release_upload_paths(root, assets, Path(temp_dir))
         head = _ensure_generic_release_tag(root, repo, tag, title)
         existing = _run_gh(root, "release", "view", tag, "--repo", repo_name, token=token, check=False)
@@ -929,48 +927,6 @@ def _release_assets(
     }
 
 
-def _project_release_version(root: Path) -> str:
-    path = root / "pyproject.toml"
-    _reject_links(root, path)
-    try:
-        if path.stat().st_size > 64 * 1024:
-            raise RuntimeError("pyproject.toml is unexpectedly large")
-        text = path.read_text(encoding="utf-8", errors="strict")
-    except (OSError, UnicodeError) as exc:
-        raise RuntimeError(f"could not read project version from pyproject.toml: {exc}") from exc
-    in_project = False
-    versions: list[str] = []
-    for line in text.splitlines():
-        section = re.fullmatch(r"\s*\[([^\]]+)\]\s*(?:#.*)?", line)
-        if section:
-            in_project = section.group(1).strip() == "project"
-            continue
-        if not in_project:
-            continue
-        match = re.fullmatch(r'\s*version\s*=\s*"(\d+\.\d+\.\d+)"\s*(?:#.*)?', line)
-        if match:
-            versions.append(match.group(1))
-    if len(versions) != 1:
-        raise RuntimeError("pyproject.toml [project] must declare exactly one stable numeric version = \"x.y.z\"")
-    return versions[0]
-
-
-def _release_asset_paths(root: Path) -> tuple[Path, Path]:
-    release_dir = root / "release" / "windows-x64"
-    exe = release_dir / "FolderBridge.exe"
-    checksum = release_dir / "FolderBridge.exe.sha256"
-    for path in (exe, checksum):
-        _reject_links(root, path)
-        try:
-            resolved = path.resolve(strict=True)
-            resolved.relative_to(root)
-        except (OSError, ValueError) as exc:
-            raise RuntimeError(f"required Release asset is missing or unsafe: {path.relative_to(root).as_posix()}") from exc
-        if not resolved.is_file() or resolved.is_symlink() or _is_reparse(resolved):
-            raise RuntimeError(f"required Release asset is not a regular file: {path.relative_to(root).as_posix()}")
-    return exe, checksum
-
-
 def _sha256_file(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as stream:
@@ -980,125 +936,3 @@ def _sha256_file(path: Path) -> str:
                 break
             digest.update(chunk)
     return digest.hexdigest()
-
-
-def _release(root: Path) -> dict[str, Any]:
-    repo = _repo_info(root)
-    if repo["branch"] != "main":
-        raise RuntimeError("Release publishing is locked to the main branch")
-    if _staged_paths(root):
-        raise RuntimeError("Release publishing requires no staged changes")
-    tracked = _run_git(root, "-c", "core.fsmonitor=false", "status", "--porcelain=v1", "--untracked-files=no")
-    if tracked.stdout.strip():
-        raise RuntimeError("Release publishing requires a clean tracked working tree; untracked local files are allowed")
-
-    version = _project_release_version(root)
-    tag = f"v{version}"
-    head = _text(_run_git(root, "rev-parse", "HEAD"))
-    title = _text(_run_git(root, "log", "-1", "--pretty=%s"))
-    expected_title = f"Release FolderBridge {version}"
-    if title != expected_title:
-        raise RuntimeError(f"HEAD commit title must be exactly '{expected_title}'")
-
-    remote = _run_git(root, "ls-remote", "origin", "refs/heads/main", timeout=120, gcm_only=True)
-    remote_line = _text(remote).splitlines()
-    remote_head = remote_line[0].split("\t", 1)[0] if remote_line else ""
-    if remote_head != head:
-        raise RuntimeError("origin/main does not match current HEAD; push the release commit first")
-
-    exe, checksum = _release_asset_paths(root)
-    actual_sha = _sha256_file(exe)
-    try:
-        checksum_text = checksum.read_text(encoding="utf-8", errors="strict").strip()
-    except (OSError, UnicodeError) as exc:
-        raise RuntimeError(f"could not read Release checksum file: {exc}") from exc
-    declared_sha = checksum_text.split()[0].lower() if checksum_text else ""
-    if declared_sha != actual_sha:
-        raise RuntimeError("FolderBridge.exe.sha256 does not match FolderBridge.exe")
-
-    local_tag = _run_git(root, "rev-parse", "--verify", f"refs/tags/{tag}^{{}}", check=False)
-    if local_tag.returncode == 0 and _text(local_tag) != head:
-        raise RuntimeError(f"local tag {tag} already points to a different commit")
-
-    remote_tags = _run_git(
-        root,
-        "ls-remote", "--tags", "origin", f"refs/tags/{tag}", f"refs/tags/{tag}^{{}}",
-        timeout=120,
-        gcm_only=True,
-    )
-    lines = [line for line in _text(remote_tags).splitlines() if line.strip()]
-    remote_tag_target = ""
-    for line in lines:
-        sha, ref = line.split("\t", 1)
-        if ref.endswith("^{}"):
-            remote_tag_target = sha
-            break
-    if not remote_tag_target and lines:
-        remote_tag_target = lines[0].split("\t", 1)[0]
-    if remote_tag_target and remote_tag_target != head:
-        raise RuntimeError(f"remote tag {tag} already points to a different commit")
-
-    if not lines:
-        if local_tag.returncode != 0:
-            _run_git(
-                root,
-                "-c", "core.hooksPath=NUL",
-                "-c", "tag.gpgSign=false",
-                "tag", "-a", tag, "-m", f"FolderBridge {version}", head,
-            )
-        _run_git(
-            root,
-            "-c", "core.hooksPath=NUL",
-            "push", "--porcelain", "--no-verify", "origin", f"refs/tags/{tag}:refs/tags/{tag}",
-            timeout=300,
-            gcm_only=True,
-        )
-
-    token = _github_token_from_gcm(root)
-    repo_name = f"{repo['owner']}/{repo['repo']}"
-    existing = _run_gh(root, "release", "view", tag, "--repo", repo_name, token=token, check=False)
-    if existing.returncode == 0:
-        _run_gh(
-            root,
-            "release", "upload", tag, str(exe), str(checksum), "--clobber", "--repo", repo_name,
-            token=token,
-            timeout=300,
-        )
-        _run_gh(
-            root,
-            "release", "edit", tag, "--title", f"FolderBridge {version}", "--latest", "--repo", repo_name,
-            token=token,
-        )
-    else:
-        _run_gh(
-            root,
-            "release", "create", tag, str(exe), str(checksum),
-            "--verify-tag", "--generate-notes", "--title", f"FolderBridge {version}", "--latest", "--repo", repo_name,
-            token=token,
-            timeout=300,
-        )
-    verified = _run_gh(
-        root,
-        "release", "view", tag, "--repo", repo_name, "--json", "tagName,url",
-        token=token,
-    )
-    return {
-        **repo,
-        "released": True,
-        "version": version,
-        "tag": tag,
-        "head": head,
-        "exe_sha256": actual_sha,
-        "release": _text(verified),
-        "assets": ["release/windows-x64/FolderBridge.exe", "release/windows-x64/FolderBridge.exe.sha256"],
-        "safety": {
-            "main_branch_only": True,
-            "version_from_pyproject_only": True,
-            "tag_from_version_only": True,
-            "current_head_only": True,
-            "origin_main_must_match_head": True,
-            "fixed_release_assets_only": True,
-            "untracked_local_files_ignored": True,
-            "force_push": False,
-        },
-    }

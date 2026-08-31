@@ -29,6 +29,7 @@ class ReleaseWorkflowTests(unittest.TestCase):
         self.assertIn("--latest", text)
         self.assertIn("release/windows-x64/FolderBridge.exe", text)
         self.assertIn("release/windows-x64/FolderBridge.exe.sha256", text)
+        self.assertNotIn("git-publisher", text.lower())
 
     def test_release_workflow_has_no_manual_or_tag_input_surface(self) -> None:
         text = WORKFLOW.read_text(encoding="utf-8")

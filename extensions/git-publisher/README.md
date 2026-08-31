@@ -6,8 +6,7 @@ Bundled FolderBridge extension for a narrow GitHub publish workflow:
 2. connect `github.com` through Git Credential Manager's browser OAuth flow;
 3. commit only an explicit allowlist of regular workspace files;
 4. push only the current named branch to the existing credential-free `https://github.com/<owner>/<repo>[.git]` origin;
-5. keep the legacy `release` action locked to FolderBridge's own versioned Windows release;
-6. publish explicit files from any selected GitHub workspace repository through the generic `release-assets` action.
+5. publish explicit files from any selected GitHub workspace repository through the generic `release-assets` action.
 
 ## Authentication
 
@@ -29,16 +28,16 @@ If browser OAuth is unavailable, a PAT may still be configured outside the MCP c
 
 `push` re-validates that:
 
-- the FolderBridge workspace itself is the repository root;
+- the selected workspace itself is the repository root;
 - HEAD is on a normal named branch;
 - `origin` is a credential-free GitHub HTTPS URL;
 - unsafe repository-local credential helpers, URL rewrites, push URLs, hooks, fsmonitor commands, external diffs, or filter commands are absent.
 
 The command pushes only `HEAD` to the same current branch, uses `--no-verify`, never force-pushes, disables interactive terminal prompts, and forces Git Credential Manager as the credential helper for the push.
 
-## Release actions
+## Release assets
 
-`release` remains the compatibility-locked FolderBridge release path. It still derives the version from FolderBridge's `pyproject.toml`, requires the expected FolderBridge release commit, and publishes only the fixed FolderBridge Windows assets. The generic path does not weaken or replace those checks.
+Git Publisher 1.4.0 has no project-specific release action. Repository-specific version rules, build steps, commit-title conventions, or fixed asset names belong to that repository's own workflow/task layer.
 
 `release-assets` publishes an explicit allowlist of regular files from the **selected workspace repository only**. Its public inputs are:
 

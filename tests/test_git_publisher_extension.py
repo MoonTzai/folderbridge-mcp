@@ -39,11 +39,11 @@ class GitPublisherManifestTests(unittest.TestCase):
     def test_manifest_is_explicit_and_does_not_accept_tokens(self) -> None:
         record = load_extension(EXT_DIR, bundled=True)
         self.assertEqual(record.manifest.extension_id, "git-publisher")
-        self.assertEqual(record.manifest.version, "1.3.4")
-        self.assertEqual(set(record.manifest.actions), {"status", "connect", "commit", "push", "release", "release-assets"})
+        self.assertEqual(record.manifest.version, "1.4.0")
+        self.assertEqual(set(record.manifest.actions), {"status", "connect", "commit", "push", "release-assets"})
         self.assertTrue(record.manifest.actions["status"].read_only)
         self.assertEqual(record.manifest.actions["status"].authorization, "none")
-        for name in ("connect", "commit", "push", "release", "release-assets"):
+        for name in ("connect", "commit", "push", "release-assets"):
             self.assertFalse(record.manifest.actions[name].read_only)
             self.assertEqual(record.manifest.actions[name].authorization, "global")
         self.assertIn("git.commit-selected-files", record.manifest.permissions)
@@ -59,8 +59,6 @@ class GitPublisherManifestTests(unittest.TestCase):
         self.assertEqual(status_schema["properties"]["limit"]["maximum"], 500)
         commit_schema = record.manifest.actions["commit"].input_schema
         self.assertEqual(commit_schema["properties"]["paths"]["maxItems"], 128)
-        release_schema = record.manifest.actions["release"].input_schema
-        self.assertEqual(release_schema["properties"], {})
         release_assets_schema = record.manifest.actions["release-assets"].input_schema
         self.assertEqual(set(release_assets_schema["required"]), {"tag", "title", "assets"})
         self.assertEqual(release_assets_schema["properties"]["assets"]["maxItems"], 64)
@@ -84,21 +82,20 @@ class GitPublisherManifestTests(unittest.TestCase):
         self.assertIn('env["GH_TOKEN"] = token', plugin_text)
         self.assertNotIn('_run_gh(root, "auth", "status"', plugin_text)
         self.assertNotIn("tomllib", plugin_text)
-        self.assertNotIn("tomllib", plugin_text)
+        self.assertNotIn("def _release(", plugin_text)
+        self.assertNotIn("def _project_release_version", plugin_text)
+        self.assertNotIn("def _release_asset_paths", plugin_text)
+        self.assertNotIn("Release FolderBridge", plugin_text)
+        self.assertNotIn("FolderBridge.exe", plugin_text)
 
-    def test_release_version_and_assets_are_project_locked(self) -> None:
-        plugin = load_plugin()
-        with tempfile.TemporaryDirectory() as temp_dir:
-            root = Path(temp_dir)
-            (root / "pyproject.toml").write_text('[project]\nname = "demo"\nversion = "1.2.3"\n', encoding="utf-8")
-            release_dir = root / "release" / "windows-x64"
-            release_dir.mkdir(parents=True)
-            exe = release_dir / "FolderBridge.exe"
-            checksum = release_dir / "FolderBridge.exe.sha256"
-            exe.write_bytes(b"exe")
-            checksum.write_text("00 *FolderBridge.exe\n", encoding="utf-8")
-            self.assertEqual(plugin._project_release_version(root), "1.2.3")
-            self.assertEqual(plugin._release_asset_paths(root), (exe, checksum))
+    def test_publisher_surface_is_project_agnostic(self) -> None:
+        plugin_text = (EXT_DIR / "plugin.py").read_text(encoding="utf-8")
+        manifest_text = (EXT_DIR / "folderbridge-extension.json").read_text(encoding="utf-8")
+        readme_text = (EXT_DIR / "README.md").read_text(encoding="utf-8")
+        for text in (plugin_text, manifest_text, readme_text):
+            self.assertNotIn("locked FolderBridge release", text)
+            self.assertNotIn("Release FolderBridge", text)
+            self.assertNotIn("FolderBridge.exe", text)
 
     def test_origin_validator_rejects_embedded_credentials_and_non_github(self) -> None:
         plugin = load_plugin()
