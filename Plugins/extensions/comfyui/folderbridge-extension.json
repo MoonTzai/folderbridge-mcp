@@ -2,8 +2,8 @@
   "schema_version": 1,
   "id": "comfyui",
   "name": "Local ComfyUI",
-  "version": "1.2.0",
-  "description": "Connect to local ComfyUI at 127.0.0.1:8188. Long workflow runs execute as host-owned jobs, preflight supported dynamic inputs, use prompt-scoped cancellation when available, and return bounded artifact paths/metadata instead of embedding generated media in the MCP response.",
+  "version": "1.3.0",
+  "description": "External hot-load bridge to local ComfyUI at 127.0.0.1:8188. Long workflow runs execute as host-owned jobs, use prompt-scoped cancellation, preflight supported dynamic inputs, and return bounded artifact paths/metadata without embedding generated media by default.",
   "entrypoint": "plugin.py",
   "permissions": [
     "network.loopback:127.0.0.1:8188",
@@ -22,7 +22,10 @@
     "status": {
       "read_only": true,
       "requires_workspace": false,
-      "authorization": "none",
+      "authorization": "global",
+      "mutation_scope": {
+        "mode": "none"
+      },
       "input_schema": {
         "type": "object",
         "properties": {},
@@ -35,6 +38,16 @@
       "authorization": "global",
       "run_mode": "job",
       "timeout_seconds": 0,
+      "mutation_scope": {
+        "mode": "paths",
+        "claims": [
+          {
+            "param": "save_directory",
+            "kind": "tree",
+            "optional": true
+          }
+        ]
+      },
       "input_schema": {
         "type": "object",
         "properties": {

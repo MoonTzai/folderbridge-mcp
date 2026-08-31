@@ -67,7 +67,7 @@ class SkillEngineExtensionTests(unittest.TestCase):
         self.assertEqual(loaded["_content"][0]["type"], "text")
         self.assertIn("Test-Driven Development", loaded["_content"][0]["text"])
 
-    def test_extensions_self_test_runs_comfyui_and_skill_engine_workers(self) -> None:
+    def test_extensions_self_test_runs_only_bundled_worker_checks(self) -> None:
         completed = subprocess.run(
             [sys.executable, str(ROOT / "folderbridge_launcher.py"), "extensions", "--self-test"],
             stdout=subprocess.PIPE,
@@ -77,18 +77,20 @@ class SkillEngineExtensionTests(unittest.TestCase):
         )
         self.assertEqual(completed.returncode, 0, completed.stderr.decode("utf-8", errors="replace"))
         payload = json.loads(completed.stdout)
-        self.assertEqual(payload["comfyui"]["extension_id"], "comfyui")
+        self.assertNotIn("comfyui", payload)
         self.assertIn("folderbridge-engineering", {item["id"] for item in payload["skill_engine"]["packs"]})
 
     def test_windows_packaging_includes_only_allowlisted_bundles_and_runs_verifier(self) -> None:
         script = (ROOT / "scripts" / "build_windows.ps1").read_text(encoding="utf-8")
         verifier = (ROOT / "scripts" / "verify_windows_bundle.py").read_text(encoding="utf-8")
-        self.assertIn('$bundledExtensions = @("comfyui", "git-publisher", "office", "skill-engine")', script)
+        self.assertIn('$bundledExtensions = @("git-publisher", "office", "skill-engine")', script)
+        self.assertNotIn('"--hidden-import", "folderbridge_mcp.comfyui"', script)
         self.assertIn('$bundledSkillPacks = @("matt-pocock-engineering")', script)
         self.assertNotIn('--add-data ((Join-Path $projectRoot "extensions") + ";extensions")', script)
         self.assertNotIn('--add-data ((Join-Path $projectRoot "skill_packs") + ";skill_packs")', script)
         self.assertIn("verify_windows_bundle.py", script)
-        self.assertIn('EXPECTED_BUNDLED_EXTENSIONS = {"comfyui", "git-publisher", "office", "skill-engine"}', verifier)
+        self.assertIn('EXPECTED_BUNDLED_EXTENSIONS = {"git-publisher", "office", "skill-engine"}', verifier)
+        self.assertIn('if "comfyui" in self_test:', verifier)
         self.assertIn('EXPECTED_BUNDLED_SKILL_PACKS = {"folderbridge-engineering"}', verifier)
         self.assertIn('json.loads(completed.stdout.decode("utf-8"))', verifier)
         for skill_id in (

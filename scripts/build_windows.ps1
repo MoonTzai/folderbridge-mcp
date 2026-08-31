@@ -21,7 +21,7 @@ $projectRoot = Split-Path -Parent $PSScriptRoot
 $releaseDir = Join-Path $projectRoot "release\windows-x64"
 $workDir = Join-Path $projectRoot ".build\pyinstaller"
 $specDir = Join-Path $projectRoot ".build"
-$bundledExtensions = @("comfyui", "git-publisher", "office", "skill-engine")
+$bundledExtensions = @("git-publisher", "office", "skill-engine")
 $bundledSkillPacks = @("matt-pocock-engineering")
 
 Push-Location $projectRoot
@@ -57,7 +57,6 @@ try {
         $pyInstallerArgs += @("--add-data", ($source + ";skill_packs\" + $packId))
     }
     $pyInstallerArgs += @(
-        "--hidden-import", "folderbridge_mcp.comfyui",
         "--hidden-import", "folderbridge_mcp.extension_worker",
         "--distpath", $releaseDir,
         "--workpath", $workDir,

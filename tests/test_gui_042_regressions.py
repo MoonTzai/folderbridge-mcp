@@ -3,7 +3,7 @@ from __future__ import annotations
 import unittest
 from pathlib import Path
 
-from folderbridge_mcp.gui import extension_sidebar_status
+from folderbridge_mcp.gui import extension_sidebar_sections, extension_sidebar_status
 
 
 class Gui042RegressionTests(unittest.TestCase):
@@ -107,6 +107,20 @@ class Gui042RegressionTests(unittest.TestCase):
         self.assertEqual(extension_sidebar_status(loaded), "✓ 已批准 · 已加载")
         ordinary = dict(item, workspace_adapter={"mode": "none"})
         self.assertEqual(extension_sidebar_status(ordinary), "已批准 · 未加载")
+
+    def test_extension_sidebar_separates_bundled_and_hot_load_external_plugins(self) -> None:
+        sections = extension_sidebar_sections(
+            [
+                {"id": "z-external", "bundled": False},
+                {"id": "b-bundled", "bundled": True},
+                {"id": "a-external", "bundled": False},
+            ]
+        )
+        self.assertEqual([section[0] for section in sections], ["内置插件", "外源插件 · 可热加载"])
+        self.assertEqual([item["id"] for item in sections[0][2]], ["b-bundled"])
+        self.assertEqual([item["id"] for item in sections[1][2]], ["a-external", "z-external"])
+        self.assertIn('text=f"来源：{\'内置\' if item.get(\'bundled\') else \'外源 · 热加载\'}"', self.gui)
+        self.assertIn("精确 hash 变化需重新批准", self.gui)
 
     def test_extensions_sidebar_also_manages_skill_packs_through_core_engine(self) -> None:
         self.assertIn("from .skills import SkillEngine, skill_pack_root_path", self.gui)

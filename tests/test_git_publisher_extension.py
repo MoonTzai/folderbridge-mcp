@@ -39,7 +39,7 @@ class GitPublisherManifestTests(unittest.TestCase):
     def test_manifest_is_explicit_and_does_not_accept_tokens(self) -> None:
         record = load_extension(EXT_DIR, bundled=True)
         self.assertEqual(record.manifest.extension_id, "git-publisher")
-        self.assertEqual(record.manifest.version, "1.3.1")
+        self.assertEqual(record.manifest.version, "1.3.4")
         self.assertEqual(set(record.manifest.actions), {"status", "connect", "commit", "push", "release", "release-assets"})
         self.assertTrue(record.manifest.actions["status"].read_only)
         self.assertEqual(record.manifest.actions["status"].authorization, "none")
@@ -78,6 +78,9 @@ class GitPublisherManifestTests(unittest.TestCase):
         self.assertIn("terminate_owned_process_tree", plugin_text)
         self.assertNotIn("subprocess.run(", plugin_text)
         self.assertIn('"credential", "fill"', plugin_text)
+        self.assertIn('"update-index", "--force-remove", "--"', plugin_text)
+        self.assertIn('"--no-renames", "--name-only", "-z"', plugin_text)
+        self.assertNotIn('"--index-info"', plugin_text)
         self.assertIn('env["GH_TOKEN"] = token', plugin_text)
         self.assertNotIn('_run_gh(root, "auth", "status"', plugin_text)
         self.assertNotIn("tomllib", plugin_text)
@@ -142,6 +145,71 @@ class GitPublisherRuntimeTests(unittest.TestCase):
         committed = git(root, "show", "--pretty=", "--name-only", "HEAD").splitlines()
         self.assertEqual(committed, ["tracked.txt"])
         self.assertEqual(git(root, "diff", "--cached", "--name-only"), "")
+
+    def test_commit_allows_explicit_tracked_deletion(self) -> None:
+        plugin = load_plugin()
+        temp, root = self.make_repo()
+        self.addCleanup(temp.cleanup)
+        obsolete = root / "legacy" / "comfyui" / "plugin.py"
+        obsolete.parent.mkdir(parents=True)
+        obsolete.write_text("remove me\n", encoding="utf-8")
+        git(root, "add", "--", "legacy/comfyui/plugin.py")
+        git(root, "commit", "-m", "add obsolete")
+        shutil.rmtree(root / "legacy")
+
+        result = plugin.handle(
+            "commit",
+            {"paths": ["legacy/comfyui/plugin.py"], "message": "Remove obsolete file"},
+            {"workspace_root": str(root), "workspace_read_only": False},
+        )
+
+        self.assertEqual(result["paths"], ["legacy/comfyui/plugin.py"])
+        self.assertFalse((root / "legacy").exists())
+        self.assertIn("D\tlegacy/comfyui/plugin.py", git(root, "show", "--pretty=", "--name-status", "HEAD"))
+        self.assertEqual(git(root, "diff", "--cached", "--name-only"), "")
+
+    def test_commit_validation_is_not_confused_by_git_rename_detection(self) -> None:
+        plugin = load_plugin()
+        temp, root = self.make_repo()
+        self.addCleanup(temp.cleanup)
+        old_path = root / "legacy" / "comfyui.py"
+        new_path = root / "Plugins" / "comfyui_runtime.py"
+        old_path.parent.mkdir(parents=True)
+        old_path.write_text("same payload\n", encoding="utf-8")
+        git(root, "add", "--", "legacy/comfyui.py")
+        git(root, "commit", "-m", "add legacy runtime")
+        old_path.unlink()
+        new_path.parent.mkdir(parents=True)
+        new_path.write_text("same payload\n", encoding="utf-8")
+
+        result = plugin.handle(
+            "commit",
+            {
+                "paths": ["legacy/comfyui.py", "Plugins/comfyui_runtime.py"],
+                "message": "Externalize runtime",
+            },
+            {"workspace_root": str(root), "workspace_read_only": False},
+        )
+
+        self.assertEqual(
+            {item.casefold() for item in result["paths"]},
+            {"legacy/comfyui.py".casefold(), "Plugins/comfyui_runtime.py".casefold()},
+        )
+        raw_paths = git(root, "diff-tree", "--root", "--no-renames", "--name-only", "-r", "HEAD").splitlines()
+        self.assertIn("legacy/comfyui.py", raw_paths)
+        self.assertIn("Plugins/comfyui_runtime.py", raw_paths)
+        self.assertEqual(git(root, "diff", "--cached", "--name-only"), "")
+
+    def test_commit_rejects_missing_untracked_path(self) -> None:
+        plugin = load_plugin()
+        temp, root = self.make_repo()
+        self.addCleanup(temp.cleanup)
+        with self.assertRaisesRegex(RuntimeError, "tracked Git deletion"):
+            plugin.handle(
+                "commit",
+                {"paths": ["never-existed.txt"], "message": "Must fail"},
+                {"workspace_root": str(root), "workspace_read_only": False},
+            )
 
     def test_status_pages_large_change_sets_without_hiding_the_remainder(self) -> None:
         plugin = load_plugin()

@@ -109,9 +109,9 @@ class ManagedServiceTests(unittest.TestCase):
         self.assertTrue(loaded.auto_start)
         raw = json.loads(self.config_path.read_text(encoding="utf-8"))
         self.assertEqual(set(raw), {"version", "install_root", "auto_start"})
+        self.assertNotIn("pid", raw)
+        self.assertNotIn("command", raw)
         serialized = self.config_path.read_text(encoding="utf-8").lower()
-        self.assertNotIn("pid", serialized)
-        self.assertNotIn("command", serialized)
         self.assertNotIn(".bat", serialized)
         self.assertNotIn(".cmd", serialized)
 

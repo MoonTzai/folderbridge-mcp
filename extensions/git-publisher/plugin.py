@@ -377,7 +377,11 @@ def _status_page(root: Path, *, offset: Any = 0, limit: Any = DEFAULT_STATUS_PAG
 
 
 def _staged_paths(root: Path) -> list[str]:
-    completed = _run_git(root, "-c", "core.fsmonitor=false", "diff", "--cached", "--no-ext-diff", "--name-only", "-z")
+    completed = _run_git(
+        root,
+        "-c", "core.fsmonitor=false",
+        "diff", "--cached", "--no-ext-diff", "--no-renames", "--name-only", "-z",
+    )
     return [item for item in completed.stdout.decode("utf-8", errors="replace").split("\x00") if item]
 
 
@@ -459,27 +463,39 @@ def _clean_commit_path(root: Path, raw: Any) -> str:
         raise RuntimeError("credential/key-like files are not eligible for Git Publisher commits")
     candidate = root.joinpath(*rel.parts)
     _reject_links(root, candidate)
-    try:
-        resolved = candidate.resolve(strict=True)
-        resolved.relative_to(root)
-    except (OSError, ValueError) as exc:
-        raise RuntimeError("commit path does not resolve to a regular workspace file") from exc
-    if not resolved.is_file() or resolved.is_symlink() or _is_reparse(resolved):
-        raise RuntimeError("Git Publisher commits only explicit regular files; directories/deletions are not supported")
-    if resolved.stat().st_size > MAX_COMMIT_FILE_BYTES:
-        raise RuntimeError(
-            f"commit file exceeds GitHub's regular-Git {MAX_COMMIT_FILE_BYTES}-byte file limit; "
-            "use Git LFS or a Release asset for larger files"
-        )
-    normalized = resolved.relative_to(root).as_posix()
-    _reject_transforming_attributes(root, normalized)
+    normalized = rel.as_posix()
     tracked = _run_git(root, "ls-files", "--error-unmatch", "--", normalized, check=False).returncode == 0
-    if not tracked:
-        ignored = _run_git(root, "check-ignore", "-q", "--", normalized, check=False).returncode == 0
-        if ignored:
-            raise RuntimeError(f"untracked ignored file cannot be published: {normalized}")
     changed = _run_git(root, "-c", "core.fsmonitor=false", "status", "--porcelain=v1", "--", normalized)
-    if not changed.stdout.strip():
+    status_bytes = changed.stdout.strip()
+
+    if candidate.exists() or candidate.is_symlink():
+        try:
+            resolved = candidate.resolve(strict=True)
+            resolved.relative_to(root)
+        except (OSError, ValueError) as exc:
+            raise RuntimeError("commit path does not resolve to a regular workspace file") from exc
+        if not resolved.is_file() or resolved.is_symlink() or _is_reparse(resolved):
+            raise RuntimeError("Git Publisher commits only explicit regular files or tracked deletions")
+        if resolved.stat().st_size > MAX_COMMIT_FILE_BYTES:
+            raise RuntimeError(
+                f"commit file exceeds GitHub's regular-Git {MAX_COMMIT_FILE_BYTES}-byte file limit; "
+                "use Git LFS or a Release asset for larger files"
+            )
+        normalized = resolved.relative_to(root).as_posix()
+        _reject_transforming_attributes(root, normalized)
+        tracked = _run_git(root, "ls-files", "--error-unmatch", "--", normalized, check=False).returncode == 0
+        if not tracked:
+            ignored = _run_git(root, "check-ignore", "-q", "--", normalized, check=False).returncode == 0
+            if ignored:
+                raise RuntimeError(f"untracked ignored file cannot be published: {normalized}")
+    else:
+        if not tracked or not status_bytes:
+            raise RuntimeError("missing commit path must be a tracked Git deletion")
+        status_code = status_bytes[:2].decode("ascii", errors="replace")
+        if "D" not in status_code:
+            raise RuntimeError("missing commit path must be a tracked Git deletion")
+
+    if not status_bytes:
         raise RuntimeError(f"selected file has no Git change to commit: {normalized}")
     return normalized
 
@@ -523,8 +539,23 @@ def _commit(root: Path, raw_paths: Any, raw_message: Any) -> dict[str, Any]:
             raise RuntimeError(f"duplicate commit path: {normalized}")
         seen.add(key)
         paths.append(normalized)
+    existing_paths: list[str] = []
+    deleted_paths: list[str] = []
+    for path in paths:
+        candidate = root.joinpath(*PurePosixPath(path).parts)
+        if candidate.exists() or candidate.is_symlink():
+            existing_paths.append(path)
+        else:
+            deleted_paths.append(path)
     try:
-        _run_git(root, "-c", "core.fsmonitor=false", "add", "--", *paths)
+        if existing_paths:
+            _run_git(root, "-c", "core.fsmonitor=false", "add", "--", *existing_paths)
+        if deleted_paths:
+            _run_git(
+                root,
+                "-c", "core.fsmonitor=false",
+                "update-index", "--force-remove", "--", *deleted_paths,
+            )
         staged = _staged_paths(root)
         if {item.casefold() for item in staged} != {item.casefold() for item in paths}:
             raise RuntimeError("staged file set differs from the explicit Publisher allowlist")

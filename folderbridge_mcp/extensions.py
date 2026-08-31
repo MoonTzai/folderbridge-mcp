@@ -18,6 +18,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any, Callable, Iterable
 
 from .config import workspace_id
+from .concurrency import MAX_MUTATION_CLAIMS, MutationClaim, MutationScope
 from .process_control import (
     TRANSPORT_RESPONSE_BUDGET_SECONDS,
     owned_process_group_kwargs,
@@ -53,6 +54,7 @@ MAX_EXTENSION_JOB_CANCEL_GRACE_SECONDS = 2.0
 ACTIVE_EXTENSION_JOB_STATUSES = frozenset({"running", "termination_pending"})
 MAX_INHERITED_ENV_VALUE_BYTES = 64 * 1024
 MAX_WORKSPACE_ARTIFACTS = 64
+DEFAULT_BUNDLED_EXTENSION_IDS = frozenset({"git-publisher", "office", "skill-engine"})
 EXTENSION_ID_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
 ACTION_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 EXECUTABLE_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+-]{0,127}(?:\.exe|\.cmd|\.bat|\.com)?$", re.IGNORECASE)
@@ -92,6 +94,34 @@ def _reject_json_constant(value: str) -> None:
 
 
 @dataclass(frozen=True)
+class ExtensionMutationClaimSpec:
+    kind: str
+    path: str | None = None
+    param: str | None = None
+    optional: bool = False
+
+
+@dataclass(frozen=True)
+class ExtensionMutationScopeSpec:
+    mode: str
+    claims: tuple[ExtensionMutationClaimSpec, ...] = ()
+    explicit: bool = False
+
+    def describe(self) -> dict[str, Any]:
+        result: dict[str, Any] = {"mode": self.mode, "explicit": self.explicit}
+        if self.claims:
+            result["claims"] = [
+                {
+                    "kind": claim.kind,
+                    **({"path": claim.path} if claim.path is not None else {"param": claim.param}),
+                    **({"optional": True} if claim.optional else {}),
+                }
+                for claim in self.claims
+            ]
+        return result
+
+
+@dataclass(frozen=True)
 class ExtensionAction:
     name: str
     read_only: bool
@@ -100,6 +130,7 @@ class ExtensionAction:
     input_schema: dict[str, Any]
     run_mode: str
     timeout_seconds: int | None
+    mutation_scope: ExtensionMutationScopeSpec
 
 
 @dataclass(frozen=True)
@@ -135,6 +166,7 @@ class PreparedExtensionRun:
     params: dict[str, Any]
     workspace: Workspace | None
     read_only: bool
+    mutation_scope: MutationScope
 
     @property
     def record(self) -> ExtensionRecord:
@@ -283,6 +315,7 @@ class ExtensionRegistry:
     ) -> None:
         self.user_root = user_root or extension_root_path()
         self.bundled_root = bundled_root or bundled_extension_root()
+        self._bundled_allowlist = DEFAULT_BUNDLED_EXTENSION_IDS if bundled_root is None else None
         self.trust_store = trust_store or ExtensionTrustStore()
         self.jobs = ExtensionJobManager()
 
@@ -296,6 +329,8 @@ class ExtensionRegistry:
                 errors.append({"path": str(root), "error": f"cannot scan extension root: {exc}"})
                 continue
             for child in children:
+                if bundled and self._bundled_allowlist is not None and child.name not in self._bundled_allowlist:
+                    continue
                 try:
                     record = load_extension(child, bundled=bundled)
                 except (OSError, ValueError) as exc:
@@ -344,6 +379,7 @@ class ExtensionRegistry:
                         "input_schema": action.input_schema,
                         "run_mode": action.run_mode,
                         "timeout_seconds": _action_timeout(record, action),
+                        "mutation_scope": action.mutation_scope.describe(),
                     }
                     for action in record.manifest.actions.values()
                 ]
@@ -393,11 +429,18 @@ class ExtensionRegistry:
     ) -> PreparedExtensionRun:
         self._authorize_prepared(contract.record, contract.action, workspace=workspace, read_only=read_only)
         validate_json_schema(params, contract.action.input_schema, path="params")
+        mutation_scope = _resolve_mutation_scope(contract.action.mutation_scope, params, workspace=workspace)
+        if read_only and mutation_scope.kind != "none":
+            raise ToolError(
+                "READ_ONLY",
+                "This extension call would mutate the selected workspace while FolderBridge is read-only.",
+            )
         return PreparedExtensionRun(
             contract=contract,
             params=dict(params),
             workspace=workspace,
             read_only=read_only,
+            mutation_scope=mutation_scope,
         )
 
     def execute_prepared(
@@ -679,7 +722,7 @@ def _parse_manifest(raw: Any, root: Path) -> ExtensionManifest:
             raise ValueError(f"invalid action name: {action_name!r}")
         if not isinstance(spec, dict):
             raise ValueError(f"action {action_name} must be an object")
-        if set(spec).difference({"read_only", "requires_workspace", "authorization", "input_schema", "run_mode", "timeout_seconds"}):
+        if set(spec).difference({"read_only", "requires_workspace", "authorization", "input_schema", "run_mode", "timeout_seconds", "mutation_scope"}):
             raise ValueError(f"action {action_name} has unknown fields")
         read_only = spec.get("read_only")
         requires_workspace = spec.get("requires_workspace", True)
@@ -701,6 +744,16 @@ def _parse_manifest(raw: Any, root: Path) -> ExtensionManifest:
             max_timeout = MAX_JOB_TIMEOUT_SECONDS if run_mode == "job" else MAX_FOREGROUND_TIMEOUT_SECONDS
             if not isinstance(action_timeout, int) or isinstance(action_timeout, bool) or not 0 <= action_timeout <= max_timeout:
                 raise ValueError(f"action {action_name} timeout_seconds must be 0..{max_timeout} for run_mode={run_mode}; 0 disables automatic timeout termination")
+        mutation_scope = _parse_mutation_scope(
+            spec.get("mutation_scope"),
+            explicit="mutation_scope" in spec,
+            action_name=action_name,
+            read_only=read_only,
+            requires_workspace=requires_workspace,
+            authorization=authorization,
+            input_schema=schema,
+            permissions=permissions,
+        )
         actions[action_name] = ExtensionAction(
             action_name,
             read_only,
@@ -709,6 +762,7 @@ def _parse_manifest(raw: Any, root: Path) -> ExtensionManifest:
             schema,
             run_mode,
             action_timeout,
+            mutation_scope,
         )
     return ExtensionManifest(
         extension_id=extension_id,
@@ -721,6 +775,111 @@ def _parse_manifest(raw: Any, root: Path) -> ExtensionManifest:
         execution_timeout_seconds=timeout,
         workspace_adapter=adapter,
     )
+
+
+def _parse_mutation_scope(
+    raw: Any,
+    *,
+    explicit: bool,
+    action_name: str,
+    read_only: bool,
+    requires_workspace: bool,
+    authorization: str,
+    input_schema: dict[str, Any],
+    permissions: tuple[str, ...],
+) -> ExtensionMutationScopeSpec:
+    if not explicit:
+        return ExtensionMutationScopeSpec("none" if read_only else "workspace", explicit=False)
+    if not isinstance(raw, dict) or set(raw).difference({"mode", "claims"}):
+        raise ValueError(f"action {action_name} mutation_scope must contain only mode/claims")
+    mode = raw.get("mode")
+    if mode not in {"none", "workspace", "paths"}:
+        raise ValueError(f"action {action_name} mutation_scope.mode must be none, workspace, or paths")
+    raw_claims = raw.get("claims")
+    if mode != "paths":
+        if raw_claims not in (None, []):
+            raise ValueError(f"action {action_name} mutation_scope mode={mode} may not declare claims")
+        if authorization == "none" and mode != "none":
+            raise ValueError(f"action {action_name} authorization=none requires mutation_scope mode=none")
+        if mode == "workspace" and (not requires_workspace or "workspace.write" not in permissions):
+            raise ValueError(f"action {action_name} explicit workspace mutation_scope requires requires_workspace=true and workspace.write")
+        return ExtensionMutationScopeSpec(mode, explicit=True)
+    if authorization == "none":
+        raise ValueError(f"action {action_name} authorization=none may not declare path mutation claims")
+    if not requires_workspace or "workspace.write" not in permissions:
+        raise ValueError(f"action {action_name} path mutation_scope requires requires_workspace=true and workspace.write")
+    if not isinstance(raw_claims, list) or not 1 <= len(raw_claims) <= MAX_MUTATION_CLAIMS:
+        raise ValueError(f"action {action_name} mutation_scope.claims must contain 1..{MAX_MUTATION_CLAIMS} claims")
+    properties = input_schema.get("properties")
+    properties = properties if isinstance(properties, dict) else {}
+    claims: list[ExtensionMutationClaimSpec] = []
+    for index, raw_claim in enumerate(raw_claims):
+        if not isinstance(raw_claim, dict) or set(raw_claim).difference({"kind", "path", "param", "optional"}):
+            raise ValueError(f"action {action_name} mutation_scope claim {index} has unknown fields")
+        kind = raw_claim.get("kind")
+        if kind not in {"exact", "tree"}:
+            raise ValueError(f"action {action_name} mutation_scope claim {index} kind must be exact or tree")
+        literal_path = raw_claim.get("path")
+        param = raw_claim.get("param")
+        if (literal_path is None) == (param is None):
+            raise ValueError(f"action {action_name} mutation_scope claim {index} must declare exactly one of path or param")
+        optional = raw_claim.get("optional", False)
+        if not isinstance(optional, bool):
+            raise ValueError(f"action {action_name} mutation_scope claim {index} optional must be boolean")
+        if literal_path is not None:
+            if not isinstance(literal_path, str):
+                raise ValueError(f"action {action_name} mutation_scope claim {index} path must be a string")
+            _validate_mutation_relative_path(literal_path)
+            if optional:
+                raise ValueError(f"action {action_name} literal mutation_scope claim {index} may not be optional")
+            claims.append(ExtensionMutationClaimSpec(kind=kind, path=literal_path))
+            continue
+        if not isinstance(param, str) or not param:
+            raise ValueError(f"action {action_name} mutation_scope claim {index} param must be a non-empty string")
+        property_schema = properties.get(param)
+        if not isinstance(property_schema, dict) or property_schema.get("type") != "string":
+            raise ValueError(f"action {action_name} mutation_scope param {param!r} must reference a top-level string property")
+        claims.append(ExtensionMutationClaimSpec(kind=kind, param=param, optional=optional))
+    return ExtensionMutationScopeSpec("paths", tuple(claims), explicit=True)
+
+
+def _validate_mutation_relative_path(raw: str) -> None:
+    if not raw or "\x00" in raw or "\\" in raw or any(char in raw for char in "*?[]"):
+        raise ValueError("mutation_scope paths must be clean non-glob POSIX relative paths")
+    path = PurePosixPath(raw)
+    if path.is_absolute() or ".." in path.parts:
+        raise ValueError("mutation_scope paths may not escape the workspace")
+
+
+def _resolve_mutation_scope(
+    spec: ExtensionMutationScopeSpec,
+    params: dict[str, Any],
+    *,
+    workspace: Workspace | None,
+) -> MutationScope:
+    if spec.mode == "none":
+        return MutationScope.none()
+    if spec.mode == "workspace":
+        if workspace is None:
+            raise ToolError("WORKSPACE_REQUIRED", "This extension mutation scope requires a selected workspace.")
+        return MutationScope.workspace()
+    if workspace is None:
+        raise ToolError("WORKSPACE_REQUIRED", "This extension mutation scope requires a selected workspace.")
+    resolved_claims: list[MutationClaim] = []
+    for claim in spec.claims:
+        raw = claim.path
+        if claim.param is not None:
+            value = params.get(claim.param)
+            if value is None and claim.optional:
+                continue
+            if not isinstance(value, str) or not value:
+                raise ToolError("INVALID_ARGUMENT", f"Mutation scope parameter {claim.param!r} must be a non-empty string.")
+            raw = value
+        if not isinstance(raw, str) or not raw:
+            raise ToolError("INVALID_ARGUMENT", "Mutation scope path must be a non-empty string.")
+        resolved = workspace.resolve(raw, for_write=True, allow_directory=claim.kind == "tree")
+        resolved_claims.append(MutationClaim.tree(resolved) if claim.kind == "tree" else MutationClaim.exact(resolved))
+    return MutationScope.paths(*resolved_claims)
 
 
 def _parse_workspace_adapter(raw: Any) -> dict[str, Any]:

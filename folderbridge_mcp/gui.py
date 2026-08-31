@@ -83,6 +83,21 @@ def extension_sidebar_status(item: dict[str, object]) -> str:
     return "未批准"
 
 
+def extension_sidebar_sections(
+    items: list[dict[str, object]],
+) -> list[tuple[str, str, list[dict[str, object]]]]:
+    bundled = sorted((item for item in items if item.get("bundled")), key=lambda item: str(item.get("id", "")))
+    external = sorted((item for item in items if not item.get("bundled")), key=lambda item: str(item.get("id", "")))
+    return [
+        ("内置插件", "随 FolderBridge 发布；版本随主程序更新，不从用户插件目录热替换。", bundled),
+        (
+            "外源插件 · 可热加载",
+            "从插件目录热扫描；新增或修改后无需重启 FolderBridge，精确 hash 变化需重新批准。",
+            external,
+        ),
+    ]
+
+
 def bounded_dialog_geometry(
     work_area: tuple[int, int, int, int],
     requested_size: tuple[int, int],
@@ -831,16 +846,50 @@ class FolderBridgeLauncher:
         self._extension_wrapped_labels = []
         description = self.extension_registry.describe()
         extensions = description.get("extensions", [])
-        if not extensions:
-            empty_label = ttk.Label(
-                self.extension_list_frame,
-                text="未发现插件。把符合 ABI v1 的插件文件夹放入插件目录后点“重新扫描”。",
-                style="Body.TLabel",
-                wraplength=self._px(EXTENSION_SIDEBAR_WRAP_WIDTH),
+        render_items: list[dict[str, object]] = []
+        for section_index, (section_title, section_hint, section_items) in enumerate(extension_sidebar_sections(extensions)):
+            render_items.append(
+                {
+                    "_folderbridge_section": True,
+                    "_section_index": section_index,
+                    "_section_title": section_title,
+                    "_section_hint": section_hint,
+                    "_section_empty": not section_items,
+                }
             )
-            empty_label.pack(fill="x", pady=(2, 8))
-            self._extension_wrapped_labels.append(empty_label)
-        for item in extensions:
+            render_items.extend(section_items)
+        for item in render_items:
+            if item.get("_folderbridge_section"):
+                if item.get("_section_index"):
+                    ttk.Separator(self.extension_list_frame, orient="horizontal").pack(fill="x", pady=(7, 7))
+                ttk.Label(
+                    self.extension_list_frame,
+                    text=str(item["_section_title"]),
+                    style="CardTitle.TLabel",
+                ).pack(anchor="w", pady=(0, 2))
+                section_hint_label = ttk.Label(
+                    self.extension_list_frame,
+                    text=str(item["_section_hint"]),
+                    style="Muted.TLabel",
+                    wraplength=self._px(EXTENSION_SIDEBAR_WRAP_WIDTH),
+                )
+                section_hint_label.pack(fill="x", pady=(0, 5))
+                self._extension_wrapped_labels.append(section_hint_label)
+                if item.get("_section_empty"):
+                    empty_text = (
+                        "当前无内置插件。"
+                        if item.get("_section_index") == 0
+                        else "当前未安装外源插件。复制到插件目录后点“重新扫描”即可热加载。"
+                    )
+                    empty_label = ttk.Label(
+                        self.extension_list_frame,
+                        text=empty_text,
+                        style="Body.TLabel",
+                        wraplength=self._px(EXTENSION_SIDEBAR_WRAP_WIDTH),
+                    )
+                    empty_label.pack(fill="x", pady=(1, 5))
+                    self._extension_wrapped_labels.append(empty_label)
+                continue
             extension_id = str(item["id"])
             card = ttk.Frame(self.extension_list_frame, style="Card.TFrame", padding=(0, 4, 0, 8))
             card.pack(fill="x")
@@ -853,6 +902,14 @@ class FolderBridgeLauncher:
                 command=lambda eid=extension_id: self._toggle_extension_enabled(eid),
             )
             check.pack(anchor="w")
+            source_label = ttk.Label(
+                card,
+                text=f"来源：{'内置' if item.get('bundled') else '外源 · 热加载'}",
+                style="Muted.TLabel",
+                wraplength=self._px(EXTENSION_SIDEBAR_WRAP_WIDTH),
+            )
+            source_label.pack(anchor="w", padx=(22, 0))
+            self._extension_wrapped_labels.append(source_label)
             status = extension_sidebar_status(item)
             status_label = ttk.Label(
                 card,

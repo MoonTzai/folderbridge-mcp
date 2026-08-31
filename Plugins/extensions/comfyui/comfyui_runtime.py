@@ -3,6 +3,8 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import os
+import stat
 import threading
 import time
 import uuid
@@ -12,7 +14,7 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlencode
 from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
 
-from .security import ToolError, Workspace
+from folderbridge_mcp.extension_api import ExtensionError
 
 
 COMFYUI_HOST = "127.0.0.1"
@@ -29,20 +31,96 @@ MAX_TIMEOUT_SECONDS = 24 * 60 * 60
 IMAGE_SUFFIXES = frozenset({".png", ".jpg", ".jpeg", ".gif", ".webp"})
 VIDEO_SUFFIXES = frozenset({".mp4", ".webm", ".mov", ".mkv", ".avi", ".m4v"})
 AUDIO_SUFFIXES = frozenset({".wav", ".flac", ".mp3", ".opus", ".ogg", ".m4a", ".aac"})
+IGNORED_DIRS = frozenset({
+    ".git", ".hg", ".svn", ".idea", ".mypy_cache", ".next", ".pytest_cache",
+    ".ruff_cache", ".tox", ".venv", ".vscode", "__pycache__", "build", "coverage",
+    "dist", "node_modules", "target", "vendor",
+})
+SENSITIVE_NAMES = frozenset({
+    ".api-config.json", ".env", ".netrc", ".npmrc", ".pypirc", "credentials",
+    "credentials.json", "api-config.json", "id_dsa", "id_ecdsa", "id_ed25519", "id_rsa",
+    "known_hosts",
+})
+SENSITIVE_SUFFIXES = frozenset({".jks", ".key", ".keystore", ".p12", ".pfx", ".pem"})
+PROTECTED_CONFIG = ".folderbridge.json"
 
 
 class _NoRedirect(HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):  # type: ignore[no-untyped-def]
-        raise ToolError("COMFYUI_REDIRECT_DENIED", "ComfyUI loopback requests may not redirect.")
+        raise ExtensionError("COMFYUI_REDIRECT_DENIED", "ComfyUI loopback requests may not redirect.")
 
 
 _OPENER = build_opener(ProxyHandler({}), _NoRedirect())
 
 
+class WorkspaceView:
+    def __init__(self, root: Path) -> None:
+        try:
+            resolved = root.resolve(strict=True)
+        except OSError as exc:
+            raise ExtensionError("WORKSPACE_REQUIRED", f"Workspace is unavailable: {exc}") from exc
+        if not resolved.is_dir():
+            raise ExtensionError("WORKSPACE_REQUIRED", "Workspace root is not a directory.")
+        self.root = resolved
+
+    def resolve(self, raw: str, *, for_write: bool = False, allow_directory: bool = False) -> Path:
+        if not isinstance(raw, str):
+            raise ExtensionError("INVALID_PATH", "path must be a string")
+        if "\x00" in raw:
+            raise ExtensionError("INVALID_PATH", "path cannot contain NUL")
+        path = Path(raw or ".")
+        if path.is_absolute() or path.drive or ".." in path.parts:
+            raise ExtensionError("PATH_OUTSIDE_WORKSPACE", "Use a relative path without '..'.", path=raw)
+        candidate = self.root.joinpath(path)
+        self._reject_linked_components(candidate)
+        try:
+            resolved = candidate.resolve(strict=False)
+            resolved.relative_to(self.root)
+        except (OSError, ValueError) as exc:
+            raise ExtensionError("PATH_OUTSIDE_WORKSPACE", "Path escapes the workspace.", path=raw) from exc
+        relative = resolved.relative_to(self.root)
+        self._check_policy(relative, for_write=for_write)
+        if resolved.exists() and resolved.is_dir() and not allow_directory:
+            raise ExtensionError("NOT_A_FILE", "Expected a file path.", path=raw)
+        return resolved
+
+    def _reject_linked_components(self, candidate: Path) -> None:
+        current = self.root
+        try:
+            relative_parts = candidate.relative_to(self.root).parts
+        except ValueError as exc:
+            raise ExtensionError("PATH_OUTSIDE_WORKSPACE", "Path escapes the workspace.") from exc
+        for part in relative_parts:
+            current = current / part
+            if not current.exists() and not current.is_symlink():
+                break
+            if current.is_symlink() or _is_reparse_point(current):
+                raise ExtensionError("LINK_DENIED", "Symlinks and reparse points are not accessible.", path=current.name)
+
+    def _check_policy(self, relative: Path, *, for_write: bool) -> None:
+        lowered = [part.lower() for part in relative.parts]
+        if any(part in IGNORED_DIRS for part in lowered):
+            raise ExtensionError("IGNORED_PATH", "Generated, dependency, and VCS directories are not exposed.")
+        if relative.name:
+            name = relative.name.lower()
+            if name in SENSITIVE_NAMES or name.startswith(".env.") or relative.suffix.lower() in SENSITIVE_SUFFIXES:
+                raise ExtensionError("SENSITIVE_PATH", "Credential-like files are not exposed.", path=relative.as_posix())
+            if for_write and name == PROTECTED_CONFIG:
+                raise ExtensionError("PROTECTED_CONFIG", f"{PROTECTED_CONFIG} cannot be changed through MCP.")
+
+
+def _is_reparse_point(path: Path) -> bool:
+    try:
+        attributes = path.lstat().st_file_attributes
+    except (AttributeError, OSError):
+        return False
+    return bool(attributes & stat.FILE_ATTRIBUTE_REPARSE_POINT)
+
+
 def comfyui_status(*, port: int = COMFYUI_PORT) -> dict[str, Any]:
     try:
         stats = _json_request("GET", "/system_stats", port=port, timeout=3)
-    except ToolError as exc:
+    except ExtensionError as exc:
         if exc.code in {"COMFYUI_OFFLINE", "COMFYUI_HTTP_ERROR", "COMFYUI_INVALID_RESPONSE"}:
             return {
                 "online": False,
@@ -58,7 +136,7 @@ def comfyui_status(*, port: int = COMFYUI_PORT) -> dict[str, Any]:
 
 
 def run_workflow(
-    workspace: Workspace,
+    workspace_root: Path,
     workflow_path: str,
     *,
     overrides: dict[str, Any] | None = None,
@@ -69,14 +147,15 @@ def run_workflow(
     cancel_token_path: str | None = None,
 ) -> dict[str, Any]:
     if not isinstance(timeout_seconds, int) or isinstance(timeout_seconds, bool) or not 0 <= timeout_seconds <= MAX_TIMEOUT_SECONDS:
-        raise ToolError("INVALID_ARGUMENT", f"timeout_seconds must be between 0 and {MAX_TIMEOUT_SECONDS}; 0 disables automatic timeout.")
+        raise ExtensionError("INVALID_ARGUMENT", f"timeout_seconds must be between 0 and {MAX_TIMEOUT_SECONDS}; 0 disables automatic timeout.")
     if not isinstance(include_image_data, bool):
-        raise ToolError("INVALID_ARGUMENT", "include_image_data must be boolean.")
+        raise ExtensionError("INVALID_ARGUMENT", "include_image_data must be boolean.")
+    workspace = WorkspaceView(workspace_root)
     workflow = _load_workflow(workspace, workflow_path)
     _apply_overrides(workflow, overrides)
     _preflight_dynamic_inputs(workflow, port=port)
     if _cancel_requested(cancel_token_path):
-        raise ToolError("COMFYUI_CANCELLED", "ComfyUI workflow cancellation was requested before prompt submission.")
+        raise ExtensionError("COMFYUI_CANCELLED", "ComfyUI workflow cancellation was requested before prompt submission.")
 
     client_id = f"folderbridge-{uuid.uuid4()}"
     queued = _json_request(
@@ -88,10 +167,10 @@ def run_workflow(
     )
     prompt_id = queued.get("prompt_id") if isinstance(queued, dict) else None
     if not isinstance(prompt_id, str) or not prompt_id:
-        raise ToolError("COMFYUI_INVALID_RESPONSE", "ComfyUI did not return a prompt_id.")
+        raise ExtensionError("COMFYUI_INVALID_RESPONSE", "ComfyUI did not return a prompt_id.")
     if _cancel_requested(cancel_token_path):
         cancel_dispatched = _cancel_prompt(prompt_id, port=port)
-        raise ToolError(
+        raise ExtensionError(
             "COMFYUI_CANCELLED",
             "ComfyUI workflow cancellation was requested during prompt submission.",
             prompt_id=prompt_id,
@@ -99,7 +178,7 @@ def run_workflow(
         )
     node_errors = queued.get("node_errors") if isinstance(queued, dict) else None
     if isinstance(node_errors, dict) and node_errors:
-        raise ToolError("COMFYUI_NODE_ERROR", "ComfyUI rejected one or more workflow nodes.", node_errors=node_errors)
+        raise ExtensionError("COMFYUI_NODE_ERROR", "ComfyUI rejected one or more workflow nodes.", node_errors=node_errors)
 
     deadline = None if timeout_seconds == 0 else time.monotonic() + timeout_seconds
     history_entry: dict[str, Any] | None = None
@@ -122,7 +201,7 @@ def run_workflow(
                     if _cancel_prompt(prompt_id, port=port):
                         cancel_dispatched_event.set()
                     cancel_attempted.set()
-                raise ToolError(
+                raise ExtensionError(
                     "COMFYUI_CANCELLED",
                     "ComfyUI workflow cancellation was requested.",
                     prompt_id=prompt_id,
@@ -141,7 +220,7 @@ def run_workflow(
             cancel_watcher.join(timeout=0.5)
     if history_entry is None:
         cancel_dispatched = _cancel_prompt(prompt_id, port=port)
-        raise ToolError(
+        raise ExtensionError(
             "COMFYUI_TIMEOUT",
             f"ComfyUI workflow did not finish within {timeout_seconds} seconds.",
             prompt_id=prompt_id,
@@ -150,7 +229,7 @@ def run_workflow(
 
     status = history_entry.get("status")
     if isinstance(status, dict) and status.get("status_str") == "error":
-        raise ToolError("COMFYUI_EXECUTION_ERROR", "ComfyUI reported workflow execution failure.", status=status)
+        raise ExtensionError("COMFYUI_EXECUTION_ERROR", "ComfyUI reported workflow execution failure.", status=status)
 
     descriptors = _output_artifact_descriptors(history_entry)
     storage_roots = _comfyui_storage_roots(port=port, workspace=workspace)
@@ -171,7 +250,7 @@ def run_workflow(
         data = _image_request(descriptor, port=port)
         total_bytes += len(data)
         if total_bytes > MAX_TOTAL_IMAGE_BYTES:
-            raise ToolError("COMFYUI_OUTPUT_TOO_LARGE", f"Returned images exceed {MAX_TOTAL_IMAGE_BYTES} bytes total.")
+            raise ExtensionError("COMFYUI_OUTPUT_TOO_LARGE", f"Returned images exceed {MAX_TOTAL_IMAGE_BYTES} bytes total.")
         mime_type, extension = _image_type(data)
         sha256 = hashlib.sha256(data).hexdigest()
         saved_path: str | None = None
@@ -180,7 +259,7 @@ def run_workflow(
             try:
                 output_path.write_bytes(data)
             except OSError as exc:
-                raise ToolError("WRITE_FAILED", f"Could not save ComfyUI output: {exc}") from exc
+                raise ExtensionError("WRITE_FAILED", f"Could not save ComfyUI output: {exc}") from exc
             saved_path = output_path.relative_to(workspace.root).as_posix()
         rendered.append(
             {
@@ -218,27 +297,27 @@ def run_workflow(
     }
 
 
-def _load_workflow(workspace: Workspace, raw: str) -> dict[str, Any]:
+def _load_workflow(workspace: WorkspaceView, raw: str) -> dict[str, Any]:
     path = workspace.resolve(raw)
     if not path.is_file():
-        raise ToolError("NOT_FOUND", "ComfyUI workflow JSON does not exist.", path=raw)
+        raise ExtensionError("NOT_FOUND", "ComfyUI workflow JSON does not exist.", path=raw)
     try:
         data = path.read_bytes()
     except OSError as exc:
-        raise ToolError("READ_FAILED", f"Could not read ComfyUI workflow: {exc}") from exc
+        raise ExtensionError("READ_FAILED", f"Could not read ComfyUI workflow: {exc}") from exc
     if len(data) > MAX_WORKFLOW_BYTES:
-        raise ToolError("FILE_TOO_LARGE", f"ComfyUI workflow exceeds {MAX_WORKFLOW_BYTES} bytes.", path=raw)
+        raise ExtensionError("FILE_TOO_LARGE", f"ComfyUI workflow exceeds {MAX_WORKFLOW_BYTES} bytes.", path=raw)
     try:
         parsed = json.loads(data)
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise ToolError("INVALID_COMFYUI_WORKFLOW", "Workflow must be valid UTF-8 JSON in ComfyUI API format.") from exc
+        raise ExtensionError("INVALID_COMFYUI_WORKFLOW", "Workflow must be valid UTF-8 JSON in ComfyUI API format.") from exc
     if not isinstance(parsed, dict) or not parsed:
-        raise ToolError("INVALID_COMFYUI_WORKFLOW", "Workflow must be a non-empty JSON object in ComfyUI API format.")
+        raise ExtensionError("INVALID_COMFYUI_WORKFLOW", "Workflow must be a non-empty JSON object in ComfyUI API format.")
     for node_id, node in parsed.items():
         if not isinstance(node_id, str) or not isinstance(node, dict) or not isinstance(node.get("class_type"), str):
-            raise ToolError("INVALID_COMFYUI_WORKFLOW", "Workflow nodes must use ComfyUI API format with class_type fields.")
+            raise ExtensionError("INVALID_COMFYUI_WORKFLOW", "Workflow nodes must use ComfyUI API format with class_type fields.")
         if "inputs" in node and not isinstance(node["inputs"], dict):
-            raise ToolError("INVALID_COMFYUI_WORKFLOW", "Workflow node inputs must be objects.")
+            raise ExtensionError("INVALID_COMFYUI_WORKFLOW", "Workflow node inputs must be objects.")
     return parsed
 
 
@@ -246,15 +325,15 @@ def _apply_overrides(workflow: dict[str, Any], overrides: dict[str, Any] | None)
     if overrides is None:
         return
     if not isinstance(overrides, dict):
-        raise ToolError("INVALID_ARGUMENT", "overrides must be an object keyed by ComfyUI node id.")
+        raise ExtensionError("INVALID_ARGUMENT", "overrides must be an object keyed by ComfyUI node id.")
     for node_id, input_values in overrides.items():
         if not isinstance(node_id, str) or node_id not in workflow:
-            raise ToolError("INVALID_ARGUMENT", f"Override references unknown ComfyUI node: {node_id}")
+            raise ExtensionError("INVALID_ARGUMENT", f"Override references unknown ComfyUI node: {node_id}")
         if not isinstance(input_values, dict):
-            raise ToolError("INVALID_ARGUMENT", f"Override for node {node_id} must be an object of input values.")
+            raise ExtensionError("INVALID_ARGUMENT", f"Override for node {node_id} must be an object of input values.")
         inputs = workflow[node_id].setdefault("inputs", {})
         if not isinstance(inputs, dict):
-            raise ToolError("INVALID_COMFYUI_WORKFLOW", f"Node {node_id} inputs are not an object.")
+            raise ExtensionError("INVALID_COMFYUI_WORKFLOW", f"Node {node_id} inputs are not an object.")
         inputs.update(input_values)
 
 
@@ -275,7 +354,7 @@ def _preflight_dynamic_inputs(workflow: dict[str, Any], *, port: int) -> None:
     if not suspects:
         return
     if len(class_types) > MAX_DYNAMIC_PREFLIGHT_CLASSES:
-        raise ToolError(
+        raise ExtensionError(
             "INVALID_COMFYUI_WORKFLOW",
             f"Workflow uses more than {MAX_DYNAMIC_PREFLIGHT_CLASSES} node classes requiring dynamic-input preflight.",
         )
@@ -290,7 +369,7 @@ def _preflight_dynamic_inputs(workflow: dict[str, Any], *, port: int) -> None:
         )
         info = response.get(class_type) if isinstance(response, dict) else None
         if not isinstance(info, dict):
-            raise ToolError(
+            raise ExtensionError(
                 "INVALID_COMFYUI_WORKFLOW",
                 f"ComfyUI did not return schema information for node class {class_type}.",
                 class_type=class_type,
@@ -315,7 +394,7 @@ def _preflight_dynamic_inputs(workflow: dict[str, Any], *, port: int) -> None:
                     continue
                 if input_name not in inputs:
                     if section_name == "required":
-                        raise ToolError(
+                        raise ExtensionError(
                             "INVALID_COMFYUI_WORKFLOW",
                             f"Node {node_id} ({class_type}) is missing required dynamic input {input_name}.",
                             node_id=node_id,
@@ -331,7 +410,7 @@ def _preflight_dynamic_inputs(workflow: dict[str, Any], *, port: int) -> None:
                     if isinstance(option, dict) and isinstance(option.get("key"), str)
                 ] if isinstance(options_raw, list) else []
                 if not isinstance(value, str) or (option_keys and value not in option_keys):
-                    raise ToolError(
+                    raise ExtensionError(
                         "INVALID_COMFYUI_WORKFLOW",
                         f"Node {node_id} ({class_type}) dynamic input {input_name} must be an option key string, not a nested object.",
                         node_id=node_id,
@@ -379,22 +458,20 @@ def _cancel_prompt(prompt_id: str, *, port: int) -> bool:
             timeout=5,
         )
         return bool(isinstance(response, dict) and response.get("cancelled"))
-    except ToolError:
-        # Fail closed: legacy /interrupt is process-global and cannot guarantee
-        # that only this FolderBridge-owned ComfyUI prompt would be stopped.
+    except ExtensionError:
         return False
 
 
-def _prepare_save_directory(workspace: Workspace, raw: str) -> Path:
+def _prepare_save_directory(workspace: WorkspaceView, raw: str) -> Path:
     if not isinstance(raw, str) or not raw:
-        raise ToolError("INVALID_ARGUMENT", "save_directory must be a non-empty workspace-relative path.")
+        raise ExtensionError("INVALID_ARGUMENT", "save_directory must be a non-empty workspace-relative path.")
     path = workspace.resolve(raw, for_write=True, allow_directory=True)
     try:
         path.mkdir(parents=True, exist_ok=True)
     except OSError as exc:
-        raise ToolError("WRITE_FAILED", f"Could not create ComfyUI output directory: {exc}") from exc
+        raise ExtensionError("WRITE_FAILED", f"Could not create ComfyUI output directory: {exc}") from exc
     if not path.is_dir():
-        raise ToolError("NOT_A_DIRECTORY", "save_directory is not a directory.", path=raw)
+        raise ExtensionError("NOT_A_DIRECTORY", "save_directory is not a directory.", path=raw)
     return path
 
 
@@ -449,14 +526,14 @@ def _artifact_kind(filename: str, output_key: str) -> str:
 
 def _validate_artifact_reference(filename: str, subfolder: str, output_type: str) -> None:
     if "/" in filename or "\\" in filename or filename in {".", ".."}:
-        raise ToolError("COMFYUI_INVALID_RESPONSE", "ComfyUI returned an unsafe artifact filename.")
+        raise ExtensionError("COMFYUI_INVALID_RESPONSE", "ComfyUI returned an unsafe artifact filename.")
     if "\\" in subfolder:
-        raise ToolError("COMFYUI_INVALID_RESPONSE", "ComfyUI returned an unsafe artifact subfolder.")
+        raise ExtensionError("COMFYUI_INVALID_RESPONSE", "ComfyUI returned an unsafe artifact subfolder.")
     relative = PurePosixPath(subfolder)
     if relative.is_absolute() or ".." in relative.parts:
-        raise ToolError("COMFYUI_INVALID_RESPONSE", "ComfyUI returned an unsafe artifact subfolder.")
+        raise ExtensionError("COMFYUI_INVALID_RESPONSE", "ComfyUI returned an unsafe artifact subfolder.")
     if output_type not in {"output", "input", "temp"}:
-        raise ToolError("COMFYUI_INVALID_RESPONSE", "ComfyUI returned an unknown artifact storage type.")
+        raise ExtensionError("COMFYUI_INVALID_RESPONSE", "ComfyUI returned an unknown artifact storage type.")
 
 
 def _argv_option(argv: list[str], name: str) -> str | None:
@@ -469,10 +546,10 @@ def _argv_option(argv: list[str], name: str) -> str | None:
     return None
 
 
-def _comfyui_storage_roots(*, port: int, workspace: Workspace) -> dict[str, Path]:
+def _comfyui_storage_roots(*, port: int, workspace: WorkspaceView) -> dict[str, Path]:
     try:
         stats = _json_request("GET", "/system_stats", port=port, timeout=3)
-    except ToolError:
+    except ExtensionError:
         return {}
     system = stats.get("system") if isinstance(stats, dict) else None
     argv = system.get("argv") if isinstance(system, dict) else None
@@ -505,7 +582,7 @@ def _artifact_metadata(
     descriptor: dict[str, str],
     *,
     storage_roots: dict[str, Path],
-    workspace: Workspace,
+    workspace: WorkspaceView,
     index: int,
 ) -> dict[str, Any]:
     output_type = descriptor["type"]
@@ -527,7 +604,7 @@ def _artifact_metadata(
     try:
         candidate.relative_to(root)
     except ValueError as exc:
-        raise ToolError("COMFYUI_INVALID_RESPONSE", "ComfyUI artifact path escaped its declared storage root.") from exc
+        raise ExtensionError("COMFYUI_INVALID_RESPONSE", "ComfyUI artifact path escaped its declared storage root.") from exc
     result["path"] = str(candidate)
     try:
         result["workspace_path"] = candidate.relative_to(workspace.root).as_posix()
@@ -575,7 +652,7 @@ def _json_request(
     try:
         return json.loads(data)
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise ToolError("COMFYUI_INVALID_RESPONSE", "ComfyUI returned invalid JSON.") from exc
+        raise ExtensionError("COMFYUI_INVALID_RESPONSE", "ComfyUI returned invalid JSON.") from exc
 
 
 def _request_bytes(
@@ -589,9 +666,9 @@ def _request_bytes(
     content_type: str | None = None,
 ) -> bytes:
     if not isinstance(port, int) or isinstance(port, bool) or not 1 <= port <= 65535:
-        raise ToolError("INVALID_ARGUMENT", "Invalid ComfyUI loopback port.")
+        raise ExtensionError("INVALID_ARGUMENT", "Invalid ComfyUI loopback port.")
     if not path.startswith("/") or path.startswith("//"):
-        raise ToolError("INVALID_ARGUMENT", "Invalid ComfyUI API path.")
+        raise ExtensionError("INVALID_ARGUMENT", "Invalid ComfyUI API path.")
     url = f"http://{COMFYUI_HOST}:{port}{path}"
     headers = {"Accept": "application/json, image/*"}
     if content_type:
@@ -600,18 +677,18 @@ def _request_bytes(
     try:
         with _OPENER.open(request, timeout=timeout) as response:
             data = response.read(limit + 1)
-    except ToolError:
+    except ExtensionError:
         raise
     except HTTPError as exc:
         try:
             detail = exc.read(4096).decode("utf-8", errors="replace")
         except OSError:
             detail = ""
-        raise ToolError("COMFYUI_HTTP_ERROR", f"ComfyUI returned HTTP {exc.code}: {detail[:1000]}") from exc
+        raise ExtensionError("COMFYUI_HTTP_ERROR", f"ComfyUI returned HTTP {exc.code}: {detail[:1000]}") from exc
     except (URLError, OSError, TimeoutError) as exc:
-        raise ToolError("COMFYUI_OFFLINE", f"Cannot reach local ComfyUI at {COMFYUI_HOST}:{port}: {exc}") from exc
+        raise ExtensionError("COMFYUI_OFFLINE", f"Cannot reach local ComfyUI at {COMFYUI_HOST}:{port}: {exc}") from exc
     if len(data) > limit:
-        raise ToolError("COMFYUI_RESPONSE_TOO_LARGE", f"ComfyUI response exceeds {limit} bytes.")
+        raise ExtensionError("COMFYUI_RESPONSE_TOO_LARGE", f"ComfyUI response exceeds {limit} bytes.")
     return data
 
 
@@ -624,4 +701,4 @@ def _image_type(data: bytes) -> tuple[str, str]:
         return "image/gif", ".gif"
     if len(data) >= 12 and data[:4] == b"RIFF" and data[8:12] == b"WEBP":
         return "image/webp", ".webp"
-    raise ToolError("UNSUPPORTED_IMAGE", "ComfyUI output is not PNG, JPEG, GIF, or WebP.")
+    raise ExtensionError("UNSUPPORTED_IMAGE", "ComfyUI output is not PNG, JPEG, GIF, or WebP.")

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import importlib.util
 import json
 import tempfile
 import threading
@@ -9,8 +10,21 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import unquote, urlparse
 
-from folderbridge_mcp.comfyui import comfyui_status, run_workflow
-from folderbridge_mcp.security import ToolError, Workspace
+from folderbridge_mcp.extension_api import ExtensionError as ToolError
+
+
+THIS_FILE = Path(__file__).resolve()
+PLUGIN_ROOT = THIS_FILE.parent.parent
+if not (PLUGIN_ROOT / "comfyui_runtime.py").is_file():
+    PLUGIN_ROOT = THIS_FILE.parents[1] / "Plugins" / "extensions" / "comfyui"
+PLUGIN_RUNTIME = PLUGIN_ROOT / "comfyui_runtime.py"
+_SPEC = importlib.util.spec_from_file_location("folderbridge_external_comfyui_runtime", PLUGIN_RUNTIME)
+if _SPEC is None or _SPEC.loader is None:
+    raise RuntimeError("Could not load external ComfyUI runtime for tests")
+_RUNTIME = importlib.util.module_from_spec(_SPEC)
+_SPEC.loader.exec_module(_RUNTIME)
+comfyui_status = _RUNTIME.comfyui_status
+run_workflow = _RUNTIME.run_workflow
 
 
 PNG_1X1 = base64.b64decode(
@@ -101,7 +115,7 @@ class ComfyUiTests(unittest.TestCase):
         self.temporary = tempfile.TemporaryDirectory()
         self.root = Path(self.temporary.name) / "repo"
         self.root.mkdir()
-        self.workspace = Workspace(self.root)
+        self.workspace = self.root
         self.comfy_root = self.root / "ComfyUI"
         (self.comfy_root / "output").mkdir(parents=True)
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), _FakeComfyHandler)
@@ -460,6 +474,41 @@ class ComfyUiTests(unittest.TestCase):
         with self.assertRaises(ToolError) as raised:
             run_workflow(self.workspace, "bad.json", timeout_seconds=1, port=self.port)
         self.assertEqual(raised.exception.code, "INVALID_COMFYUI_WORKFLOW")
+
+
+class ComfyUiExternalContractTests(unittest.TestCase):
+    def test_manifest_is_external_hot_load_contract(self) -> None:
+        manifest = json.loads((PLUGIN_ROOT / "folderbridge-extension.json").read_text(encoding="utf-8"))
+        self.assertEqual(manifest["id"], "comfyui")
+        self.assertEqual(manifest["version"], "1.3.0")
+        self.assertEqual(manifest["actions"]["status"]["authorization"], "global")
+        run = manifest["actions"]["run"]
+        self.assertEqual(run["run_mode"], "job")
+        self.assertEqual(run["timeout_seconds"], 0)
+        self.assertEqual(
+            run["mutation_scope"],
+            {"mode": "paths", "claims": [{"param": "save_directory", "kind": "tree", "optional": True}]},
+        )
+
+    def test_runtime_uses_only_public_folderbridge_error_api(self) -> None:
+        source = PLUGIN_RUNTIME.read_text(encoding="utf-8")
+        self.assertIn("from folderbridge_mcp.extension_api import ExtensionError", source)
+        self.assertNotIn("folderbridge_mcp.comfyui", source)
+        self.assertNotIn("folderbridge_mcp.security", source)
+        self.assertNotIn('\"/interrupt\"', source)
+
+    def test_workspace_view_rejects_traversal_sensitive_and_protected_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            workspace = _RUNTIME.WorkspaceView(root)
+            for raw, for_write, code in (
+                ("../escape.json", False, "PATH_OUTSIDE_WORKSPACE"),
+                (".env", False, "SENSITIVE_PATH"),
+                (".folderbridge.json", True, "PROTECTED_CONFIG"),
+            ):
+                with self.subTest(raw=raw), self.assertRaises(ToolError) as raised:
+                    workspace.resolve(raw, for_write=for_write)
+                self.assertEqual(raised.exception.code, code)
 
 
 if __name__ == "__main__":

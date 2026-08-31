@@ -10,7 +10,7 @@ from typing import Any
 
 
 ROOT = Path(__file__).resolve().parents[1]
-EXPECTED_BUNDLED_EXTENSIONS = {"comfyui", "git-publisher", "office", "skill-engine"}
+EXPECTED_BUNDLED_EXTENSIONS = {"git-publisher", "office", "skill-engine"}
 EXPECTED_BUNDLED_SKILL_PACKS = {"folderbridge-engineering"}
 EXPECTED_ENGINEERING_SKILLS = {
     "codebase-design",
@@ -20,7 +20,7 @@ EXPECTED_ENGINEERING_SKILLS = {
     "code-review",
     "implement",
 }
-EXPECTED_EXTENSION_VERSIONS = {"git-publisher": "1.3.1", "office": "1.1.4"}
+EXPECTED_EXTENSION_VERSIONS = {"git-publisher": "1.3.4", "office": "1.1.4"}
 
 
 def _project_version() -> str:
@@ -243,8 +243,8 @@ def verify(executable: Path) -> dict[str, Any]:
         raise RuntimeError("folderbridge-engineering upstream attribution/license mismatch")
 
     self_test = _json(executable, "extensions", "--self-test")
-    if self_test.get("comfyui", {}).get("extension_id") != "comfyui":
-        raise RuntimeError("bundled ComfyUI worker self-test failed")
+    if "comfyui" in self_test:
+        raise RuntimeError("external ComfyUI must not participate in bundled Extension self-test")
     skill_engine = self_test.get("skill_engine")
     if not isinstance(skill_engine, dict):
         raise RuntimeError("bundled Skill Engine worker self-test failed")

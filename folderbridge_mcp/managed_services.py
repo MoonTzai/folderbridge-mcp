@@ -6,18 +6,43 @@ import subprocess
 import tempfile
 import time
 from dataclasses import dataclass
+from http.client import HTTPConnection
 from pathlib import Path
 from typing import Any, Callable, Iterable
 
-from .comfyui import COMFYUI_HOST, COMFYUI_PORT, comfyui_status
 from .extensions import extension_state_root
 from .process_control import owned_process_group_kwargs, terminate_owned_process_tree
 
 
 SERVICE_CONFIG_VERSION = 1
 COMFYUI_SERVICE_ID = "comfyui"
+COMFYUI_HOST = "127.0.0.1"
+COMFYUI_PORT = 8188
 COMFYUI_READY_TIMEOUT_SECONDS = 120
 COMFYUI_STOP_TIMEOUT_SECONDS = 12
+COMFYUI_STATUS_MAX_BYTES = 256 * 1024
+
+
+def _comfyui_status_probe() -> dict[str, Any]:
+    endpoint = f"http://{COMFYUI_HOST}:{COMFYUI_PORT}"
+    connection = HTTPConnection(COMFYUI_HOST, COMFYUI_PORT, timeout=3)
+    try:
+        connection.request("GET", "/system_stats", headers={"Accept": "application/json"})
+        response = connection.getresponse()
+        data = response.read(COMFYUI_STATUS_MAX_BYTES + 1)
+        if response.status != 200:
+            return {"online": False, "endpoint": endpoint, "detail": f"ComfyUI returned HTTP {response.status}."}
+        if len(data) > COMFYUI_STATUS_MAX_BYTES:
+            return {"online": False, "endpoint": endpoint, "detail": "ComfyUI status response is too large."}
+        try:
+            stats = json.loads(data)
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            return {"online": False, "endpoint": endpoint, "detail": "ComfyUI returned invalid JSON."}
+        return {"online": True, "endpoint": endpoint, "system_stats": stats}
+    except (OSError, TimeoutError) as exc:
+        return {"online": False, "endpoint": endpoint, "detail": f"Cannot reach local ComfyUI: {exc}"}
+    finally:
+        connection.close()
 
 
 class ManagedServiceError(RuntimeError):
@@ -137,7 +162,7 @@ class ComfyUIServiceController:
         monotonic: Callable[[], float] = time.monotonic,
     ) -> None:
         self.config_path = config_path or comfyui_service_config_path()
-        self._status_probe = status_probe or (lambda: comfyui_status(port=COMFYUI_PORT))
+        self._status_probe = status_probe or _comfyui_status_probe
         self._popen_factory = popen_factory or subprocess.Popen
         self._terminate_process = terminate_process or (
             lambda process: terminate_owned_process_tree(process, force=os.name == "nt")

@@ -132,7 +132,6 @@ def main(argv: list[str] | None = None) -> int:
         registry = ExtensionRegistry()
         if args.self_test:
             result = {
-                "comfyui": registry.run("comfyui", "status", {}, workspace=None, read_only=True),
                 "skill_engine": registry.run("skill-engine", "list", {}, workspace=None, read_only=True),
             }
             _write_json_utf8(result)

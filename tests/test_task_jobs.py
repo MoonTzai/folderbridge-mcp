@@ -156,7 +156,7 @@ class TaskJobTests(unittest.TestCase):
             return result
 
         try:
-            with mock.patch.object(runtime._workspace_mutations, "acquire_exclusive", return_value=Lease()), mock.patch.object(
+            with mock.patch.object(runtime._workspace_mutations, "acquire", return_value=Lease()), mock.patch.object(
                 task_runner, "TRANSPORT_RESPONSE_BUDGET_SECONDS", 0.03
             ), mock.patch.object(tools_module, "run_capability", side_effect=fake_run_capability):
                 started = runtime._run_capability({"name": "test"})

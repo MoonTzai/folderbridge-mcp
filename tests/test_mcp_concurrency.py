@@ -13,7 +13,12 @@ from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
 from folderbridge_mcp.config import load_config
-from folderbridge_mcp.concurrency import WorkspaceMutationGate
+from folderbridge_mcp.concurrency import (
+    MutationClaim,
+    MutationScope,
+    WorkspaceMutationCoordinator,
+    WorkspaceMutationGate,
+)
 from folderbridge_mcp.mcp import McpServer, _request_lane
 from folderbridge_mcp.text_writes import TextWriteManager
 from folderbridge_mcp.tools import ToolRuntime
@@ -204,7 +209,87 @@ class McpConcurrencyTests(unittest.TestCase):
                     second.result(timeout=2)
                 self.assertGreaterEqual(max_total, 2)
 
-    def test_same_file_resource_lock_fails_fast_before_transport_budget(self) -> None:
+    def test_scoped_mutation_coordinator_allows_disjoint_paths_and_blocks_overlap(self) -> None:
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            coordinator = WorkspaceMutationCoordinator()
+            a = MutationScope.paths(MutationClaim.tree(root / "A"))
+            b = MutationScope.paths(MutationClaim.tree(root / "B"))
+            nested_a = MutationScope.paths(MutationClaim.exact(root / "A" / "x.txt"))
+            first = coordinator.acquire("workspace", a, owner={"action": "a"})
+            second = coordinator.acquire("workspace", b, timeout_seconds=0.05, owner={"action": "b"})
+            try:
+                started = time.monotonic()
+                with self.assertRaises(RuntimeError):
+                    coordinator.acquire("workspace", nested_a, timeout_seconds=0.05, owner={"action": "nested"})
+                self.assertLess(time.monotonic() - started, 0.5)
+            finally:
+                second.release()
+                first.release()
+
+    def test_scoped_mutation_coordinator_workspace_waiter_prevents_conflicting_bypass(self) -> None:
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            coordinator = WorkspaceMutationCoordinator()
+            active = coordinator.acquire(
+                "workspace",
+                MutationScope.paths(MutationClaim.tree(root / "A")),
+                owner={"action": "active"},
+            )
+            opaque_acquired = threading.Event()
+            release_opaque = threading.Event()
+            later_acquired = threading.Event()
+
+            def opaque_waiter() -> None:
+                lease = coordinator.acquire("workspace", MutationScope.workspace(), timeout_seconds=1, owner={"action": "opaque"})
+                opaque_acquired.set()
+                release_opaque.wait(timeout=1)
+                lease.release()
+
+            def later_path() -> None:
+                lease = coordinator.acquire(
+                    "workspace",
+                    MutationScope.paths(MutationClaim.exact(root / "B" / "x.txt")),
+                    timeout_seconds=1,
+                    owner={"action": "later"},
+                )
+                later_acquired.set()
+                lease.release()
+
+            first_waiter = threading.Thread(target=opaque_waiter, daemon=True)
+            second_waiter = threading.Thread(target=later_path, daemon=True)
+            first_waiter.start()
+            time.sleep(0.03)
+            second_waiter.start()
+            time.sleep(0.05)
+            self.assertFalse(later_acquired.is_set())
+            active.release()
+            self.assertTrue(opaque_acquired.wait(timeout=0.5))
+            self.assertFalse(later_acquired.is_set())
+            release_opaque.set()
+            self.assertTrue(later_acquired.wait(timeout=0.5))
+            first_waiter.join(timeout=1)
+            second_waiter.join(timeout=1)
+
+    def test_scoped_mutation_claim_conflict_matrix(self) -> None:
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            file_a = MutationScope.paths(MutationClaim.exact(root / "A" / "x.txt"))
+            same_file = MutationScope.paths(MutationClaim.exact(root / "A" / "x.txt"))
+            other_file = MutationScope.paths(MutationClaim.exact(root / "A" / "y.txt"))
+            tree_a = MutationScope.paths(MutationClaim.tree(root / "A"))
+            tree_child = MutationScope.paths(MutationClaim.tree(root / "A" / "child"))
+            tree_b = MutationScope.paths(MutationClaim.tree(root / "B"))
+            opaque = MutationScope.workspace()
+            self.assertTrue(file_a.conflicts(same_file))
+            self.assertFalse(file_a.conflicts(other_file))
+            self.assertTrue(file_a.conflicts(tree_a))
+            self.assertTrue(tree_a.conflicts(tree_child))
+            self.assertFalse(tree_a.conflicts(tree_b))
+            self.assertTrue(opaque.conflicts(tree_b))
+            self.assertFalse(MutationScope.none().conflicts(opaque))
+
+    def test_same_file_scoped_mutation_fails_fast_before_transport_budget(self) -> None:
         with TemporaryDirectory() as temporary:
             root = Path(temporary)
             (root / "a.txt").write_text("a", encoding="utf-8")
@@ -237,7 +322,8 @@ class McpConcurrencyTests(unittest.TestCase):
                         self.assertLess(elapsed, 0.5)
                         self.assertFalse(second["ok"])
                         self.assertEqual(second["error"]["code"], "WORKSPACE_BUSY")
-                        self.assertEqual(second["error"]["details"]["blocking_reason"], "resource_lock")
+                        self.assertEqual(second["error"]["details"]["requested_mode"], "paths")
+                        self.assertEqual(second["error"]["details"]["blocking_reason"], "active_conflict")
                         release_first.set()
                         self.assertTrue(first.result(timeout=1)["structuredContent"]["ok"])
             finally:
@@ -358,7 +444,7 @@ class McpConcurrencyTests(unittest.TestCase):
             runtime = ToolRuntime(root, load_config(root, required=False))
             action = SimpleNamespace(read_only=False, run_mode="foreground", requires_workspace=True)
             contract = SimpleNamespace(action=action)
-            prepared = SimpleNamespace(action=action)
+            prepared = SimpleNamespace(action=action, mutation_scope=MutationScope.workspace())
 
             class PreparedRegistry:
                 def __init__(self) -> None:
@@ -391,16 +477,23 @@ class McpConcurrencyTests(unittest.TestCase):
             self.assertIs(registry.asserted_contract, contract)
             self.assertIs(registry.executed, prepared)
 
-    def test_non_read_only_extension_job_holds_workspace_mutation_gate_until_finish(self) -> None:
+    def test_scoped_extension_job_blocks_only_overlapping_file_writes(self) -> None:
         with TemporaryDirectory() as temporary:
             root = Path(temporary)
-            (root / "a.txt").write_text("a", encoding="utf-8")
+            (root / "Output").mkdir()
+            (root / "Notes").mkdir()
+            (root / "Output" / "blocked.txt").write_text("a", encoding="utf-8")
+            (root / "Notes" / "free.txt").write_text("b", encoding="utf-8")
             runtime = ToolRuntime(root, load_config(root, required=False))
-            action = SimpleNamespace(read_only=False, run_mode="job", requires_workspace=True)
+            action = SimpleNamespace(read_only=True, run_mode="job", requires_workspace=True)
             contract = SimpleNamespace(action=action)
-            prepared = SimpleNamespace(action=action)
+            prepared = SimpleNamespace(
+                action=action,
+                mutation_scope=MutationScope.paths(MutationClaim.tree((root / "Output").resolve())),
+            )
             finish_callbacks = []
-            edit_entered = threading.Event()
+            blocked_entered = threading.Event()
+            free_entered = threading.Event()
 
             def fake_execute_prepared(value, **kwargs):
                 self.assertIs(value, prepared)
@@ -408,7 +501,7 @@ class McpConcurrencyTests(unittest.TestCase):
                 return {"job_id": "1" * 32, "status": "running"}
 
             def fake_edit(path, **kwargs):
-                edit_entered.set()
+                (blocked_entered if path.startswith("Output/") else free_entered).set()
                 return {"path": path, "created": False, "size": 1, "sha256": "0" * 64}
 
             with patch.object(runtime.extensions, "prepare_action", return_value=contract), patch.object(runtime.extensions, "prepare_run", return_value=prepared), patch.object(runtime.extensions, "execute_prepared", side_effect=fake_execute_prepared), patch.object(runtime.workspace, "edit_file", side_effect=fake_edit):
@@ -419,13 +512,16 @@ class McpConcurrencyTests(unittest.TestCase):
                 self.assertTrue(started["ok"])
                 self.assertEqual(len(finish_callbacks), 1)
                 self.assertIsNotNone(finish_callbacks[0])
-                with ThreadPoolExecutor(max_workers=1) as executor:
-                    edit = executor.submit(runtime.call, "edit_file", {"path": "a.txt", "expected_sha256": "0" * 64, "replacements": [{"old": "a", "new": "x"}]})
+                with ThreadPoolExecutor(max_workers=2) as executor:
+                    free = executor.submit(runtime.call, "edit_file", {"path": "Notes/free.txt", "expected_sha256": "0" * 64, "replacements": [{"old": "b", "new": "y"}]})
+                    blocked = executor.submit(runtime.call, "edit_file", {"path": "Output/blocked.txt", "expected_sha256": "0" * 64, "replacements": [{"old": "a", "new": "x"}]})
+                    self.assertTrue(free_entered.wait(timeout=0.5))
                     time.sleep(0.05)
-                    self.assertFalse(edit_entered.is_set())
+                    self.assertFalse(blocked_entered.is_set())
+                    free.result(timeout=1)
                     finish_callbacks[0]()
-                    edit.result(timeout=2)
-                self.assertTrue(edit_entered.is_set())
+                    blocked.result(timeout=2)
+                self.assertTrue(blocked_entered.is_set())
 
     def test_toolruntime_serializes_job_launch_against_shutdown(self) -> None:
         with TemporaryDirectory() as temporary:
@@ -433,7 +529,7 @@ class McpConcurrencyTests(unittest.TestCase):
             runtime = ToolRuntime(root, load_config(root, required=False))
             action = SimpleNamespace(read_only=True, run_mode="job", requires_workspace=False)
             contract = SimpleNamespace(action=action)
-            prepared = SimpleNamespace(action=action)
+            prepared = SimpleNamespace(action=action, mutation_scope=MutationScope.none())
             launch_entered = threading.Event()
             allow_launch_return = threading.Event()
             jobs_closed = threading.Event()
@@ -549,8 +645,9 @@ class McpConcurrencyTests(unittest.TestCase):
             root = Path(temporary)
             (root / "a.txt").write_text("a", encoding="utf-8")
             runtime = ToolRuntime(root, load_config(root, required=False))
-            lease = runtime._workspace_mutations.acquire_exclusive(
+            lease = runtime._workspace_mutations.acquire(
                 runtime._targets[0].workspace_id,
+                MutationScope.workspace(),
                 owner={"action": "extension/run", "job_id": "job-2", "pid": 9876},
             )
             try:
@@ -615,8 +712,9 @@ class McpConcurrencyTests(unittest.TestCase):
                 release_record.wait(timeout=1)
                 return True
 
-            lease = runtime._workspace_mutations.acquire_exclusive(
+            lease = runtime._workspace_mutations.acquire(
                 runtime._targets[0].workspace_id,
+                MutationScope.workspace(),
                 owner={"action": "extension/run", "job_id": "job-flight", "pid": 1357},
             )
             try:

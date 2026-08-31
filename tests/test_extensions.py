@@ -4,6 +4,7 @@ import importlib.util
 import io
 import json
 import os
+import sys
 import tempfile
 import threading
 import time
@@ -54,6 +55,9 @@ class ExtensionTests(unittest.TestCase):
         adapter: dict[str, object] | None = None,
         permissions: list[str] | None = None,
         plugin_source: str | None = None,
+        read_only: bool = True,
+        mutation_scope: dict[str, object] | None = None,
+        input_schema: dict[str, object] | None = None,
     ) -> Path:
         root = (self.bundled_root if bundled else self.user_root) / extension_id
         root.mkdir(parents=True)
@@ -69,10 +73,10 @@ class ExtensionTests(unittest.TestCase):
             "workspace_adapter": adapter or {"mode": "none", "state": "profile"},
             "actions": {
                 "echo": {
-                    "read_only": True,
+                    "read_only": read_only,
                     "requires_workspace": True,
                     "authorization": authorization,
-                    "input_schema": {
+                    "input_schema": input_schema or {
                         "type": "object",
                         "properties": {"value": {"type": "string", "maxLength": 100}},
                         "required": ["value"],
@@ -81,6 +85,8 @@ class ExtensionTests(unittest.TestCase):
                 }
             },
         }
+        if mutation_scope is not None:
+            manifest["actions"]["echo"]["mutation_scope"] = mutation_scope
         (root / "folderbridge-extension.json").write_text(json.dumps(manifest), encoding="utf-8")
         (root / "plugin.py").write_text(
             plugin_source
@@ -89,6 +95,121 @@ class ExtensionTests(unittest.TestCase):
             encoding="utf-8",
         )
         return root
+
+    def test_explicit_param_mutation_scope_is_resolved_before_worker_start(self) -> None:
+        self.make_extension(
+            permissions=["workspace.read", "workspace.write", "extension.state"],
+            mutation_scope={
+                "mode": "paths",
+                "claims": [{"param": "save_directory", "kind": "tree"}],
+            },
+            input_schema={
+                "type": "object",
+                "properties": {"save_directory": {"type": "string", "minLength": 1}},
+                "required": ["save_directory"],
+                "additionalProperties": False,
+            },
+        )
+        record = self.registry.get("example")
+        self.trust.approve(record, enabled=True)
+        contract = self.registry.prepare_action("example", "echo")
+        prepared = self.registry.prepare_run(
+            contract,
+            {"save_directory": "Output/render"},
+            workspace=Workspace(self.workspace_root),
+            read_only=False,
+        )
+        self.assertEqual(prepared.mutation_scope.kind, "paths")
+        self.assertEqual(len(prepared.mutation_scope.claims), 1)
+        self.assertEqual(prepared.mutation_scope.claims[0].kind, "tree")
+        self.assertEqual(
+            prepared.mutation_scope.claims[0].path,
+            os.path.normcase(str((self.workspace_root / "Output" / "render").resolve())),
+        )
+
+    def test_legacy_non_read_only_action_without_scope_keeps_workspace_fallback(self) -> None:
+        self.make_extension(read_only=False)
+        record = self.registry.get("example")
+        self.trust.approve(record, enabled=True)
+        contract = self.registry.prepare_action("example", "echo")
+        prepared = self.registry.prepare_run(
+            contract,
+            {"value": "legacy"},
+            workspace=Workspace(self.workspace_root),
+            read_only=False,
+        )
+        self.assertFalse(contract.action.mutation_scope.explicit)
+        self.assertEqual(prepared.mutation_scope.kind, "workspace")
+        self.assertNotIn("workspace.write", record.manifest.permissions)
+
+    def test_read_only_runtime_rejects_effective_mutation_scope_before_worker_start(self) -> None:
+        self.make_extension(
+            read_only=True,
+            permissions=["workspace.read", "workspace.write", "extension.state"],
+            mutation_scope={
+                "mode": "paths",
+                "claims": [{"param": "save_directory", "kind": "tree"}],
+            },
+            input_schema={
+                "type": "object",
+                "properties": {"save_directory": {"type": "string", "minLength": 1}},
+                "required": ["save_directory"],
+                "additionalProperties": False,
+            },
+        )
+        record = self.registry.get("example")
+        self.trust.approve(record, enabled=True)
+        contract = self.registry.prepare_action("example", "echo")
+        with self.assertRaises(ToolError) as raised:
+            self.registry.prepare_run(
+                contract,
+                {"save_directory": "Output/render"},
+                workspace=Workspace(self.workspace_root),
+                read_only=True,
+            )
+        self.assertEqual(raised.exception.code, "READ_ONLY")
+
+    def test_public_extension_error_preserves_code_message_and_details(self) -> None:
+        self.make_extension(
+            plugin_source=(
+                "from folderbridge_mcp.extension_api import ExtensionError\n"
+                "def handle(action, params, context):\n"
+                "    raise ExtensionError('EXAMPLE_FAILED', 'structured failure', item='alpha', retryable=False)\n"
+            )
+        )
+        record = self.registry.get("example")
+        self.trust.approve(record, enabled=True)
+        with self.assertRaises(ToolError) as raised:
+            self.registry.run(
+                "example",
+                "echo",
+                {"value": "ignored"},
+                workspace=Workspace(self.workspace_root),
+                read_only=False,
+            )
+        self.assertEqual(raised.exception.code, "EXAMPLE_FAILED")
+        self.assertEqual(str(raised.exception), "structured failure")
+        self.assertEqual(raised.exception.details, {"item": "alpha", "retryable": False})
+
+    def test_unknown_extension_exception_remains_worker_exception(self) -> None:
+        self.make_extension(
+            plugin_source=(
+                "def handle(action, params, context):\n"
+                "    raise RuntimeError('boom')\n"
+            )
+        )
+        record = self.registry.get("example")
+        self.trust.approve(record, enabled=True)
+        with self.assertRaises(ToolError) as raised:
+            self.registry.run(
+                "example",
+                "echo",
+                {"value": "ignored"},
+                workspace=Workspace(self.workspace_root),
+                read_only=False,
+            )
+        self.assertEqual(raised.exception.code, "EXTENSION_WORKER_EXCEPTION")
+        self.assertIn("RuntimeError: boom", str(raised.exception))
 
     def test_unknown_or_overbroad_permission_is_rejected(self) -> None:
         path = self.make_extension(permissions=["network.*"])
@@ -1490,15 +1611,21 @@ class ExtensionTests(unittest.TestCase):
         self.assertEqual(artifact["size"], len("verdict"))
         self.assertEqual(len(artifact["sha256"]), 64)
 
-    def test_bundled_comfyui_plugin_passes_host_cancel_token_to_runner(self) -> None:
+    def test_external_comfyui_plugin_passes_host_cancel_token_to_runner(self) -> None:
         project_root = Path(__file__).resolve().parents[1]
-        plugin_path = project_root / "extensions" / "comfyui" / "plugin.py"
-        spec = importlib.util.spec_from_file_location("folderbridge_test_comfyui_plugin", plugin_path)
+        plugin_root = project_root / "Plugins" / "extensions" / "comfyui"
+        plugin_path = plugin_root / "plugin.py"
+        spec = importlib.util.spec_from_file_location("folderbridge_test_external_comfyui_plugin", plugin_path)
         self.assertIsNotNone(spec)
         self.assertIsNotNone(spec.loader if spec is not None else None)
         module = importlib.util.module_from_spec(spec)
         assert spec is not None and spec.loader is not None
-        spec.loader.exec_module(module)
+        old_path = list(sys.path)
+        try:
+            sys.path.insert(0, str(plugin_root))
+            spec.loader.exec_module(module)
+        finally:
+            sys.path[:] = old_path
         cancel_path = str(self.base / "cancel-token")
 
         with mock.patch.object(module, "run_workflow", return_value={"ok": True}) as runner:
@@ -1515,21 +1642,20 @@ class ExtensionTests(unittest.TestCase):
         self.assertEqual(result, {"ok": True})
         self.assertEqual(runner.call_args.kwargs["cancel_token_path"], cancel_path)
 
-    def test_bundled_comfyui_manifest_is_discoverable_from_repository(self) -> None:
+    def test_default_registry_excludes_legacy_bundled_comfyui_source(self) -> None:
         project_root = Path(__file__).resolve().parents[1]
-        record = load_extension(project_root / "extensions" / "comfyui", bundled=True)
-        self.assertEqual(record.manifest.extension_id, "comfyui")
-        self.assertEqual(record.manifest.version, "1.2.0")
-        self.assertIn("status", record.manifest.actions)
-        self.assertIn("run", record.manifest.actions)
-        run_action = record.manifest.actions["run"]
-        self.assertEqual(run_action.run_mode, "job")
-        self.assertEqual(run_action.timeout_seconds, 0)
-        timeout_schema = run_action.input_schema["properties"]["timeout_seconds"]
-        self.assertEqual(timeout_schema["default"], 2 * 60 * 60)
-        self.assertEqual(timeout_schema["minimum"], 0)
-        self.assertGreaterEqual(timeout_schema["maximum"], 2 * 60 * 60)
-        self.assertIn("network.loopback:127.0.0.1:8188", record.manifest.permissions)
+        with mock.patch.object(extensions_module, "bundled_extension_root", return_value=project_root / "extensions"), mock.patch.object(
+            extensions_module, "extension_root_path", return_value=self.user_root
+        ):
+            registry = ExtensionRegistry(trust_store=self.trust)
+            records, errors = registry.scan()
+
+        self.assertEqual(errors, [])
+        self.assertNotIn("comfyui", records)
+        self.assertEqual(
+            {extension_id for extension_id, record in records.items() if record.bundled},
+            {"git-publisher", "office", "skill-engine"},
+        )
 
 
 if __name__ == "__main__":

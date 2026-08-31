@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import os
 import threading
 from copy import deepcopy
 from dataclasses import dataclass
@@ -23,11 +22,12 @@ from .concurrency import (
     DATA_MAX_INFLIGHT,
     DATA_WORKERS,
     BoundedExecutorLane,
+    MutationClaim,
     MutationGateClosed,
-    ResourceLockTable,
+    MutationScope,
     WORKSPACE_MUTATION_WAIT_SECONDS,
     WorkspaceMutationBusy,
-    WorkspaceMutationGate,
+    WorkspaceMutationCoordinator,
 )
 from .extensions import (
     MAX_FOREGROUND_EXTENSION_WORKERS,
@@ -142,8 +142,7 @@ class ToolRuntime:
         )
         self.text_writes: TextWriteManager | None = None
         self._text_writes_init_lock = threading.Lock()
-        self._write_locks = ResourceLockTable()
-        self._workspace_mutations = WorkspaceMutationGate(event_callback=self._record_workspace_mutation_event)
+        self._workspace_mutations = WorkspaceMutationCoordinator(event_callback=self._record_workspace_mutation_event)
         self._shutdown_lock = threading.Lock()
         self._shutting_down = False
 
@@ -301,7 +300,8 @@ class ToolRuntime:
                 "data_max_inflight": DATA_MAX_INFLIGHT,
                 "busy_policy": "fail-fast",
                 "stdout_serialized": True,
-                "write_serialization": "per-target-resource",
+                "write_serialization": "scoped-mutation-coordinator",
+                "mutation_scopes": ["none", "workspace", "exact-path", "tree"],
                 "workspace_mutation_wait_seconds": WORKSPACE_MUTATION_WAIT_SECONDS,
                 "workspace_mutation_busy_policy": "bounded-wait-then-WORKSPACE_BUSY",
                 "shutdown_mutation_admission": "close-and-wake-waiters",
@@ -654,6 +654,7 @@ class ToolRuntime:
             read_only=self.read_only,
         )
         action_spec = prepared.action
+        mutation_scope = prepared.mutation_scope
 
         def invoke_extension(*, on_job_finish: Callable[[], None] | None = None) -> dict[str, Any]:
             return self.extensions.execute_prepared(prepared, on_job_finish=on_job_finish)
@@ -664,10 +665,12 @@ class ToolRuntime:
             "extension_id": extension_id,
             "extension_action": extension_action,
         }
+        needs_mutation_lease = target is not None and mutation_scope.kind != "none"
         if action_spec.run_mode == "job":
-            if target is not None and not action_spec.read_only:
-                lease = self._workspace_mutations.acquire_exclusive(
+            if needs_mutation_lease:
+                lease = self._workspace_mutations.acquire(
                     target.workspace_id,
+                    mutation_scope,
                     timeout_seconds=WORKSPACE_MUTATION_WAIT_SECONDS,
                     owner=lease_owner,
                 )
@@ -680,9 +683,10 @@ class ToolRuntime:
                 if lease is not None:
                     lease.release()
                 raise
-        elif target is not None and not action_spec.read_only:
-            lease = self._workspace_mutations.acquire_exclusive(
+        elif needs_mutation_lease:
+            lease = self._workspace_mutations.acquire(
                 target.workspace_id,
+                mutation_scope,
                 timeout_seconds=WORKSPACE_MUTATION_WAIT_SECONDS,
                 owner=lease_owner,
             )
@@ -702,23 +706,19 @@ class ToolRuntime:
         if not isinstance(path, str) or not path:
             raise ToolError("INVALID_ARGUMENT", "path is required")
         resolved = target.workspace.resolve(path, for_write=True)
-        resource_key = _write_resource_key(target, resolved)
-        with self._workspace_mutations.shared(
+        scope = MutationScope.paths(MutationClaim.exact(resolved))
+        with self._workspace_mutations.hold(
             target.workspace_id,
+            scope,
             timeout_seconds=WORKSPACE_MUTATION_WAIT_SECONDS,
             owner={"action": "edit_file", "path": path},
         ):
-            with self._write_locks.hold(
-                resource_key,
-                timeout_seconds=WORKSPACE_MUTATION_WAIT_SECONDS,
-                owner={"action": "edit_file", "path": path},
-            ):
-                result = target.workspace.edit_file(
-                    path,
-                    expected_sha256=arguments.get("expected_sha256"),
-                    replacements=arguments.get("replacements"),
-                    create_content=arguments.get("create_content"),
-                )
+            result = target.workspace.edit_file(
+                path,
+                expected_sha256=arguments.get("expected_sha256"),
+                replacements=arguments.get("replacements"),
+                create_content=arguments.get("create_content"),
+            )
         return self._scope_result(result, target)
 
     def _write_file(self, arguments: dict[str, Any]) -> dict[str, Any]:
@@ -770,23 +770,19 @@ class ToolRuntime:
             transaction_id = arguments.get("transaction_id")
             transaction = manager.status(target.workspace, transaction_id)
             resolved = target.workspace.resolve(transaction["path"], for_write=True)
-            resource_key = _write_resource_key(target, resolved)
-            with self._workspace_mutations.shared(
+            scope = MutationScope.paths(MutationClaim.exact(resolved))
+            with self._workspace_mutations.hold(
                 target.workspace_id,
+                scope,
                 timeout_seconds=WORKSPACE_MUTATION_WAIT_SECONDS,
                 owner={"action": "write_file/commit", "path": transaction["path"]},
             ):
-                with self._write_locks.hold(
-                    resource_key,
-                    timeout_seconds=WORKSPACE_MUTATION_WAIT_SECONDS,
-                    owner={"action": "write_file/commit", "path": transaction["path"]},
-                ):
-                    result = manager.commit(
-                        target.workspace,
-                        transaction_id,
-                        expected_size=arguments.get("expected_size"),
-                        expected_sha256=arguments.get("expected_sha256"),
-                    )
+                result = manager.commit(
+                    target.workspace,
+                    transaction_id,
+                    expected_size=arguments.get("expected_size"),
+                    expected_sha256=arguments.get("expected_sha256"),
+                )
         elif action == "abort":
             result = manager.abort(target.workspace, arguments.get("transaction_id"))
         return self._scope_result(result, target)
@@ -828,8 +824,9 @@ class ToolRuntime:
                 enabled=list(self.execution_capabilities),
             )
 
-        lease = self._workspace_mutations.acquire_exclusive(
+        lease = self._workspace_mutations.acquire(
             target.workspace_id,
+            MutationScope.workspace(),
             timeout_seconds=WORKSPACE_MUTATION_WAIT_SECONDS,
             owner={"action": "run_capability", "capability": name},
         )
@@ -907,8 +904,9 @@ class ToolRuntime:
         if task is None:
             raise ToolError("UNKNOWN_TASK", "Only locally approved named tasks can run.", available=sorted(target.config.tasks))
 
-        lease = self._workspace_mutations.acquire_exclusive(
+        lease = self._workspace_mutations.acquire(
             target.workspace_id,
+            MutationScope.workspace(),
             timeout_seconds=WORKSPACE_MUTATION_WAIT_SECONDS,
             owner={"action": "run_task", "task": name},
         )
@@ -943,10 +941,6 @@ class ToolRuntime:
         if not isinstance(result.get("job_id"), str):
             release_once()
         return self._scope_result(result, target)
-
-
-def _write_resource_key(target: _WorkspaceTarget, resolved: Path) -> tuple[str, str]:
-    return target.workspace_id, os.path.normcase(str(resolved))
 
 
 def _require_only(arguments: dict[str, Any], allowed: set[str]) -> None:

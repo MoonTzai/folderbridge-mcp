@@ -10,6 +10,7 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
+from .extension_api import ExtensionError
 from .extensions import MAX_WORKER_REQUEST_BYTES, MAX_WORKER_RESPONSE_BYTES, load_extension, snapshot_extension
 from .security import ToolError
 
@@ -113,6 +114,8 @@ def worker_main(extension_path: str, *, bundled: bool = False) -> int:
             if logs:
                 result.setdefault("extension_worker_log", logs)
             return _write_envelope({"ok": True, "result": result})
+    except ExtensionError as exc:
+        return _write_error(exc.code, str(exc), exc.details)
     except ToolError as exc:
         return _write_error(exc.code, str(exc), exc.details)
     except Exception as exc:
