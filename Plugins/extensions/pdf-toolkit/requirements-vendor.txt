@@ -1,0 +1,2 @@
+# PDF Toolkit 0.6.0 has no Python vendor requirements.
+# PdfPig/.NET and Unicode assets are exact-lock installed by install.ps1.

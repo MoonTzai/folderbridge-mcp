@@ -30,5 +30,6 @@ Any later change to a hash-covered Extension file makes the old approval stale a
 | `comfyui` | 1.3.0 | Hot-load bridge to local ComfyUI with host-owned Jobs, prompt-scoped cancel, bounded artifact metadata, and optional scoped workspace output. |
 | `gpt-sovits-local` | 0.1.2 | Workspace adapter for the fixed `GPT-SoVITS-Bridge/runner.ps1` workflow. |
 | `ffmpeg-toolkit` | 0.1.2 | Workspace-confined FFmpeg/FFprobe probe, capability discovery, and long-running media jobs. |
+| `pdf-toolkit` | 0.6.0 | Workspace-confined PDF inspection through an exact-provenance PdfPig 0.1.16 / Windows PowerShell 5.1 process seam with deterministic Unicode 14.0.0 literal search, plus parser-independent Windows.Data.Pdf page rendering and transactional exact-hash installation. |
 | `ftp-toolkit` | 0.2.1 | Generic workspace-confined FTP/FTPS profiles with optional local HTTP CONNECT proxy, listing/stat, upload/download, recursive upload, automatic parent mkdir, rename and exact-file delete. |
 | `godot-ai` | 0.1.0 | Hot-loadable workspace adapter for a local Godot AI MCP server, with bounded editor, scene, run, log, screenshot, and runtime-input actions. |

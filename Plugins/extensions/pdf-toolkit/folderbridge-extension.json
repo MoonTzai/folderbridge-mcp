@@ -1,0 +1,123 @@
+{
+  "schema_version": 1,
+  "id": "pdf-toolkit",
+  "name": "PDF Toolkit",
+  "version": "0.6.0",
+  "description": "Generic workspace-confined PDF inspection, bounded text reading/search, outline extraction, and immutable page rendering for audit workflows. Uses an exact-hash-pinned vendored PdfPig 0.1.16 inspection backend plus a fixed independent Windows.Data.Pdf renderer.",
+  "entrypoint": "plugin.py",
+  "permissions": [
+    "workspace.read",
+    "workspace.write",
+    "process.execute:powershell.exe"
+  ],
+  "execution": {
+    "mode": "isolated-process",
+    "timeout_seconds": 600
+  },
+  "workspace_adapter": {
+    "mode": "none",
+    "state": "none"
+  },
+  "actions": {
+    "status": {
+      "read_only": true,
+      "requires_workspace": false,
+      "authorization": "global",
+      "input_schema": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false
+      }
+    },
+    "info": {
+      "read_only": true,
+      "requires_workspace": true,
+      "authorization": "global",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "path": {"type": "string", "minLength": 1, "maxLength": 1024},
+          "max_outline_items": {"type": "integer", "minimum": 0, "maximum": 200, "default": 40},
+          "text_sample_pages": {"type": "integer", "minimum": 0, "maximum": 20, "default": 8}
+        },
+        "required": ["path"],
+        "additionalProperties": false
+      }
+    },
+    "outline": {
+      "read_only": true,
+      "requires_workspace": true,
+      "authorization": "global",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "path": {"type": "string", "minLength": 1, "maxLength": 1024},
+          "max_items": {"type": "integer", "minimum": 1, "maximum": 500, "default": 500}
+        },
+        "required": ["path"],
+        "additionalProperties": false
+      }
+    },
+    "read-pages": {
+      "read_only": true,
+      "requires_workspace": true,
+      "authorization": "global",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "path": {"type": "string", "minLength": 1, "maxLength": 1024},
+          "page_start": {"type": "integer", "minimum": 1, "maximum": 100000},
+          "page_end": {"type": "integer", "minimum": 1, "maximum": 100000},
+          "max_chars": {"type": "integer", "minimum": 1024, "maximum": 500000, "default": 120000}
+        },
+        "required": ["path", "page_start", "page_end"],
+        "additionalProperties": false
+      }
+    },
+    "search": {
+      "read_only": true,
+      "requires_workspace": true,
+      "authorization": "global",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "path": {"type": "string", "minLength": 1, "maxLength": 1024},
+          "query": {"type": "string", "minLength": 1, "maxLength": 256},
+          "page_start": {"type": "integer", "minimum": 1, "maximum": 100000, "default": 1},
+          "page_end": {"type": "integer", "minimum": 1, "maximum": 100000},
+          "case_sensitive": {"type": "boolean", "default": false},
+          "max_results": {"type": "integer", "minimum": 1, "maximum": 200, "default": 50},
+          "snippet_chars": {"type": "integer", "minimum": 80, "maximum": 2000, "default": 360}
+        },
+        "required": ["path", "query"],
+        "additionalProperties": false
+      }
+    },
+    "render-pages": {
+      "read_only": false,
+      "requires_workspace": true,
+      "authorization": "global",
+      "run_mode": "job",
+      "timeout_seconds": 7200,
+      "mutation_scope": {
+        "mode": "paths",
+        "claims": [
+          {"param": "output_dir", "kind": "tree"}
+        ]
+      },
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "path": {"type": "string", "minLength": 1, "maxLength": 1024},
+          "page_start": {"type": "integer", "minimum": 1, "maximum": 100000},
+          "page_end": {"type": "integer", "minimum": 1, "maximum": 100000},
+          "output_dir": {"type": "string", "minLength": 1, "maxLength": 1024},
+          "dpi": {"type": "integer", "minimum": 72, "maximum": 400, "default": 180},
+          "make_zip": {"type": "boolean", "default": true}
+        },
+        "required": ["path", "page_start", "page_end", "output_dir"],
+        "additionalProperties": false
+      }
+    }
+  }
+}

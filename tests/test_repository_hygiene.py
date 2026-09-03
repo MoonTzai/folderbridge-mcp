@@ -45,6 +45,7 @@ class RepositoryHygieneTests(unittest.TestCase):
             "ftp-toolkit",
             "godot-ai",
             "gpt-sovits-local",
+            "pdf-toolkit",
         )
         legacy_process_fallback = {
             "ffmpeg-toolkit",
@@ -73,6 +74,7 @@ class RepositoryHygieneTests(unittest.TestCase):
             "ftp-toolkit": ("0.2.1", "test_external_ftp_toolkit.py"),
             "godot-ai": ("0.1.0", "test_external_godot_ai.py"),
             "gpt-sovits-local": ("0.1.2", "test_external_gpt_sovits.py"),
+            "pdf-toolkit": ("0.6.0", "test_pdf_toolkit_v06.py"),
         }
         readme = (ROOT / "Plugins" / "extensions" / "README.md").read_text(encoding="utf-8")
         for plugin_id, (expected_version, test_name) in published.items():
