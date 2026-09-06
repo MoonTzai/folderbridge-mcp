@@ -1,0 +1,158 @@
+{
+  "schema_version": 2,
+  "runtime_abi": 1,
+  "id": "download-toolkit",
+  "name": "Download Toolkit",
+  "version": "0.1.0",
+  "description": "Workspace-confined public HTTPS downloader with streamed size/hash verification, redirect and SSRF defenses, atomic file publish, and safe GitHub source snapshots without executing repository code.",
+  "entrypoint": "plugin.py",
+  "permissions": [
+    "workspace.write",
+    "network.outbound:https"
+  ],
+  "execution": {
+    "mode": "isolated-process",
+    "timeout_seconds": 0
+  },
+  "workspace_adapter": {
+    "mode": "none",
+    "state": "none"
+  },
+  "actions": {
+    "download": {
+      "read_only": false,
+      "requires_workspace": true,
+      "authorization": "global",
+      "run_mode": "job",
+      "timeout_seconds": 0,
+      "mutation_scope": {
+        "mode": "paths",
+        "claims": [
+          {
+            "param": "local_path",
+            "kind": "exact"
+          }
+        ]
+      },
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "url": {
+            "type": "string",
+            "minLength": 9,
+            "maxLength": 4096
+          },
+          "local_path": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1024
+          },
+          "expected_sha256": {
+            "type": "string",
+            "minLength": 64,
+            "maxLength": 64
+          },
+          "expected_target_sha256": {
+            "type": "string",
+            "minLength": 64,
+            "maxLength": 64
+          },
+          "max_bytes": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 536870912,
+            "default": 268435456
+          },
+          "overwrite": {
+            "type": "boolean",
+            "default": false
+          }
+        },
+        "required": [
+          "url",
+          "local_path"
+        ],
+        "additionalProperties": false
+      },
+      "effect_contract": {
+        "effect_semantics": "external_effect",
+        "lifetime": "job_owned"
+      }
+    },
+    "github-snapshot": {
+      "read_only": false,
+      "requires_workspace": true,
+      "authorization": "global",
+      "run_mode": "job",
+      "timeout_seconds": 0,
+      "mutation_scope": {
+        "mode": "paths",
+        "claims": [
+          {
+            "param": "destination_dir",
+            "kind": "tree"
+          }
+        ]
+      },
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "owner": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 39
+          },
+          "repo": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 100
+          },
+          "ref": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256,
+            "default": "main"
+          },
+          "destination_dir": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1024
+          },
+          "expected_archive_sha256": {
+            "type": "string",
+            "minLength": 64,
+            "maxLength": 64
+          },
+          "max_archive_bytes": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 536870912,
+            "default": 268435456
+          },
+          "max_expanded_bytes": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 536870912,
+            "default": 536870912
+          },
+          "max_files": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 50000,
+            "default": 20000
+          }
+        },
+        "required": [
+          "owner",
+          "repo",
+          "destination_dir"
+        ],
+        "additionalProperties": false
+      },
+      "effect_contract": {
+        "effect_semantics": "external_effect",
+        "lifetime": "job_owned"
+      }
+    }
+  }
+}

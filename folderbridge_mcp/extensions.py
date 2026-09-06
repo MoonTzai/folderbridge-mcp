@@ -19,16 +19,29 @@ from typing import Any, Callable, Iterable
 
 from .config import workspace_id
 from .concurrency import MAX_MUTATION_CLAIMS, MutationClaim, MutationScope
+from .extension_contracts import (
+    EffectContractSpec,
+    RecoveryContractSpec,
+    ResolvedEffectContract,
+    SUPPORTED_EXTENSION_SCHEMA_VERSIONS,
+    SUPPORTED_RUNTIME_ABI_VERSIONS,
+    iter_reconcile_actions,
+    parse_effect_contract,
+    parse_recovery_contract,
+    resolve_effect_contract_spec,
+)
 from .process_control import (
+    JOB_STATUS_POLL_HINT_SECONDS,
     TRANSPORT_RESPONSE_BUDGET_SECONDS,
     owned_process_group_kwargs,
     terminate_owned_process_tree,
 )
 from .security import ToolError, Workspace, clean_environment
-from .user_paths import INTERNAL_CONFIG_ROOT_ENV, user_config_root
+from .user_paths import internal_child_config_root_environment, user_config_root
 
 
-EXTENSION_SCHEMA_VERSION = 1
+EXTENSION_SCHEMA_VERSION = max(SUPPORTED_EXTENSION_SCHEMA_VERSIONS)
+RUNTIME_ABI_VERSION = max(SUPPORTED_RUNTIME_ABI_VERSIONS)
 TRUST_STORE_VERSION = 1
 MANIFEST_NAME = "folderbridge-extension.json"
 MAX_MANIFEST_BYTES = 256 * 1024
@@ -131,10 +144,14 @@ class ExtensionAction:
     run_mode: str
     timeout_seconds: int | None
     mutation_scope: ExtensionMutationScopeSpec
+    effect_contract: EffectContractSpec | None
+    recovery_contract: RecoveryContractSpec | None
 
 
 @dataclass(frozen=True)
 class ExtensionManifest:
+    schema_version: int
+    runtime_abi: int
     extension_id: str
     name: str
     version: str
@@ -167,6 +184,9 @@ class PreparedExtensionRun:
     workspace: Workspace | None
     read_only: bool
     mutation_scope: MutationScope
+    effect_contract: ResolvedEffectContract
+    operation_id: str | None = None
+    expose_operation_id: bool = False
 
     @property
     def record(self) -> ExtensionRecord:
@@ -175,6 +195,20 @@ class PreparedExtensionRun:
     @property
     def action(self) -> ExtensionAction:
         return self.contract.action
+
+
+def resolve_effect_contract(action: ExtensionAction, params: dict[str, Any]) -> ResolvedEffectContract:
+    """Resolve trusted execution semantics after params passed the action schema.
+
+    Legacy schema-v1 actions intentionally resolve to unclassified_unsafe; the
+    workspace read_only flag is never treated as replay/effect evidence.
+    """
+
+    return resolve_effect_contract_spec(
+        action.effect_contract,
+        run_mode=action.run_mode,
+        params=params,
+    )
 
 
 class ExtensionTrustStore:
@@ -380,6 +414,20 @@ class ExtensionRegistry:
                         "run_mode": action.run_mode,
                         "timeout_seconds": _action_timeout(record, action),
                         "mutation_scope": action.mutation_scope.describe(),
+                        "effect_contract": (
+                            action.effect_contract.describe()
+                            if action.effect_contract is not None
+                            else {
+                                "effect_semantics": "unclassified_unsafe",
+                                "lifetime": "job_owned" if action.run_mode == "job" else "foreground",
+                                "trusted": False,
+                            }
+                        ),
+                        "recovery_contract": (
+                            action.recovery_contract.describe()
+                            if action.recovery_contract is not None
+                            else None
+                        ),
                     }
                     for action in record.manifest.actions.values()
                 ]
@@ -390,6 +438,8 @@ class ExtensionRegistry:
                     "id": extension_id,
                     "name": record.manifest.name,
                     "version": record.manifest.version,
+                    "manifest_schema_version": record.manifest.schema_version,
+                    "runtime_abi": record.manifest.runtime_abi,
                     "description": record.manifest.description,
                     "bundled": record.bundled,
                     "sha256": record.sha256,
@@ -430,6 +480,7 @@ class ExtensionRegistry:
         self._authorize_prepared(contract.record, contract.action, workspace=workspace, read_only=read_only)
         validate_json_schema(params, contract.action.input_schema, path="params")
         mutation_scope = _resolve_mutation_scope(contract.action.mutation_scope, params, workspace=workspace)
+        effect_contract = resolve_effect_contract(contract.action, params)
         if read_only and mutation_scope.kind != "none":
             raise ToolError(
                 "READ_ONLY",
@@ -441,6 +492,7 @@ class ExtensionRegistry:
             workspace=workspace,
             read_only=read_only,
             mutation_scope=mutation_scope,
+            effect_contract=effect_contract,
         )
 
     def execute_prepared(
@@ -472,6 +524,7 @@ class ExtensionRegistry:
                 workspace=prepared.workspace,
                 read_only=prepared.read_only,
                 on_finish=on_job_finish,
+                operation_id=(prepared.operation_id if prepared.expose_operation_id else None),
             )
         return _run_worker(
             prepared.record,
@@ -481,6 +534,7 @@ class ExtensionRegistry:
             read_only=prepared.read_only,
             owner=self.jobs,
             on_finish=on_job_finish,
+            operation_id=(prepared.operation_id if prepared.expose_operation_id else None),
         )
 
     def run(
@@ -663,13 +717,27 @@ def _parse_manifest(raw: Any, root: Path) -> ExtensionManifest:
         "actions",
         "execution",
         "workspace_adapter",
+        "runtime_abi",
     }
     unknown = sorted(set(raw).difference(allowed))
     if unknown:
         raise ValueError(f"unknown manifest fields: {', '.join(unknown)}")
     schema_version = raw.get("schema_version")
-    if not isinstance(schema_version, int) or isinstance(schema_version, bool) or schema_version != EXTENSION_SCHEMA_VERSION:
-        raise ValueError(f"schema_version must be integer {EXTENSION_SCHEMA_VERSION}")
+    if (
+        not isinstance(schema_version, int)
+        or isinstance(schema_version, bool)
+        or schema_version not in SUPPORTED_EXTENSION_SCHEMA_VERSIONS
+    ):
+        supported = ", ".join(str(item) for item in SUPPORTED_EXTENSION_SCHEMA_VERSIONS)
+        raise ValueError(f"schema_version must be one of the supported integers: {supported}")
+    runtime_abi = raw.get("runtime_abi", 1)
+    if (
+        not isinstance(runtime_abi, int)
+        or isinstance(runtime_abi, bool)
+        or runtime_abi not in SUPPORTED_RUNTIME_ABI_VERSIONS
+    ):
+        supported = ", ".join(str(item) for item in SUPPORTED_RUNTIME_ABI_VERSIONS)
+        raise ValueError(f"runtime_abi must be one of the supported integers: {supported}")
     extension_id = raw.get("id")
     name = raw.get("name")
     version = raw.get("version")
@@ -722,7 +790,18 @@ def _parse_manifest(raw: Any, root: Path) -> ExtensionManifest:
             raise ValueError(f"invalid action name: {action_name!r}")
         if not isinstance(spec, dict):
             raise ValueError(f"action {action_name} must be an object")
-        if set(spec).difference({"read_only", "requires_workspace", "authorization", "input_schema", "run_mode", "timeout_seconds", "mutation_scope"}):
+        allowed_action_fields = {
+            "read_only",
+            "requires_workspace",
+            "authorization",
+            "input_schema",
+            "run_mode",
+            "timeout_seconds",
+            "mutation_scope",
+        }
+        if schema_version >= 2:
+            allowed_action_fields.update({"effect_contract", "recovery_contract"})
+        if set(spec).difference(allowed_action_fields):
             raise ValueError(f"action {action_name} has unknown fields")
         read_only = spec.get("read_only")
         requires_workspace = spec.get("requires_workspace", True)
@@ -754,6 +833,18 @@ def _parse_manifest(raw: Any, root: Path) -> ExtensionManifest:
             input_schema=schema,
             permissions=permissions,
         )
+        effect_contract = parse_effect_contract(
+            spec.get("effect_contract"),
+            schema_version=schema_version,
+            action_name=action_name,
+            input_schema=schema,
+        )
+        recovery_contract = parse_recovery_contract(
+            spec.get("recovery_contract"),
+            schema_version=schema_version,
+            action_name=action_name,
+            input_schema=schema,
+        )
         actions[action_name] = ExtensionAction(
             action_name,
             read_only,
@@ -763,8 +854,18 @@ def _parse_manifest(raw: Any, root: Path) -> ExtensionManifest:
             run_mode,
             action_timeout,
             mutation_scope,
+            effect_contract,
+            recovery_contract,
         )
+    for action_name, action in actions.items():
+        for reconcile_action in iter_reconcile_actions(action.recovery_contract):
+            if reconcile_action not in actions:
+                raise ValueError(
+                    f"action {action_name} recovery_contract reconcile_action {reconcile_action!r} does not exist in the same manifest"
+                )
     return ExtensionManifest(
+        schema_version=schema_version,
+        runtime_abi=runtime_abi,
         extension_id=extension_id,
         name=name.strip(),
         version=version.strip(),
@@ -1080,6 +1181,7 @@ def _worker_context_and_environment(
     read_only: bool,
     job_cancel_path: str | None = None,
     job_progress_path: str | None = None,
+    operation_id: str | None = None,
 ) -> tuple[dict[str, Any], dict[str, str]]:
     workspace_root = workspace.root if workspace is not None else None
     state_dir: str | None = None
@@ -1094,7 +1196,7 @@ def _worker_context_and_environment(
 
     env_root = workspace_root or record.path
     env = clean_environment(env_root)
-    env[INTERNAL_CONFIG_ROOT_ENV] = str(user_config_root())
+    env.update(internal_child_config_root_environment(user_config_root()))
     inherited_names: list[str] = []
     for permission in record.manifest.permissions:
         match = ENVIRONMENT_PERMISSION_RE.fullmatch(permission)
@@ -1119,6 +1221,9 @@ def _worker_context_and_environment(
     context = {
         "extension_id": record.manifest.extension_id,
         "extension_version": record.manifest.version,
+        "manifest_schema_version": record.manifest.schema_version,
+        "runtime_abi": record.manifest.runtime_abi,
+        "runtime_context_version": 2 if record.manifest.runtime_abi >= 2 else 1,
         "permissions": list(record.manifest.permissions),
         "workspace_root": str(workspace_root) if workspace_root is not None else None,
         "workspace_read_only": bool(read_only),
@@ -1128,6 +1233,15 @@ def _worker_context_and_environment(
         "workspace_adapter": record.manifest.workspace_adapter,
         "inherited_environment": inherited_names,
     }
+    if operation_id is not None:
+        if record.manifest.runtime_abi < 2:
+            raise ToolError(
+                "RECOVERY_CONTRACT_UNAVAILABLE",
+                "host_operation_id recovery requires Extension runtime ABI 2.",
+            )
+        if not re.fullmatch(r"[0-9a-f]{32}", operation_id):
+            raise ToolError("INVALID_ARGUMENT", "operation_id is not a valid Host operation identity.")
+        context["operation_id"] = operation_id
     return context, env
 
 
@@ -1172,6 +1286,7 @@ def _worker_request(
     read_only: bool,
     job_cancel_path: str | None = None,
     job_progress_path: str | None = None,
+    operation_id: str | None = None,
 ) -> tuple[bytes, dict[str, str], tuple[str, ...]]:
     context, env = _worker_context_and_environment(
         record,
@@ -1179,6 +1294,7 @@ def _worker_request(
         read_only=read_only,
         job_cancel_path=job_cancel_path,
         job_progress_path=job_progress_path,
+        operation_id=operation_id,
     )
     try:
         request = json.dumps(
@@ -1393,6 +1509,7 @@ def _run_worker(
     read_only: bool,
     owner: ExtensionJobManager,
     on_finish: Callable[[], None] | None = None,
+    operation_id: str | None = None,
 ) -> dict[str, Any]:
     timeout = _action_timeout(record, action)
     promotable = timeout == 0 or float(timeout) > TRANSPORT_RESPONSE_BUDGET_SECONDS
@@ -1420,6 +1537,7 @@ def _run_worker(
             read_only=read_only,
             job_cancel_path=cancel_path,
             job_progress_path=progress_path,
+            operation_id=operation_id,
         )
         try:
             process, stdout, stderr = _start_worker_process(record, request, env)
@@ -2006,6 +2124,7 @@ class ExtensionJobManager:
                 "worker_pid": getattr(job.process, "pid", None),
                 "auto_promoted": True,
                 "promoted_after_seconds": max(0.0, time.monotonic() - worker.started_monotonic),
+                "poll_after_seconds": JOB_STATUS_POLL_HINT_SECONDS,
             }
         return {
             "job_id": job.job_id,
@@ -2016,6 +2135,7 @@ class ExtensionJobManager:
             "worker_pid": getattr(job.process, "pid", None),
             "auto_promoted": True,
             "promoted_after_seconds": max(0.0, time.monotonic() - worker.started_monotonic),
+            "poll_after_seconds": JOB_STATUS_POLL_HINT_SECONDS,
         }
 
     def _prune_finished_locked(self) -> None:
@@ -2036,6 +2156,7 @@ class ExtensionJobManager:
         workspace: Workspace | None,
         read_only: bool,
         on_finish: Callable[[], None] | None = None,
+        operation_id: str | None = None,
     ) -> dict[str, Any]:
         with self._lock:
             if self._closed:
@@ -2063,6 +2184,7 @@ class ExtensionJobManager:
                 read_only=read_only,
                 job_cancel_path=cancel_token_path,
                 job_progress_path=progress_path,
+                operation_id=operation_id,
             )
             process, stdout, stderr = _start_worker_process(record, request, env)
             job = _ExtensionJob(
@@ -2122,6 +2244,7 @@ class ExtensionJobManager:
                 "extension_action": action.name,
                 "timeout_seconds": job.timeout_seconds,
                 "worker_pid": getattr(job.process, "pid", None),
+                "poll_after_seconds": JOB_STATUS_POLL_HINT_SECONDS,
             }
         except Exception:
             with self._lock:
@@ -2168,6 +2291,7 @@ class ExtensionJobManager:
                 "extension_action": action.name,
                 "timeout_seconds": job.timeout_seconds,
                 "worker_pid": getattr(job.process, "pid", None),
+                "poll_after_seconds": JOB_STATUS_POLL_HINT_SECONDS,
             }
         return {
             "job_id": job.job_id,
@@ -2176,6 +2300,7 @@ class ExtensionJobManager:
             "extension_action": action.name,
             "timeout_seconds": job.timeout_seconds,
             "worker_pid": getattr(job.process, "pid", None),
+            "poll_after_seconds": JOB_STATUS_POLL_HINT_SECONDS,
         }
 
     def _monitor(
@@ -2568,6 +2693,8 @@ class ExtensionJobManager:
                 "finished_at": job.finished_at,
                 "exit_code": job.exit_code,
             }
+            if job.status in ACTIVE_EXTENSION_JOB_STATUSES:
+                payload["poll_after_seconds"] = JOB_STATUS_POLL_HINT_SECONDS
             if job.result is not None:
                 payload["result"] = job.result
             if job.error is not None:

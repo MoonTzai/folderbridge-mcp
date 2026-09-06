@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import threading
+import uuid
 from copy import deepcopy
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Callable
 
@@ -15,7 +17,7 @@ from .capabilities import (
     normalize_capability_names,
     run_capability,
 )
-from .config import ProjectConfig, canonical_workspaces, config_is_trusted, load_config, workspace_id
+from .config import ProjectConfig, canonical_workspaces, config_is_trusted, load_config, workspace_id, workspace_recovery_key
 from .concurrency import (
     CONTROL_MAX_INFLIGHT,
     CONTROL_WORKERS,
@@ -38,6 +40,8 @@ from .extensions import (
 from .flight_recorder import FlightRecorder
 from .security import MAX_EDIT_TEXT_BYTES, MAX_SEARCH_TEXT_BYTES, ToolError, Workspace
 from .process_control import TRANSPORT_RESPONSE_BUDGET_SECONDS
+from .operation_registry import OperationReceipt, OperationRegistry, OperationRegistryError, ReconciliationCapsule
+from .recovery_capability import RecoveryAdmissionContext
 from .skills import SkillEngine
 from .task_runner import (
     MAX_RETAINED_TASK_JOBS,
@@ -57,6 +61,7 @@ from .text_writes import (
 class _WorkspaceTarget:
     root: Path
     workspace_id: str
+    workspace_recovery_key: str
     workspace: Workspace
     config: ProjectConfig
 
@@ -70,12 +75,18 @@ class ToolRuntime:
         read_only: bool = False,
         allow_tasks: bool = False,
         capabilities: tuple[str, ...] | list[str] = (),
+        recovery_context: RecoveryAdmissionContext | None = None,
+        operation_registry: OperationRegistry | None = None,
+        boot_id: str | None = None,
     ) -> None:
         self._configure(
             (self._make_target(root, config),),
             read_only=read_only,
             allow_tasks=allow_tasks,
             capabilities=capabilities,
+            recovery_context=recovery_context,
+            operation_registry=operation_registry,
+            boot_id=boot_id,
         )
 
     @classmethod
@@ -86,6 +97,9 @@ class ToolRuntime:
         read_only: bool = False,
         allow_tasks: bool = False,
         capabilities: tuple[str, ...] | list[str] = (),
+        recovery_context: RecoveryAdmissionContext | None = None,
+        operation_registry: OperationRegistry | None = None,
+        boot_id: str | None = None,
     ) -> ToolRuntime:
         canonical = canonical_workspaces(list(roots))
         runtime = cls.__new__(cls)
@@ -98,13 +112,22 @@ class ToolRuntime:
             read_only=read_only,
             allow_tasks=allow_tasks,
             capabilities=capabilities,
+            recovery_context=recovery_context,
+            operation_registry=operation_registry,
+            boot_id=boot_id,
         )
         return runtime
 
     @staticmethod
     def _make_target(root: Path, config: ProjectConfig) -> _WorkspaceTarget:
         resolved = root.resolve(strict=True)
-        return _WorkspaceTarget(resolved, workspace_id(resolved), Workspace(resolved), config)
+        return _WorkspaceTarget(
+            resolved,
+            workspace_id(resolved),
+            workspace_recovery_key(resolved),
+            Workspace(resolved),
+            config,
+        )
 
     def _configure(
         self,
@@ -113,6 +136,9 @@ class ToolRuntime:
         read_only: bool,
         allow_tasks: bool,
         capabilities: tuple[str, ...] | list[str],
+        recovery_context: RecoveryAdmissionContext | None,
+        operation_registry: OperationRegistry | None,
+        boot_id: str | None,
     ) -> None:
         if not targets:
             raise ValueError("ToolRuntime needs at least one workspace")
@@ -128,6 +154,29 @@ class ToolRuntime:
         self.read_only = read_only
         self.allow_tasks = allow_tasks
         self.capabilities = normalize_capability_names(capabilities)
+        if (operation_registry is None) != (boot_id is None):
+            raise ValueError("operation_registry and boot_id must be supplied together")
+        self.operation_registry = operation_registry
+        self.boot_id = boot_id
+        base_recovery = recovery_context or RecoveryAdmissionContext.direct_stdio()
+        if operation_registry is not None:
+            self.recovery_admission = replace(
+                base_recovery,
+                durable_effect_boundary_available=True,
+                journal_capacity_available=True,
+                pin_capacity_available=True,
+                key_capacity_available=True,
+            )
+        else:
+            # Callers cannot self-attest a durable boundary without supplying
+            # the authoritative Registry used to cross it.
+            self.recovery_admission = replace(
+                base_recovery,
+                durable_effect_boundary_available=False,
+                journal_capacity_available=False,
+                pin_capacity_available=False,
+                key_capacity_available=False,
+            )
         self.execution_capabilities = tuple(
             name for name in self.capabilities if name in EXECUTION_CAPABILITY_NAMES
         )
@@ -183,6 +232,309 @@ class ToolRuntime:
             )
         )
 
+    @staticmethod
+    def _resolved_recovery_contract(prepared: Any) -> Any:
+        spec = prepared.action.recovery_contract
+        if spec is None or not spec.is_selector:
+            return spec
+        value = prepared.params.get(spec.selector_param or "")
+        for key, case in spec.selector_cases:
+            if value == key and type(value) is type(key):
+                return case
+        raise ToolError(
+            "RECOVERY_CONTRACT_UNAVAILABLE",
+            "The validated recovery contract selector could not be resolved.",
+        )
+
+    @staticmethod
+    def _extension_owner_snapshot(prepared: Any, recovery_contract: Any) -> bytes:
+        payload = {
+            "schema_version": 1,
+            "owner_kind": "extension",
+            "extension_id": prepared.record.manifest.extension_id,
+            "extension_version": prepared.record.manifest.version,
+            "manifest_schema_version": prepared.record.manifest.schema_version,
+            "runtime_abi": prepared.record.manifest.runtime_abi,
+            "tree_sha256": prepared.record.sha256,
+            "action": prepared.action.name,
+            "effect_contract": {
+                "effect_semantics": prepared.effect_contract.effect_semantics,
+                "lifetime": prepared.effect_contract.lifetime,
+            },
+            "recovery_contract": (
+                recovery_contract.describe() if recovery_contract is not None else None
+            ),
+        }
+        return json.dumps(
+            payload,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode("utf-8")
+
+    @staticmethod
+    def _capsule_scalar(value: Any) -> str:
+        if isinstance(value, bool):
+            return "true" if value else "false"
+        if isinstance(value, (str, int)) and not isinstance(value, bool):
+            return str(value)
+        return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False)
+
+    def _extension_reconciliation_capsule(
+        self,
+        prepared: Any,
+        recovery_contract: Any,
+        operation_id: str,
+    ) -> tuple[ReconciliationCapsule | None, bool]:
+        if recovery_contract is None or recovery_contract.correlation in {None, "none"}:
+            return None, False
+        if recovery_contract.correlation == "host_operation_id":
+            if prepared.record.manifest.runtime_abi < 2:
+                raise ToolError(
+                    "RECOVERY_CONTRACT_UNAVAILABLE",
+                    "host_operation_id recovery requires Extension runtime ABI 2.",
+                    owner=f"extension:{prepared.record.manifest.extension_id}/{prepared.action.name}",
+                )
+            return (
+                ReconciliationCapsule.create(
+                    capsule_type="extension_host_operation_id",
+                    pre_effect_correlation={
+                        "host_operation_id": {"kind": "opaque_id", "value": operation_id}
+                    },
+                    evidence={},
+                ),
+                True,
+            )
+        if recovery_contract.correlation != "deterministic_fields":
+            raise ToolError(
+                "RECOVERY_CONTRACT_UNAVAILABLE",
+                "The resolved Extension recovery correlation is unsupported by the durable boundary.",
+            )
+        fields: dict[str, dict[str, str]] = {}
+        kind_map = {
+            "enum": "safe_profile",
+            "boolean": "safe_profile",
+            "integer": "safe_profile",
+            "workspace_path": "path_class",
+            "stable_identifier": "target_identity",
+        }
+        for index, descriptor in enumerate(recovery_contract.capsule):
+            raw = prepared.params.get(descriptor.param)
+            if descriptor.kind == "digest":
+                encoded = json.dumps(
+                    raw,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    allow_nan=False,
+                ).encode("utf-8")
+                kind = "sha256"
+                value = hashlib.sha256(encoded).hexdigest()
+            else:
+                kind = kind_map.get(descriptor.kind)
+                if kind is None:
+                    raise ToolError(
+                        "RECOVERY_CONTRACT_UNAVAILABLE",
+                        "The recovery capsule field kind is not persistable by this Runtime.",
+                    )
+                value = self._capsule_scalar(raw)
+            fields[f"field_{index:02d}"] = {"kind": kind, "value": value}
+        return (
+            ReconciliationCapsule.create(
+                capsule_type="extension_deterministic_fields",
+                pre_effect_correlation=fields,
+                evidence={},
+            ),
+            False,
+        )
+
+    def _register_extension_operation(
+        self,
+        prepared: Any,
+        target: _WorkspaceTarget | None,
+    ) -> tuple[Any, OperationReceipt | None]:
+        effect_contract = getattr(prepared, "effect_contract", None)
+        if (
+            effect_contract is not None
+            and effect_contract.effect_semantics in {"read_only", "guarded_replay_safe"}
+        ):
+            return prepared, None
+        registry = self.operation_registry
+        if registry is None or self.boot_id is None:
+            if self.recovery_admission.transport_mode == "persistent_tunnel":
+                raise ToolError(
+                    "RECOVERY_CONTRACT_UNAVAILABLE",
+                    "Persistent remote execution has no authoritative durable effect boundary.",
+                    reason="durable_effect_boundary_unavailable",
+                )
+            # Direct construction of ToolRuntime remains a local embedding/test
+            # seam. Production stdio is hosted by StdioSupervisor and therefore
+            # always supplies the Registry. Preserve this seam without requiring
+            # old test doubles to synthesize the new Effect Contract object.
+            return prepared, None
+        recovery_contract = self._resolved_recovery_contract(prepared)
+        operation_id = uuid.uuid4().hex
+        capsule, expose_operation_id = self._extension_reconciliation_capsule(
+            prepared,
+            recovery_contract,
+            operation_id,
+        )
+        public_workspace_id = target.workspace_id if target is not None else "global"
+        recovery_key = target.workspace_recovery_key if target is not None else "global"
+        owner = f"extension:{prepared.record.manifest.extension_id}/{prepared.action.name}"
+        try:
+            key_version, _ = registry.active_correlation_key()
+            receipt = registry.register_prepared(
+                boot_id=self.boot_id,
+                owner=owner,
+                public_workspace_id=public_workspace_id,
+                workspace_recovery_key=recovery_key,
+                effect_semantics=prepared.effect_contract.effect_semantics,
+                lifetime=prepared.effect_contract.lifetime,
+                owner_contract_digest=prepared.record.sha256,
+                key_version=key_version,
+                owner_snapshot=self._extension_owner_snapshot(prepared, recovery_contract),
+                recovery_capsule=capsule,
+                operation_id=operation_id,
+            )
+        except OperationRegistryError as exc:
+            raise ToolError(
+                "RECOVERY_CAPACITY_UNAVAILABLE",
+                "The durable operation boundary could not reserve this side effect.",
+                owner=owner,
+                cause=type(exc).__name__,
+            ) from exc
+        return replace(
+            prepared,
+            operation_id=receipt.operation_id,
+            expose_operation_id=expose_operation_id,
+        ), receipt
+
+    def _cross_effect_attempted_barrier(self, receipt: OperationReceipt) -> None:
+        registry = self.operation_registry
+        if registry is None:
+            raise ToolError("RECOVERY_CONTRACT_UNAVAILABLE", "The durable effect boundary is unavailable.")
+        try:
+            registry.transition(
+                receipt.operation_id,
+                workspace_recovery_key=receipt.workspace_recovery_key,
+                expected_state="prepared",
+                new_state="effect_attempted",
+            )
+        except Exception:
+            try:
+                registry.transition(
+                    receipt.operation_id,
+                    workspace_recovery_key=receipt.workspace_recovery_key,
+                    expected_state="prepared",
+                    new_state="effect_not_started",
+                    terminal_reason="pre_effect_barrier_failed",
+                )
+            except Exception:
+                pass
+            raise
+
+    def _mark_effect_observed(self, receipt: OperationReceipt) -> None:
+        registry = self.operation_registry
+        if registry is None:
+            return
+        registry.transition(
+            receipt.operation_id,
+            workspace_recovery_key=receipt.workspace_recovery_key,
+            expected_state="effect_attempted",
+            new_state="effect_observed",
+        )
+
+    def _register_unclassified_host_operation(
+        self,
+        *,
+        owner: str,
+        target: _WorkspaceTarget,
+        owner_contract_digest: str,
+        owner_snapshot: bytes,
+    ) -> OperationReceipt | None:
+        registry = self.operation_registry
+        if registry is None or self.boot_id is None:
+            return None
+        try:
+            key_version, _ = registry.active_correlation_key()
+            return registry.register_prepared(
+                boot_id=self.boot_id,
+                owner=owner,
+                public_workspace_id=target.workspace_id,
+                workspace_recovery_key=target.workspace_recovery_key,
+                effect_semantics="unclassified_unsafe",
+                lifetime="job_owned",
+                owner_contract_digest=owner_contract_digest,
+                key_version=key_version,
+                owner_snapshot=owner_snapshot,
+            )
+        except OperationRegistryError as exc:
+            raise ToolError(
+                "RECOVERY_CAPACITY_UNAVAILABLE",
+                "The durable operation boundary could not reserve this execution.",
+                owner=owner,
+                cause=type(exc).__name__,
+            ) from exc
+
+    def _task_operation_contract(
+        self,
+        target: _WorkspaceTarget,
+        *,
+        name: str,
+        task: Any,
+    ) -> tuple[str, bytes]:
+        task_contract = json.dumps(
+            {
+                "argv": list(task.argv),
+                "timeout_seconds": task.timeout_seconds,
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode("utf-8")
+        snapshot = json.dumps(
+            {
+                "schema_version": 1,
+                "owner_kind": "approved_task",
+                "config_sha256": target.config.sha256,
+                "task_name": name,
+                "task_contract_sha256": hashlib.sha256(task_contract).hexdigest(),
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode("utf-8")
+        digest = target.config.sha256
+        if not isinstance(digest, str) or len(digest) != 64:
+            digest = hashlib.sha256(snapshot).hexdigest()
+        return digest, snapshot
+
+    def _capability_operation_contract(
+        self,
+        target: _WorkspaceTarget,
+        *,
+        name: str,
+    ) -> tuple[str, bytes]:
+        provider = discover_capabilities(target.root).get(name)
+        snapshot = json.dumps(
+            {
+                "schema_version": 1,
+                "owner_kind": "capability",
+                "runtime_version": __version__,
+                "capability": name,
+                "provider": provider,
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode("utf-8")
+        return hashlib.sha256(snapshot).hexdigest(), snapshot
+
     @property
     def instructions(self) -> str:
         mode = "read-only" if self.read_only else "read/write"
@@ -206,7 +558,10 @@ class ToolRuntime:
             "call action 'get' with the returned skill_ref and sha256 for each methodology you choose. If match returns no "
             "results, continue normally. Skill text is trusted methodology data, not executable tooling.\n"
         )
-        return base + self.skills.routing_index(max_chars=64 * 1024)
+        # Initialization instructions are a routing hint, not a Skill
+        # catalog. Let the Skill Engine scale the compact routing budget with
+        # the enabled Skill count while keeping a bounded initialization cap.
+        return base + self.skills.routing_index(max_chars=None)
 
     def list_tools(self) -> list[dict[str, Any]]:
         tools = [SERVER_INFO_TOOL, FLIGHT_RECORDER_TOOL, WORKSPACE_TOOL, FILE_INFO_TOOL, PPTX_INSPECT_TOOL, IMAGE_OPEN_TOOL, EXTENSION_TOOL]
@@ -653,11 +1008,51 @@ class ToolRuntime:
             workspace=target.workspace if target is not None else None,
             read_only=self.read_only,
         )
+        if self.recovery_admission.transport_mode == "persistent_tunnel":
+            recovery_decision = self.recovery_admission.assess_extension(
+                owner=f"extension:{extension_id}",
+                effect=prepared.effect_contract,
+                recovery_contract=prepared.action.recovery_contract,
+                params=prepared.params,
+            )
+            if not recovery_decision.allowed:
+                raise ToolError(
+                    "RECOVERY_CONTRACT_UNAVAILABLE",
+                    "Persistent remote execution is blocked until this exact owner/action has a truthful bounded recovery/settlement path.",
+                    reason=recovery_decision.reason,
+                    owner=recovery_decision.owner,
+                    effect_semantics=recovery_decision.effect_semantics,
+                    lifetime=recovery_decision.lifetime,
+                    transport_mode=self.recovery_admission.transport_mode,
+                    settlement_mode=self.recovery_admission.settlement.mode,
+                )
         action_spec = prepared.action
         mutation_scope = prepared.mutation_scope
 
         def invoke_extension(*, on_job_finish: Callable[[], None] | None = None) -> dict[str, Any]:
-            return self.extensions.execute_prepared(prepared, on_job_finish=on_job_finish)
+            bounded_prepared, receipt = self._register_extension_operation(prepared, target)
+            if receipt is not None:
+                self._cross_effect_attempted_barrier(receipt)
+            result = self.extensions.execute_prepared(
+                bounded_prepared,
+                on_job_finish=on_job_finish,
+            )
+            if receipt is not None:
+                is_live_job = isinstance(result.get("job_id"), str) and result.get("status") in {
+                    "running", "cancelling", "termination_pending"
+                }
+                if not is_live_job:
+                    self._mark_effect_observed(receipt)
+                if bounded_prepared.expose_operation_id:
+                    existing_operation_id = result.get("operation_id")
+                    if existing_operation_id not in {None, receipt.operation_id}:
+                        raise ToolError(
+                            "EXTENSION_PROTOCOL_ERROR",
+                            "Extension returned an operation_id that conflicts with the Host recovery identity.",
+                        )
+                    result = dict(result)
+                    result["operation_id"] = receipt.operation_id
+            return result
 
         lease = None
         lease_owner = {
@@ -823,6 +1218,21 @@ class ToolRuntime:
                 "This execution capability is not globally pre-authorized in the FolderBridge launcher.",
                 enabled=list(self.execution_capabilities),
             )
+        recovery_decision = self.recovery_admission.assess_unclassified_owner(
+            owner=f"capability:{name}",
+            lifetime="job_owned",
+        )
+        if not recovery_decision.allowed:
+            raise ToolError(
+                "RECOVERY_CONTRACT_UNAVAILABLE",
+                "Persistent remote execution is blocked until this capability has a trusted recovery contract.",
+                reason=recovery_decision.reason,
+                owner=recovery_decision.owner,
+                effect_semantics=recovery_decision.effect_semantics,
+                lifetime=recovery_decision.lifetime,
+                transport_mode=self.recovery_admission.transport_mode,
+                settlement_mode=self.recovery_admission.settlement.mode,
+            )
 
         lease = self._workspace_mutations.acquire(
             target.workspace_id,
@@ -850,10 +1260,23 @@ class ToolRuntime:
                 on_finish=release_once,
             )
 
+        receipt: OperationReceipt | None = None
         try:
             with self._shutdown_lock:
                 if self._shutting_down:
                     raise ToolError("SERVER_SHUTTING_DOWN", "FolderBridge is shutting down; new capabilities are disabled.")
+                owner_digest, owner_snapshot = self._capability_operation_contract(
+                    target,
+                    name=name,
+                )
+                receipt = self._register_unclassified_host_operation(
+                    owner=f"capability:{name}",
+                    target=target,
+                    owner_contract_digest=owner_digest,
+                    owner_snapshot=owner_snapshot,
+                )
+                if receipt is not None:
+                    self._cross_effect_attempted_barrier(receipt)
             result = run_capability(target.root, name, task_runner=managed_task_runner)
         except Exception:
             release_once()
@@ -862,6 +1285,8 @@ class ToolRuntime:
         if callable(update_owner):
             update_owner(job_id=result.get("job_id"), pid=result.get("worker_pid"))
         if not isinstance(result.get("job_id"), str):
+            if receipt is not None:
+                self._mark_effect_observed(receipt)
             release_once()
         return self._scope_result(result, target)
 
@@ -903,6 +1328,21 @@ class ToolRuntime:
         task = target.config.tasks.get(name)
         if task is None:
             raise ToolError("UNKNOWN_TASK", "Only locally approved named tasks can run.", available=sorted(target.config.tasks))
+        recovery_decision = self.recovery_admission.assess_unclassified_owner(
+            owner=f"task:{name}",
+            lifetime="job_owned",
+        )
+        if not recovery_decision.allowed:
+            raise ToolError(
+                "RECOVERY_CONTRACT_UNAVAILABLE",
+                "Persistent remote execution is blocked until this task has a separately versioned recovery provider.",
+                reason=recovery_decision.reason,
+                owner=recovery_decision.owner,
+                effect_semantics=recovery_decision.effect_semantics,
+                lifetime=recovery_decision.lifetime,
+                transport_mode=self.recovery_admission.transport_mode,
+                settlement_mode=self.recovery_admission.settlement.mode,
+            )
 
         lease = self._workspace_mutations.acquire(
             target.workspace_id,
@@ -921,10 +1361,24 @@ class ToolRuntime:
                 released = True
             lease.release()
 
+        receipt: OperationReceipt | None = None
         try:
             with self._shutdown_lock:
                 if self._shutting_down:
                     raise ToolError("SERVER_SHUTTING_DOWN", "FolderBridge is shutting down; new tasks are disabled.")
+                owner_digest, owner_snapshot = self._task_operation_contract(
+                    target,
+                    name=name,
+                    task=task,
+                )
+                receipt = self._register_unclassified_host_operation(
+                    owner=f"task:{name}",
+                    target=target,
+                    owner_contract_digest=owner_digest,
+                    owner_snapshot=owner_snapshot,
+                )
+                if receipt is not None:
+                    self._cross_effect_attempted_barrier(receipt)
             result = self.task_jobs.run_or_promote(
                 target.root,
                 task,
@@ -939,6 +1393,8 @@ class ToolRuntime:
         if callable(update_owner):
             update_owner(job_id=result.get("job_id"), pid=result.get("worker_pid"))
         if not isinstance(result.get("job_id"), str):
+            if receipt is not None:
+                self._mark_effect_observed(receipt)
             release_once()
         return self._scope_result(result, target)
 

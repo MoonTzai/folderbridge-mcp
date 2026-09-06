@@ -100,7 +100,22 @@ class Gui041RegressionTests(unittest.TestCase):
         self.assertIn('text="选择目录…"', self.gui)
         self.assertIn('text="启动"', self.gui)
         self.assertIn('text="停止"', self.gui)
+        self.assertIn('service_options = ttk.Frame(service_controls, style="Card.TFrame")', self.gui)
+        self.assertIn('service_actions = ttk.Frame(service_controls, style="Card.TFrame")', self.gui)
+        self.assertIn('service_actions.pack(fill="x", pady=(4, 0))', self.gui)
         self.assertIn("if busy or not owned:\n                    stop_button.configure(state=\"disabled\")", self.gui)
+
+
+    def test_blocked_tunnel_recovery_preserves_runtime_api_key_in_memory(self) -> None:
+        poll_block = self.gui.split("def _poll_process", 1)[1].split("def _set_connection_state", 1)[0]
+        blocked = poll_block.split('elif state == "blocked":', 1)[1].split('elif state == "restart_failed":', 1)[0]
+        self.assertNotIn('self._active_secret = ""', blocked)
+        self.assertNotIn('self.api_key_var.set("")', blocked)
+
+        drain_block = self.gui.split("def _drain_events", 1)[1].split("def _poll_process", 1)[0]
+        stopped = drain_block.split('elif kind == "stopped":', 1)[1].split('elif kind == "error":', 1)[0]
+        self.assertIn('self._active_secret = ""', stopped)
+        self.assertIn('self.api_key_var.set("")', stopped)
 
 
 if __name__ == "__main__":

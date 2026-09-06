@@ -14,6 +14,7 @@ from pathlib import Path
 from unittest import mock
 
 from folderbridge_mcp.config import load_config, workspace_id
+import folderbridge_mcp.process_control as process_control
 import folderbridge_mcp.extension_worker as extension_worker_module
 import folderbridge_mcp.extensions as extensions_module
 from folderbridge_mcp.extensions import (
@@ -932,12 +933,14 @@ class ExtensionTests(unittest.TestCase):
 
         self.assertEqual(started["status"], "running")
         self.assertTrue(started["auto_promoted"])
+        self.assertEqual(started["poll_after_seconds"], process_control.JOB_STATUS_POLL_HINT_SECONDS)
         self.assertLess(started["promoted_after_seconds"], 0.2)
         self.assertEqual(started["timeout_seconds"], 2)
 
         listed = self.registry.job_list(workspace=Workspace(self.workspace_root))
         self.assertIn(started["job_id"], {item["job_id"] for item in listed["jobs"]})
         running = self.registry.job_status(started["job_id"], workspace=Workspace(self.workspace_root))
+        self.assertEqual(running["poll_after_seconds"], process_control.JOB_STATUS_POLL_HINT_SECONDS)
         self.assertIn(running["runtime_health"]["state"], {"progressing", "alive_quiet", "active_output"})
 
         deadline = time.monotonic() + 3

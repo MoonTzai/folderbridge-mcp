@@ -17,9 +17,10 @@ SPEC.loader.exec_module(plugin)
 
 
 class PublishedFFmpegToolkitTests(unittest.TestCase):
-    def test_manifest_is_v012_external_extension(self) -> None:
+    def test_manifest_is_v012_schema_v2_metadata_on_runtime_abi1(self) -> None:
         manifest = json.loads((PLUGIN_ROOT / "folderbridge-extension.json").read_text(encoding="utf-8"))
-        self.assertEqual(manifest["schema_version"], 1)
+        self.assertEqual(manifest["schema_version"], 2)
+        self.assertEqual(manifest["runtime_abi"], 1)
         self.assertEqual(manifest["id"], "ffmpeg-toolkit")
         self.assertEqual(manifest["version"], "0.1.2")
         self.assertEqual(manifest["entrypoint"], "plugin.py")

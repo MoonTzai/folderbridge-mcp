@@ -9,6 +9,7 @@ from pathlib import Path
 from unittest import mock
 
 from folderbridge_mcp.flight_recorder import FlightRecorder
+from folderbridge_mcp.process_control import ProcessGenerationQuiescence
 from folderbridge_mcp.launcher_backend import (
     MAX_COMMAND_OUTPUT,
     LauncherError,
@@ -302,6 +303,289 @@ class LauncherBackendTests(unittest.TestCase):
         flight = recorder.recent(minutes=15, limit=10)
         self.assertTrue(any(event["event"] == "tunnel.process_stop" and event.get("exit_code") == -9 for event in flight["events"]))
 
+    def test_tunnel_supervisor_recovers_only_after_real_process_exit(self) -> None:
+        class FakeProcess:
+            next_pid = 5000
+
+            def __init__(self) -> None:
+                type(self).next_pid += 1
+                self.pid = type(self).next_pid
+                self.returncode = None
+                self.stdout = None
+
+            def poll(self):
+                return self.returncode
+
+            def wait(self, timeout=None):
+                return self.returncode
+
+        processes: list[FakeProcess] = []
+
+        def fake_popen(*_args, **_kwargs):
+            process = FakeProcess()
+            processes.append(process)
+            return process
+
+        recorder = FlightRecorder("launcher", root=Path(self.temp.name) / "flight-recovery")
+        supervisor = TunnelSupervisor(
+            lambda _text: None,
+            flight_recorder=recorder,
+            quiescence_probe=lambda _process: ProcessGenerationQuiescence(True, "test-proof"),
+        )
+        supervisor._automatic_recovery = True
+        secret = "sk-memory-only-recovery"
+
+        with mock.patch("folderbridge_mcp.launcher_backend.subprocess.Popen", side_effect=fake_popen), mock.patch(
+            "folderbridge_mcp.launcher_backend.time.monotonic", return_value=100.0
+        ):
+            first_pid = supervisor.start(["tunnel-client", "run"], env={"CONTROL_PLANE_API_KEY": secret})
+
+        self.assertTrue(supervisor.desired_running())
+        self.assertEqual(len(processes), 1)
+        self.assertIsNone(supervisor.reconcile(now=100.25))
+        self.assertEqual(len(processes), 1)
+
+        processes[0].returncode = 0
+        scheduled = supervisor.reconcile(now=101.0)
+        self.assertEqual(scheduled["state"], "scheduled")
+        self.assertEqual(scheduled["previous_pid"], first_pid)
+        self.assertEqual(scheduled["exit_code"], 0)
+        self.assertEqual(scheduled["attempt"], 1)
+        self.assertEqual(scheduled["delay_seconds"], 0.5)
+
+        self.assertIsNone(supervisor.reconcile(now=101.49))
+        self.assertEqual(len(processes), 1)
+
+        with mock.patch("folderbridge_mcp.launcher_backend.subprocess.Popen", side_effect=fake_popen):
+            restarted = supervisor.reconcile(now=101.5)
+        self.assertEqual(restarted["state"], "restarted")
+        self.assertEqual(restarted["attempt"], 1)
+        self.assertEqual(restarted["previous_generation_id"], 1)
+        self.assertEqual(restarted["generation_id"], 2)
+        self.assertTrue(restarted["ambiguous_inflight"])
+        self.assertNotEqual(restarted["pid"], first_pid)
+        self.assertEqual(len(processes), 2)
+        self.assertTrue(supervisor.running())
+
+        flight = recorder.recent(minutes=15, limit=50)["events"]
+        names = {event["event"] for event in flight}
+        self.assertIn("tunnel.parent_exit_observed", names)
+        self.assertIn("tunnel.previous_generation_fence_begin", names)
+        self.assertIn("tunnel.previous_generation_quiescent", names)
+        self.assertIn("tunnel.generation_started", names)
+
+    def test_tunnel_supervisor_blocks_restart_when_previous_generation_is_ambiguous(self) -> None:
+        class FakeProcess:
+            pid = 5050
+            returncode = None
+            stdout = None
+
+            def poll(self):
+                return self.returncode
+
+        process = FakeProcess()
+        recorder = FlightRecorder("launcher", root=Path(self.temp.name) / "flight-fence-blocked")
+        supervisor = TunnelSupervisor(
+            lambda _text: None,
+            flight_recorder=recorder,
+            quiescence_probe=lambda _process: ProcessGenerationQuiescence(False, "test-ambiguous"),
+        )
+        supervisor._automatic_recovery = True
+        with mock.patch("folderbridge_mcp.launcher_backend.subprocess.Popen", return_value=process), mock.patch(
+            "folderbridge_mcp.launcher_backend.time.monotonic", return_value=150.0
+        ):
+            supervisor.start(["tunnel-client", "run"], env={"CONTROL_PLANE_API_KEY": "sk-memory-only"})
+
+        process.returncode = 0
+        blocked = supervisor.reconcile(now=151.0)
+        self.assertEqual(blocked["state"], "blocked")
+        self.assertEqual(blocked["quiescence_proof"], "test-ambiguous")
+        self.assertTrue(blocked["ambiguous_inflight"])
+        self.assertFalse(supervisor.desired_running())
+        self.assertFalse(supervisor.has_cached_launch_spec())
+        self.assertIsNone(supervisor.reconcile(now=999.0))
+
+        flight = recorder.recent(minutes=15, limit=50)["events"]
+        names = {event["event"] for event in flight}
+        self.assertIn("tunnel.previous_generation_fence_failed", names)
+        self.assertIn("tunnel.recovery_blocked", names)
+
+    def test_tunnel_supervisor_production_default_blocks_restart_before_quiescence_probe(self) -> None:
+        class FakeProcess:
+            pid = 5075
+            returncode = None
+            stdout = None
+
+            def poll(self):
+                return self.returncode
+
+        process = FakeProcess()
+        probe = mock.Mock(return_value=ProcessGenerationQuiescence(True, "must-not-be-used"))
+        recorder = FlightRecorder("launcher", root=Path(self.temp.name) / "flight-manual-policy")
+        supervisor = TunnelSupervisor(
+            lambda _text: None,
+            flight_recorder=recorder,
+            quiescence_probe=probe,
+        )
+        with mock.patch("folderbridge_mcp.launcher_backend.subprocess.Popen", return_value=process), mock.patch(
+            "folderbridge_mcp.launcher_backend.time.monotonic", return_value=175.0
+        ):
+            supervisor.start(["tunnel-client", "run"], env={"CONTROL_PLANE_API_KEY": "sk-memory-only"})
+
+        process.returncode = 0
+        blocked = supervisor.reconcile(now=176.0)
+        self.assertEqual(blocked["state"], "blocked")
+        self.assertEqual(blocked["block_reason"], "automatic-recovery-disabled")
+        self.assertEqual(blocked["quiescence_proof"], "not-attempted")
+        probe.assert_not_called()
+        self.assertFalse(supervisor.desired_running())
+        self.assertFalse(supervisor.has_cached_launch_spec())
+
+        flight = recorder.recent(minutes=15, limit=50)["events"]
+        blocked_events = [event for event in flight if event["event"] == "tunnel.recovery_blocked"]
+        self.assertEqual(len(blocked_events), 1)
+        self.assertEqual(blocked_events[0].get("block_reason"), "automatic-recovery-disabled")
+
+    def test_tunnel_supervisor_manual_stop_cancels_pending_recovery_and_forgets_secret(self) -> None:
+        class FakeProcess:
+            pid = 5100
+            returncode = None
+            stdout = None
+
+            def poll(self):
+                return self.returncode
+
+            def wait(self, timeout=None):
+                return self.returncode
+
+        process = FakeProcess()
+        recorder = FlightRecorder("launcher", root=Path(self.temp.name) / "flight-cancel-recovery")
+        supervisor = TunnelSupervisor(
+            lambda _text: None,
+            flight_recorder=recorder,
+            quiescence_probe=lambda _process: ProcessGenerationQuiescence(True, "test-proof"),
+        )
+        supervisor._automatic_recovery = True
+
+        with mock.patch("folderbridge_mcp.launcher_backend.subprocess.Popen", return_value=process), mock.patch(
+            "folderbridge_mcp.launcher_backend.time.monotonic", return_value=200.0
+        ):
+            supervisor.start(["tunnel-client", "run"], env={"CONTROL_PLANE_API_KEY": "sk-never-log"})
+
+        process.returncode = 0
+        scheduled = supervisor.reconcile(now=201.0)
+        self.assertEqual(scheduled["state"], "scheduled")
+        self.assertTrue(supervisor.desired_running())
+
+        with mock.patch("folderbridge_mcp.launcher_backend.terminate_owned_process_tree") as terminate_tree:
+            code = supervisor.stop()
+
+        terminate_tree.assert_not_called()
+        self.assertEqual(code, 0)
+        self.assertFalse(supervisor.desired_running())
+        self.assertIsNone(supervisor.reconcile(now=999.0))
+        self.assertFalse(supervisor.has_cached_launch_spec())
+
+    def test_tunnel_supervisor_recovery_is_bounded_and_resets_after_stability(self) -> None:
+        class FakeProcess:
+            next_pid = 5200
+
+            def __init__(self) -> None:
+                type(self).next_pid += 1
+                self.pid = type(self).next_pid
+                self.returncode = None
+                self.stdout = None
+
+            def poll(self):
+                return self.returncode
+
+            def wait(self, timeout=None):
+                return self.returncode
+
+        processes: list[FakeProcess] = []
+
+        def fake_popen(*_args, **_kwargs):
+            process = FakeProcess()
+            processes.append(process)
+            return process
+
+        supervisor = TunnelSupervisor(
+            lambda _text: None,
+            flight_recorder=FlightRecorder("launcher", root=Path(self.temp.name) / "flight-budget"),
+            quiescence_probe=lambda _process: ProcessGenerationQuiescence(True, "test-proof"),
+        )
+        supervisor._automatic_recovery = True
+        with mock.patch("folderbridge_mcp.launcher_backend.subprocess.Popen", side_effect=fake_popen), mock.patch(
+            "folderbridge_mcp.launcher_backend.time.monotonic", return_value=300.0
+        ):
+            supervisor.start(["tunnel-client", "run"], env={})
+
+        now = 301.0
+        expected_delays = [0.5, 1.0, 2.0, 4.0, 8.0]
+        for attempt, delay in enumerate(expected_delays, start=1):
+            processes[-1].returncode = 0
+            scheduled = supervisor.reconcile(now=now)
+            self.assertEqual(scheduled["state"], "scheduled")
+            self.assertEqual(scheduled["attempt"], attempt)
+            self.assertEqual(scheduled["delay_seconds"], delay)
+            now += delay
+            with mock.patch("folderbridge_mcp.launcher_backend.subprocess.Popen", side_effect=fake_popen):
+                restarted = supervisor.reconcile(now=now)
+            self.assertEqual(restarted["state"], "restarted")
+            self.assertEqual(restarted["attempt"], attempt)
+            now += 0.1
+
+        processes[-1].returncode = 0
+        exhausted = supervisor.reconcile(now=now)
+        self.assertEqual(exhausted["state"], "exhausted")
+        self.assertFalse(supervisor.desired_running())
+        self.assertFalse(supervisor.has_cached_launch_spec())
+
+        with mock.patch("folderbridge_mcp.launcher_backend.subprocess.Popen", side_effect=fake_popen), mock.patch(
+            "folderbridge_mcp.launcher_backend.time.monotonic", return_value=400.0
+        ):
+            supervisor.start(["tunnel-client", "run"], env={})
+        processes[-1].returncode = 0
+        self.assertEqual(supervisor.reconcile(now=401.0)["attempt"], 1)
+        with mock.patch("folderbridge_mcp.launcher_backend.subprocess.Popen", side_effect=fake_popen):
+            self.assertEqual(supervisor.reconcile(now=401.5)["state"], "restarted")
+        stable = supervisor.reconcile(now=462.0)
+        self.assertEqual(stable["state"], "stable")
+        processes[-1].returncode = 0
+        self.assertEqual(supervisor.reconcile(now=463.0)["attempt"], 1)
+
+    def test_tunnel_output_reader_reassembles_jsonl_before_classification_callback(self) -> None:
+        class ChunkStream:
+            def __init__(self) -> None:
+                self._chunks = [
+                    b'{"level":"WARN","msg":"poll timed ',
+                    b'out; backing off","error":"unexpected EOF"}\n{"level":"INFO",',
+                    b'"msg":"poller recovered; polling operational"}\n',
+                    b"",
+                ]
+
+            def read(self, _size):
+                return self._chunks.pop(0)
+
+        class FakeProcess:
+            pid = 5300
+            stdout = ChunkStream()
+
+            def poll(self):
+                return None
+
+        received: list[str] = []
+        supervisor = TunnelSupervisor(received.append)
+        supervisor._read_output(FakeProcess())  # type: ignore[arg-type]
+
+        self.assertEqual(
+            received,
+            [
+                '{"level":"WARN","msg":"poll timed out; backing off","error":"unexpected EOF"}\n',
+                '{"level":"INFO","msg":"poller recovered; polling operational"}\n',
+            ],
+        )
+
     def test_control_plane_environment_is_a_copy(self) -> None:
         with mock.patch.dict(os.environ, {}, clear=True):
             env = control_plane_environment("sk-memory-only")
@@ -309,6 +593,11 @@ class LauncherBackendTests(unittest.TestCase):
             self.assertNotIn("CONTROL_PLANE_API_KEY", os.environ)
             with self.assertRaises(LauncherError):
                 control_plane_environment("")
+
+    def test_control_plane_environment_strips_clipboard_edge_whitespace(self) -> None:
+        with mock.patch.dict(os.environ, {}, clear=True):
+            env = control_plane_environment("\r\n  runtime-key  \t\n")
+        self.assertEqual(env["CONTROL_PLANE_API_KEY"], "runtime-key")
 
     def test_frozen_launcher_resets_pyinstaller_environment_for_nested_server(self) -> None:
         inherited = {

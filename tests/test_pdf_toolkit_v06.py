@@ -16,9 +16,10 @@ PLUGIN_ROOT = ROOT / "Plugins" / "extensions" / "pdf-toolkit"
 
 
 class PdfToolkitV06ProductionContractTests(unittest.TestCase):
-    def test_manifest_is_schema_preserving_v060_surface(self) -> None:
+    def test_manifest_preserves_v060_surface_across_schema_v2_metadata_migration(self) -> None:
         manifest = json.loads((PLUGIN_ROOT / "folderbridge-extension.json").read_text(encoding="utf-8"))
-        self.assertEqual(manifest["schema_version"], 1)
+        self.assertEqual(manifest["schema_version"], 2)
+        self.assertEqual(manifest["runtime_abi"], 1)
         self.assertEqual(manifest["id"], "pdf-toolkit")
         self.assertEqual(manifest["name"], "PDF Toolkit")
         self.assertEqual(manifest["version"], "0.6.0")

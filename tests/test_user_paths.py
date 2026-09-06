@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from folderbridge_mcp.user_paths import INTERNAL_CONFIG_ROOT_ENV, user_config_root
+from folderbridge_mcp.user_paths import internal_child_config_root_environment, user_config_root
 
 
 class UserPathTests(unittest.TestCase):
@@ -17,18 +17,19 @@ class UserPathTests(unittest.TestCase):
             )
             self.assertEqual(root, local / "folderbridge-mcp")
 
-    def test_worker_internal_override_wins_over_clean_environment_fallback(self) -> None:
+    def test_worker_internal_marker_wins_over_clean_environment_fallback(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             expected = Path(directory) / "exact-profile"
             fallback_home = Path(directory) / "other-home"
+            inherited = internal_child_config_root_environment(expected, boot_id="c" * 32)
             root = user_config_root(
                 environ={
-                    INTERNAL_CONFIG_ROOT_ENV: str(expected),
+                    **inherited,
                     "USERPROFILE": str(fallback_home),
                 },
                 platform="win32",
             )
-            self.assertEqual(root, expected)
+            self.assertEqual(root, expected.resolve(strict=False))
 
     def test_windows_clean_environment_falls_back_to_userprofile(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

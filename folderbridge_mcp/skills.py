@@ -28,6 +28,9 @@ MAX_SKILLS_PER_PACK = 128
 MAX_ROUTING_TERMS = 64
 MAX_ROUTING_TERM_CHARS = 120
 MAX_MATCH_LIMIT = 5
+INITIALIZATION_ROUTING_MIN_CHARS = 4000
+INITIALIZATION_ROUTING_CHARS_PER_SKILL = 64
+INITIALIZATION_ROUTING_MAX_CHARS = 64 * 1024
 PACK_ID_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
 SKILL_ID_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
 ASCII_WORD_RE = re.compile(r"^[a-z0-9][a-z0-9._+-]*$", re.IGNORECASE)
@@ -384,9 +387,13 @@ class SkillEngine:
             "pack": self._render_pack(pack, status, include_skills=False),
         }
 
-    def routing_index(self, *, max_chars: int = 4096) -> str:
-        if not isinstance(max_chars, int) or isinstance(max_chars, bool) or not 128 <= max_chars <= 262_144:
-            raise ValueError("max_chars must be 128..262144")
+    def routing_index(self, *, max_chars: int | None = 4096) -> str:
+        if max_chars is not None and (
+            not isinstance(max_chars, int)
+            or isinstance(max_chars, bool)
+            or not 128 <= max_chars <= 262_144
+        ):
+            raise ValueError("max_chars must be None or 128..262144")
         header = (
             "Local Skill Engine: use extension id 'skill-engine' action 'match' for methodology routing, "
             "then action 'get' with the returned skill_ref and sha256. The compact index below is only a routing hint; "
@@ -395,6 +402,14 @@ class SkillEngine:
         description = self.describe()
         packs = [list(pack["skills"]) for pack in description["packs"]]
         total_skills = sum(len(skills) for skills in packs)
+        if max_chars is None:
+            # Runtime initialization needs enough room to surface hundreds of
+            # compact Skills, but should not pay a fixed 64 KiB cost for the
+            # common case. Explicit max_chars callers keep their exact bound.
+            max_chars = min(
+                INITIALIZATION_ROUTING_MAX_CHARS,
+                max(INITIALIZATION_ROUTING_MIN_CHARS, total_skills * INITIALIZATION_ROUTING_CHARS_PER_SKILL),
+            )
         lines = [header]
         current_chars = len(header)
         included = 0

@@ -161,6 +161,67 @@ def _resolve_output_dir(root: Path, raw: str) -> Path:
     return resolved
 
 
+def _resolve_archive_target(
+    root: Path,
+    source: Path,
+    output_dir: Path,
+    *,
+    make_zip: bool,
+    archive_path: Any,
+) -> Path | None:
+    try:
+        source.relative_to(output_dir)
+    except ValueError:
+        pass
+    else:
+        raise RuntimeError("output_dir must not contain the source Office file")
+
+    if not make_zip:
+        if archive_path is not None:
+            raise RuntimeError("archive_path requires make_zip=true")
+        return None
+
+    if archive_path is None:
+        candidate = output_dir / "render.zip"
+    else:
+        if not isinstance(archive_path, str):
+            raise RuntimeError("archive_path must be a workspace-relative .zip path")
+        rel = _clean_relative(archive_path)
+        candidate = root.joinpath(*rel.parts)
+
+    _reject_links(root, candidate)
+    try:
+        parent = candidate.parent.resolve(strict=True)
+        parent.relative_to(root)
+    except (OSError, ValueError) as exc:
+        raise RuntimeError("archive_path parent must already exist inside the workspace") from exc
+
+    source_key = os.path.normcase(os.path.normpath(str(source)))
+    candidate_key = os.path.normcase(os.path.normpath(str(candidate)))
+    if candidate_key == source_key:
+        raise RuntimeError("archive_path must not alias the source Office file")
+    if candidate.suffix.lower() != ".zip":
+        raise RuntimeError("archive_path must end in .zip")
+    if candidate.exists():
+        if candidate.is_symlink() or _is_reparse(candidate) or not candidate.is_file():
+            raise RuntimeError("archive_path must be a regular non-link file target")
+        try:
+            if os.path.samefile(candidate, source):
+                raise RuntimeError("archive_path must not alias the source Office file")
+        except OSError:
+            pass
+
+    # ZIP publication uses os.replace. Prove the explicit historical sibling
+    # location is on the same filesystem before Office is launched so a late
+    # cross-volume failure cannot strand a completed render.
+    try:
+        if output_dir.stat().st_dev != parent.stat().st_dev:
+            raise RuntimeError("archive_path must be on the same volume as output_dir")
+    except OSError as exc:
+        raise RuntimeError("could not validate archive_path filesystem identity") from exc
+    return candidate
+
+
 def _reject_links(root: Path, candidate: Path) -> None:
     try:
         parts = candidate.relative_to(root).parts
@@ -181,6 +242,13 @@ def _sha256(path: Path) -> str:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _decode_protocol(data: bytes, *, stream: str) -> str:
+    try:
+        return data.decode("utf-8-sig", errors="strict")
+    except UnicodeDecodeError as exc:
+        raise RuntimeError(f"native Office {stream} was not valid UTF-8 protocol output") from exc
 
 
 def _open_ooxml(path: Path) -> zipfile.ZipFile:
@@ -725,6 +793,16 @@ def _render(params: dict[str, Any], context: dict[str, Any], root: Path) -> dict
     path = _resolve_input(root, params["path"], {".pptx", ".docx", ".xlsx"})
     output_dir = _resolve_output_dir(root, params["output_dir"])
     overwrite = bool(params.get("overwrite", False))
+    make_zip = bool(params.get("make_zip", True))
+    archive_target = _resolve_archive_target(
+        root,
+        path,
+        output_dir,
+        make_zip=make_zip,
+        archive_path=params.get("archive_path"),
+    )
+    if archive_target is not None and archive_target.exists() and not overwrite:
+        raise RuntimeError("render ZIP already exists; choose a fresh archive_path/output_dir or set overwrite=true")
     if not overwrite and any(output_dir.iterdir()):
         raise RuntimeError("output_dir is not empty; choose a fresh directory or set overwrite=true")
     if sys.platform != "win32":
@@ -771,8 +849,8 @@ def _render(params: dict[str, Any], context: dict[str, Any], root: Path) -> dict
                 owned_pid_path=owned_pid_path,
                 expected_owned_image="WINWORD.EXE",
             )
-            export_stdout = export_completed.stdout.decode("utf-8-sig", errors="replace").strip()
-            export_stderr = export_completed.stderr.decode("utf-8-sig", errors="replace").strip()
+            export_stdout = _decode_protocol(export_completed.stdout, stream="stdout").strip()
+            export_stderr = _decode_protocol(export_completed.stderr, stream="stderr").strip()
             if export_completed.returncode != 0:
                 detail = export_stderr or export_stdout or f"exit code {export_completed.returncode}"
                 raise RuntimeError(f"native Word PDF export failed: {detail[:4000]}")
@@ -820,8 +898,8 @@ def _render(params: dict[str, Any], context: dict[str, Any], root: Path) -> dict
                 cancel_path=cancel_path,
             )
 
-        stdout = completed.stdout.decode("utf-8-sig", errors="replace").strip()
-        stderr = completed.stderr.decode("utf-8-sig", errors="replace").strip()
+        stdout = _decode_protocol(completed.stdout, stream="stdout").strip()
+        stderr = _decode_protocol(completed.stderr, stream="stderr").strip()
         if completed.returncode != 0:
             detail = stderr or stdout or f"exit code {completed.returncode}"
             raise RuntimeError(f"native Office render failed: {detail[:4000]}")
@@ -869,28 +947,37 @@ def _render(params: dict[str, Any], context: dict[str, Any], root: Path) -> dict
         raise RuntimeError(f"renderer produced more than {MAX_RENDER_FILES} files")
 
     archive_meta = None
-    if bool(params.get("make_zip", True)):
-        archive = output_dir.with_suffix(".zip") if output_dir.suffix else Path(str(output_dir) + ".zip")
-        archive.relative_to(root)
-        _reject_links(root, archive)
-        if archive.exists() and not overwrite:
-            raise RuntimeError("render ZIP already exists; choose a fresh output_dir or set overwrite=true")
-        temporary = archive.with_name(f".{archive.name}.tmp")
+    if archive_target is not None:
+        temporary: Path | None = None
         try:
+            fd, raw_temporary = tempfile.mkstemp(
+                prefix=".folderbridge-render-",
+                suffix=".zip.tmp",
+                dir=output_dir,
+            )
+            os.close(fd)
+            temporary = Path(raw_temporary)
             with zipfile.ZipFile(temporary, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=6) as zf:
+                # The archive input set is exactly the validated generated PNG
+                # manifest. Sentinel files and the staging/final ZIP itself are
+                # never discovered by walking output_dir.
                 for item in generated:
                     source = root / PurePosixPath(item["path"])
                     zf.write(source, arcname=source.name)
-            os.replace(temporary, archive)
+            if archive_target.exists() and not overwrite:
+                raise RuntimeError("render ZIP already exists; choose a fresh archive_path/output_dir or set overwrite=true")
+            os.replace(temporary, archive_target)
+            temporary = None
         finally:
-            try:
-                temporary.unlink()
-            except FileNotFoundError:
-                pass
+            if temporary is not None:
+                try:
+                    temporary.unlink()
+                except FileNotFoundError:
+                    pass
         archive_meta = {
-            "path": archive.relative_to(root).as_posix(),
-            "size": archive.stat().st_size,
-            "sha256": _sha256(archive),
+            "path": archive_target.relative_to(root).as_posix(),
+            "size": archive_target.stat().st_size,
+            "sha256": _sha256(archive_target),
         }
 
     return {

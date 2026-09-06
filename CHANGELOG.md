@@ -2,6 +2,34 @@
 
 All notable changes to FolderBridge MCP are documented here.
 
+## 0.8.25 — 2026-09-06
+
+- Restored the legacy production stdio execution path (`ToolRuntime` + `McpServer`) after fresh post-package acceptance found that prematurely routing normal `serve` traffic through the Phase-0 `StdioSupervisor` could turn an ordinary schema-v1 Extension call (including read-only `comfyui status`) into a protected Operation Receipt and then place the entire live data plane into `recovery-control only` on the next request.
+- Kept `RuntimeHost`, `StdioSupervisor`, Operation Registry, recovery fencing, and the full V35 acceptance suite intact as candidate-only Phase-0 architecture. They are no longer part of production `cli serve` until Gate 3 explicitly authorizes persistent side-effecting Tunnel cutover. This preserves existing Extension/ComfyUI behavior while retaining the completed V35 work for later settlement closure.
+- Added a regression that locks production `cli serve` to the legacy runtime contract until Gate 3 cutover is explicitly changed, preventing future candidate recovery enforcement from silently entering the normal Tunnel child path.
+- Retained all 0.8.24 Launcher/Tunnel reliability work: v0.0.14 shared-stdio deadline-retirement acceptance, layered false-green prevention, version-gated structured admin monitoring, Runtime API Key edge-whitespace normalization, and the 20-second foreground-to-Job transport response budget.
+
+## 0.8.24 — 2026-09-06
+
+- Replaced Launcher process-liveness false green with a layered Tunnel health model: `STOPPED`, `UNKNOWN`, `READY_NOT_EXERCISED`, `DEGRADED`, and `HEALTHY`. Process existence, proxy-route preflight, Control Plane protocol health, MCP child readiness, and authoritative end-to-end data-plane health remain distinct; only an explicit authoritative E2E provider may produce green `HEALTHY`.
+- Added a bounded, generation-bound structured admin monitor for compatible `tunnel-client v0.0.14+` normal `run` clients. Capability activation requires both `--version >= 0.0.14` and the exact `run --help` contract for `--health.listen-addr` plus `--health.url-file`; legacy v0.0.13 argv remains unchanged and unsupported clients fail closed to the legacy path.
+- Hardened structured admin ingestion with numeric-loopback HTTP only, private per-generation health URL files, bounded JSON responses, no redirects, strict JSON content/type validation, and stale-generation rejection. Startup probe success can promote only to `READY_NOT_EXERCISED`; proxy preflight never impersonates a real Control Plane poll or E2E command completion.
+- Completed exact official v0.0.14 Windows shared-stdio dynamic acceptance for response-deadline retirement, caller-visible JSON-RPC id reuse across logical sessions, real read-only FolderBridge traversal, normal-run child-death fail-closed behavior, and 18–30 second slow-operation coexistence. These reliability results do not change Gate 3 settlement: persistent side-effecting Tunnel cutover remains forbidden without a supported external-EXE settlement seam.
+- Locked Runtime API Key normalization so leading/trailing whitespace such as clipboard CR/LF remains stripped in memory before invoking official Tunnel diagnostics; credentials remain memory-only and are never persisted by Launcher settings.
+
+## 0.8.23 — 2026-09-04
+
+- Fixed a Launcher regression where a non-user-initiated Tunnel exit followed by fail-closed recovery blocking cleared the Runtime API Key field. The key now remains only in the current Launcher process memory so the operator can explicitly reconnect without re-entering it; explicit Stop and application shutdown still clear the in-memory key, and LauncherSettings continue to contain no credential field.
+- Added regression coverage locking the distinction between involuntary recovery blocking and explicit operator stop, preserving secret redaction while preventing accidental credential persistence.
+
+## 0.8.22 — 2026-09-04
+
+- Reduced the shared synchronous transport-response ownership budget for long Tasks, project capabilities, and adaptive Extension foreground work from 60 seconds to 20 seconds while preserving the original worker/process and business timeout. Running Jobs now return a 3-second poll hint so clients can follow the same host-owned work without replacing one long-held request with a tight status loop.
+- Hardened Tunnel lifecycle handling around real `tunnel-client` exits. Launcher output is reassembled into complete JSONL lines before classification, lifecycle records carry generation IDs, and parent exit is explicitly separated from proof that the prior MCP generation is quiescent. Production automatic restart is fail-closed/disabled until both old-generation quiescence and new-generation readiness can be verified end-to-end; ambiguous in-flight requests are reported as such instead of implying exactly-once completion.
+- Added bounded process-generation quiescence evidence helpers and regression coverage for Windows parent-exit ambiguity, POSIX process-group absence/presence, manual stop, recovery fencing, cached launch-secret cleanup, and the private future recovery state-machine seam.
+- Expanded the external Local ComfyUI source to 1.4.0 with bounded loopback-only `status`, `free`, `jobs`, `job-status`, `cancel-prompt`, `node-info`, `models`, and `features` control actions while keeping `run` host-owned. Targeted cancellation never falls back to global `/interrupt`, job/status responses strip workflow bodies, and transient history failures never resubmit `/prompt`.
+- Made Skill routing initialization scale with the enabled compact Skill count under a bounded 64 KiB ceiling, preserving explicit `max_chars` callers while allowing large approved Skill sets to remain discoverable during runtime initialization.
+
 ## 0.8.21 — 2026-08-31
 
 - Replaced workspace-wide serialization for truthfully bounded Extension writes with a general scoped mutation coordinator. Extension actions may now declare `mutation_scope` as `none`, opaque `workspace`, or one or more `exact`/`tree` path claims resolved from fixed relative paths or validated top-level string parameters before the worker starts. Disjoint scopes can run concurrently, overlapping scopes remain serialized, writer fairness is preserved, and leases still remain held until the real worker/process exits.

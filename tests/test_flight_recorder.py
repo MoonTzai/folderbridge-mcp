@@ -138,6 +138,17 @@ class FlightRecorderTests(unittest.TestCase):
         self.assertIsNone(classify_tunnel_output("connected successfully"))
         self.assertEqual(classify_tunnel_output("ExceptionGroup: TaskGroup failed"), "error")
         self.assertEqual(classify_tunnel_output("warning: retrying connection"), "warning")
+        warn_json = json.dumps({
+            "level": "WARN",
+            "msg": "poll timed out; backing off",
+            "error": "unexpected EOF",
+        })
+        self.assertEqual(classify_tunnel_output(warn_json), "warning")
+        recovered_json = json.dumps({
+            "level": "INFO",
+            "msg": "poller recovered; polling operational",
+        })
+        self.assertIsNone(classify_tunnel_output(recovered_json))
 
     def test_mcp_records_ingress_and_completion_without_arguments(self) -> None:
         with TemporaryDirectory() as temporary:

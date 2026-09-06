@@ -45,6 +45,253 @@ SENSITIVE_SUFFIXES = frozenset({".jks", ".key", ".keystore", ".p12", ".pfx", ".p
 PROTECTED_CONFIG = ".folderbridge.json"
 
 
+JOB_STATUSES = frozenset({"pending", "in_progress", "completed", "failed", "cancelled"})
+JOB_SORT_FIELDS = frozenset({"created_at", "execution_duration"})
+JOB_SORT_ORDERS = frozenset({"asc", "desc"})
+MAX_JOB_LIST_ITEMS = 100
+MAX_MODEL_LIST_ITEMS = 1000
+MAX_NODE_CLASS_CHARS = 256
+
+
+def _validate_prompt_id(raw: str) -> str:
+    if not isinstance(raw, str):
+        raise ExtensionError("INVALID_ARGUMENT", "prompt_id must be a canonical lowercase UUID string.")
+    try:
+        parsed = uuid.UUID(raw)
+    except (ValueError, AttributeError) as exc:
+        raise ExtensionError("INVALID_ARGUMENT", "prompt_id must be a canonical lowercase UUID string.") from exc
+    if str(parsed) != raw:
+        raise ExtensionError("INVALID_ARGUMENT", "prompt_id must be a canonical lowercase UUID string.")
+    return raw
+
+
+def release_comfyui_memory(
+    *,
+    unload_models: bool = True,
+    free_memory: bool = True,
+    settle_seconds: float = 0.5,
+    port: int = COMFYUI_PORT,
+) -> dict[str, Any]:
+    if not isinstance(unload_models, bool) or not isinstance(free_memory, bool):
+        raise ExtensionError("INVALID_ARGUMENT", "unload_models and free_memory must be boolean.")
+    if not unload_models and not free_memory:
+        raise ExtensionError("INVALID_ARGUMENT", "At least one of unload_models or free_memory must be true.")
+    if not isinstance(settle_seconds, (int, float)) or isinstance(settle_seconds, bool) or not 0 <= float(settle_seconds) <= 10:
+        raise ExtensionError("INVALID_ARGUMENT", "settle_seconds must be between 0 and 10.")
+
+    before = comfyui_status(port=port)
+    payload = {"unload_models": unload_models, "free_memory": free_memory}
+    _request_bytes(
+        "POST",
+        "/free",
+        port=port,
+        timeout=5,
+        limit=4096,
+        body=json.dumps(payload, separators=(",", ":")).encode("utf-8"),
+        content_type="application/json",
+    )
+    if settle_seconds:
+        time.sleep(float(settle_seconds))
+    after = comfyui_status(port=port)
+    return {
+        "acknowledged": True,
+        "endpoint": f"http://{COMFYUI_HOST}:{port}",
+        "requested": payload,
+        "before": before,
+        "after": after,
+    }
+
+
+def _safe_job_summary(raw: dict[str, Any]) -> dict[str, Any]:
+    allowed = (
+        "id", "status", "priority", "create_time", "execution_start_time", "execution_end_time",
+        "execution_error", "outputs_count", "preview_output", "workflow_id",
+    )
+    return {key: raw[key] for key in allowed if key in raw}
+
+
+def list_jobs(
+    *,
+    statuses: list[str] | None = None,
+    limit: int = 20,
+    offset: int = 0,
+    sort_by: str = "created_at",
+    sort_order: str = "desc",
+    port: int = COMFYUI_PORT,
+) -> dict[str, Any]:
+    if statuses is not None:
+        if not isinstance(statuses, list) or not statuses or len(statuses) > len(JOB_STATUSES):
+            raise ExtensionError("INVALID_ARGUMENT", "statuses must be a non-empty bounded list when provided.")
+        if any(not isinstance(item, str) or item not in JOB_STATUSES for item in statuses):
+            raise ExtensionError("INVALID_ARGUMENT", f"statuses must use only: {', '.join(sorted(JOB_STATUSES))}.")
+        if len(set(statuses)) != len(statuses):
+            raise ExtensionError("INVALID_ARGUMENT", "statuses may not contain duplicates.")
+    if not isinstance(limit, int) or isinstance(limit, bool) or not 1 <= limit <= MAX_JOB_LIST_ITEMS:
+        raise ExtensionError("INVALID_ARGUMENT", f"limit must be between 1 and {MAX_JOB_LIST_ITEMS}.")
+    if not isinstance(offset, int) or isinstance(offset, bool) or offset < 0:
+        raise ExtensionError("INVALID_ARGUMENT", "offset must be a non-negative integer.")
+    if sort_by not in JOB_SORT_FIELDS:
+        raise ExtensionError("INVALID_ARGUMENT", f"sort_by must be one of: {', '.join(sorted(JOB_SORT_FIELDS))}.")
+    if sort_order not in JOB_SORT_ORDERS:
+        raise ExtensionError("INVALID_ARGUMENT", f"sort_order must be one of: {', '.join(sorted(JOB_SORT_ORDERS))}.")
+
+    query: dict[str, str | int] = {
+        "limit": limit,
+        "offset": offset,
+        "sort_by": sort_by,
+        "sort_order": sort_order,
+    }
+    if statuses is not None:
+        query["status"] = ",".join(statuses)
+    response = _json_request("GET", f"/api/jobs?{urlencode(query)}", port=port, timeout=5)
+    if not isinstance(response, dict) or not isinstance(response.get("jobs"), list):
+        raise ExtensionError("COMFYUI_INVALID_RESPONSE", "ComfyUI jobs API returned an invalid response.")
+    jobs = [_safe_job_summary(item) for item in response["jobs"] if isinstance(item, dict)]
+    pagination = response.get("pagination") if isinstance(response.get("pagination"), dict) else {}
+    return {
+        "endpoint": f"http://{COMFYUI_HOST}:{port}",
+        "jobs": jobs[:limit],
+        "pagination": pagination,
+    }
+
+
+def get_job_status(prompt_id: str, *, port: int = COMFYUI_PORT) -> dict[str, Any]:
+    prompt_id = _validate_prompt_id(prompt_id)
+    try:
+        response = _json_request("GET", f"/api/jobs/{quote(prompt_id, safe='')}", port=port, timeout=5)
+    except ExtensionError as exc:
+        if exc.code == "COMFYUI_HTTP_ERROR" and exc.details.get("status") == 404:
+            raise ExtensionError("COMFYUI_JOB_NOT_FOUND", "ComfyUI does not know this prompt_id.", prompt_id=prompt_id) from exc
+        raise
+    if not isinstance(response, dict) or response.get("id") != prompt_id:
+        raise ExtensionError("COMFYUI_INVALID_RESPONSE", "ComfyUI job status response is invalid.", prompt_id=prompt_id)
+    result = _safe_job_summary(response)
+    outputs = response.get("outputs")
+    descriptors = _output_artifact_descriptors({"outputs": outputs}) if isinstance(outputs, dict) else []
+    result["artifacts_found"] = len(descriptors)
+    result["artifacts"] = [
+        {
+            "filename": item["filename"],
+            "subfolder": item["subfolder"],
+            "type": item["type"],
+            "kind": item["kind"],
+            "node_id": item["node_id"],
+            "output_key": item["output_key"],
+        }
+        for item in descriptors[:MAX_OUTPUT_ARTIFACTS]
+    ]
+    result["artifacts_truncated"] = len(descriptors) > MAX_OUTPUT_ARTIFACTS
+    result["endpoint"] = f"http://{COMFYUI_HOST}:{port}"
+    return result
+
+
+def cancel_prompt(prompt_id: str, *, port: int = COMFYUI_PORT) -> dict[str, Any]:
+    prompt_id = _validate_prompt_id(prompt_id)
+    try:
+        response = _json_request(
+            "POST",
+            f"/api/jobs/{quote(prompt_id, safe='')}/cancel",
+            port=port,
+            timeout=5,
+        )
+    except ExtensionError as exc:
+        if exc.code == "COMFYUI_HTTP_ERROR" and exc.details.get("status") == 404:
+            raise ExtensionError(
+                "COMFYUI_TARGETED_CANCEL_UNAVAILABLE",
+                "This ComfyUI runtime does not expose targeted prompt cancellation.",
+                prompt_id=prompt_id,
+            ) from exc
+        raise
+    cancelled = response.get("cancelled") if isinstance(response, dict) else None
+    if not isinstance(cancelled, bool):
+        raise ExtensionError("COMFYUI_INVALID_RESPONSE", "ComfyUI targeted cancel returned an invalid response.")
+    return {
+        "endpoint": f"http://{COMFYUI_HOST}:{port}",
+        "prompt_id": prompt_id,
+        "cancelled": cancelled,
+    }
+
+
+def get_node_info(class_name: str, *, port: int = COMFYUI_PORT) -> dict[str, Any]:
+    if not isinstance(class_name, str) or not class_name.strip() or len(class_name) > MAX_NODE_CLASS_CHARS or "\x00" in class_name:
+        raise ExtensionError("INVALID_ARGUMENT", f"class_name must be a non-empty string up to {MAX_NODE_CLASS_CHARS} characters.")
+    class_name = class_name.strip()
+    response = _json_request("GET", f"/object_info/{quote(class_name, safe='')}", port=port, timeout=5)
+    info = response.get(class_name) if isinstance(response, dict) else None
+    if not isinstance(info, dict):
+        raise ExtensionError("COMFYUI_NODE_NOT_FOUND", "ComfyUI node class was not found.", class_name=class_name)
+    return {
+        "endpoint": f"http://{COMFYUI_HOST}:{port}",
+        "class_name": class_name,
+        "info": info,
+    }
+
+
+def list_models(
+    *,
+    folder: str | None = None,
+    contains: str | None = None,
+    max_items: int = 200,
+    port: int = COMFYUI_PORT,
+) -> dict[str, Any]:
+    if folder is not None and (not isinstance(folder, str) or not folder.strip() or len(folder) > 256 or "\x00" in folder):
+        raise ExtensionError("INVALID_ARGUMENT", "folder must be a non-empty bounded string when provided.")
+    if contains is not None and (not isinstance(contains, str) or len(contains) > 256 or "\x00" in contains):
+        raise ExtensionError("INVALID_ARGUMENT", "contains must be a bounded string when provided.")
+    if not isinstance(max_items, int) or isinstance(max_items, bool) or not 1 <= max_items <= MAX_MODEL_LIST_ITEMS:
+        raise ExtensionError("INVALID_ARGUMENT", f"max_items must be between 1 and {MAX_MODEL_LIST_ITEMS}.")
+
+    if folder is None:
+        response = _json_request("GET", "/models", port=port, timeout=5)
+        if not isinstance(response, list) or not all(isinstance(item, str) for item in response):
+            raise ExtensionError("COMFYUI_INVALID_RESPONSE", "ComfyUI model-folder response is invalid.")
+        values = response
+        key = "folders"
+    else:
+        folder = folder.strip()
+        try:
+            response = _json_request("GET", f"/models/{quote(folder, safe='')}", port=port, timeout=5)
+        except ExtensionError as exc:
+            if exc.code == "COMFYUI_HTTP_ERROR" and exc.details.get("status") == 404:
+                raise ExtensionError("COMFYUI_MODEL_FOLDER_NOT_FOUND", "ComfyUI model folder was not found.", folder=folder) from exc
+            raise
+        if not isinstance(response, list) or not all(isinstance(item, str) for item in response):
+            raise ExtensionError("COMFYUI_INVALID_RESPONSE", "ComfyUI model list response is invalid.", folder=folder)
+        values = response
+        key = "models"
+
+    if contains:
+        needle = contains.casefold()
+        values = [item for item in values if needle in item.casefold()]
+    total = len(values)
+    return {
+        "endpoint": f"http://{COMFYUI_HOST}:{port}",
+        "folder": folder,
+        key: values[:max_items],
+        "total": total,
+        "truncated": total > max_items,
+    }
+
+
+def get_features(*, port: int = COMFYUI_PORT) -> dict[str, Any]:
+    response = _json_request("GET", "/features", port=port, timeout=5)
+    if not isinstance(response, dict):
+        raise ExtensionError("COMFYUI_INVALID_RESPONSE", "ComfyUI features response is invalid.")
+    return {
+        "endpoint": f"http://{COMFYUI_HOST}:{port}",
+        "features": response,
+    }
+
+
+def _is_transient_history_error(exc: ExtensionError) -> bool:
+    if exc.code == "COMFYUI_OFFLINE":
+        return True
+    if exc.code == "COMFYUI_HTTP_ERROR":
+        status = exc.details.get("status")
+        return isinstance(status, int) and (status == 408 or status == 429 or status >= 500)
+    return False
+
+
 class _NoRedirect(HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):  # type: ignore[no-untyped-def]
         raise ExtensionError("COMFYUI_REDIRECT_DENIED", "ComfyUI loopback requests may not redirect.")
@@ -182,6 +429,8 @@ def run_workflow(
 
     deadline = None if timeout_seconds == 0 else time.monotonic() + timeout_seconds
     history_entry: dict[str, Any] | None = None
+    history_transport_failures = 0
+    last_history_transport_error: str | None = None
     cancel_stop = threading.Event()
     cancel_attempted = threading.Event()
     cancel_dispatched_event = threading.Event()
@@ -207,7 +456,15 @@ def run_workflow(
                     prompt_id=prompt_id,
                     cancel_dispatched=cancel_dispatched_event.is_set(),
                 )
-            history = _json_request("GET", f"/history/{prompt_id}", port=port, timeout=10)
+            try:
+                history = _json_request("GET", f"/history/{prompt_id}", port=port, timeout=10)
+            except ExtensionError as exc:
+                if not _is_transient_history_error(exc):
+                    raise
+                history_transport_failures += 1
+                last_history_transport_error = f"{exc.code}: {exc.message}"
+                time.sleep(0.5)
+                continue
             if isinstance(history, dict):
                 candidate = history.get(prompt_id)
                 if isinstance(candidate, dict):
@@ -287,6 +544,8 @@ def run_workflow(
         "images_returned": len(rendered),
         "images": rendered,
         "status": status,
+        "history_transport_failures": history_transport_failures,
+        "last_history_transport_error": last_history_transport_error,
     }
     return {
         **metadata,
@@ -684,7 +943,11 @@ def _request_bytes(
             detail = exc.read(4096).decode("utf-8", errors="replace")
         except OSError:
             detail = ""
-        raise ExtensionError("COMFYUI_HTTP_ERROR", f"ComfyUI returned HTTP {exc.code}: {detail[:1000]}") from exc
+        raise ExtensionError(
+            "COMFYUI_HTTP_ERROR",
+            f"ComfyUI returned HTTP {exc.code}: {detail[:1000]}",
+            status=exc.code,
+        ) from exc
     except (URLError, OSError, TimeoutError) as exc:
         raise ExtensionError("COMFYUI_OFFLINE", f"Cannot reach local ComfyUI at {COMFYUI_HOST}:{port}: {exc}") from exc
     if len(data) > limit:

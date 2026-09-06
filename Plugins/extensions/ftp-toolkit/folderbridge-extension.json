@@ -1,5 +1,6 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
+  "runtime_abi": 1,
   "id": "ftp-toolkit",
   "name": "FTP Toolkit",
   "version": "0.2.1",
@@ -27,9 +28,17 @@
       "input_schema": {
         "type": "object",
         "properties": {
-          "profile": {"type": "string", "minLength": 1, "maxLength": 64}
+          "profile": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64
+          }
         },
         "additionalProperties": false
+      },
+      "effect_contract": {
+        "effect_semantics": "read_only",
+        "lifetime": "foreground"
       }
     },
     "configure": {
@@ -40,9 +49,18 @@
       "input_schema": {
         "type": "object",
         "properties": {
-          "profile": {"type": "string", "minLength": 1, "maxLength": 64, "default": "default"}
+          "profile": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64,
+            "default": "default"
+          }
         },
         "additionalProperties": false
+      },
+      "effect_contract": {
+        "effect_semantics": "external_effect",
+        "lifetime": "foreground"
       }
     },
     "forget": {
@@ -52,9 +70,18 @@
       "input_schema": {
         "type": "object",
         "properties": {
-          "profile": {"type": "string", "minLength": 1, "maxLength": 64, "default": "default"}
+          "profile": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64,
+            "default": "default"
+          }
         },
         "additionalProperties": false
+      },
+      "effect_contract": {
+        "effect_semantics": "external_effect",
+        "lifetime": "foreground"
       }
     },
     "check": {
@@ -65,9 +92,18 @@
       "input_schema": {
         "type": "object",
         "properties": {
-          "profile": {"type": "string", "minLength": 1, "maxLength": 64, "default": "default"}
+          "profile": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64,
+            "default": "default"
+          }
         },
         "additionalProperties": false
+      },
+      "effect_contract": {
+        "effect_semantics": "read_only",
+        "lifetime": "foreground"
       }
     },
     "list": {
@@ -78,11 +114,29 @@
       "input_schema": {
         "type": "object",
         "properties": {
-          "profile": {"type": "string", "minLength": 1, "maxLength": 64, "default": "default"},
-          "remote_dir": {"type": "string", "maxLength": 1024, "default": ""},
-          "max_items": {"type": "integer", "minimum": 1, "maximum": 2000, "default": 500}
+          "profile": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64,
+            "default": "default"
+          },
+          "remote_dir": {
+            "type": "string",
+            "maxLength": 1024,
+            "default": ""
+          },
+          "max_items": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 2000,
+            "default": 500
+          }
         },
         "additionalProperties": false
+      },
+      "effect_contract": {
+        "effect_semantics": "read_only",
+        "lifetime": "foreground"
       }
     },
     "stat": {
@@ -93,11 +147,26 @@
       "input_schema": {
         "type": "object",
         "properties": {
-          "profile": {"type": "string", "minLength": 1, "maxLength": 64, "default": "default"},
-          "remote_path": {"type": "string", "minLength": 1, "maxLength": 1024}
+          "profile": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64,
+            "default": "default"
+          },
+          "remote_path": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1024
+          }
         },
-        "required": ["remote_path"],
+        "required": [
+          "remote_path"
+        ],
         "additionalProperties": false
+      },
+      "effect_contract": {
+        "effect_semantics": "read_only",
+        "lifetime": "foreground"
       }
     },
     "mkdir": {
@@ -108,11 +177,26 @@
       "input_schema": {
         "type": "object",
         "properties": {
-          "profile": {"type": "string", "minLength": 1, "maxLength": 64, "default": "default"},
-          "remote_dir": {"type": "string", "minLength": 1, "maxLength": 1024}
+          "profile": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64,
+            "default": "default"
+          },
+          "remote_dir": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1024
+          }
         },
-        "required": ["remote_dir"],
+        "required": [
+          "remote_dir"
+        ],
         "additionalProperties": false
+      },
+      "effect_contract": {
+        "effect_semantics": "external_effect",
+        "lifetime": "foreground"
       }
     },
     "rename": {
@@ -123,12 +207,32 @@
       "input_schema": {
         "type": "object",
         "properties": {
-          "profile": {"type": "string", "minLength": 1, "maxLength": 64, "default": "default"},
-          "from_path": {"type": "string", "minLength": 1, "maxLength": 1024},
-          "to_path": {"type": "string", "minLength": 1, "maxLength": 1024}
+          "profile": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64,
+            "default": "default"
+          },
+          "from_path": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1024
+          },
+          "to_path": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1024
+          }
         },
-        "required": ["from_path", "to_path"],
+        "required": [
+          "from_path",
+          "to_path"
+        ],
         "additionalProperties": false
+      },
+      "effect_contract": {
+        "effect_semantics": "external_effect",
+        "lifetime": "foreground"
       }
     },
     "delete": {
@@ -139,11 +243,26 @@
       "input_schema": {
         "type": "object",
         "properties": {
-          "profile": {"type": "string", "minLength": 1, "maxLength": 64, "default": "default"},
-          "remote_path": {"type": "string", "minLength": 1, "maxLength": 1024}
+          "profile": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64,
+            "default": "default"
+          },
+          "remote_path": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1024
+          }
         },
-        "required": ["remote_path"],
+        "required": [
+          "remote_path"
+        ],
         "additionalProperties": false
+      },
+      "effect_contract": {
+        "effect_semantics": "external_effect",
+        "lifetime": "foreground"
       }
     },
     "upload": {
@@ -155,13 +274,39 @@
       "input_schema": {
         "type": "object",
         "properties": {
-          "profile": {"type": "string", "minLength": 1, "maxLength": 64, "default": "default"},
-          "local_path": {"type": "string", "minLength": 1, "maxLength": 1024},
-          "remote_path": {"type": "string", "maxLength": 1024},
-          "verify": {"type": "string", "enum": ["none", "size", "sha256"], "default": "sha256"}
+          "profile": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64,
+            "default": "default"
+          },
+          "local_path": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1024
+          },
+          "remote_path": {
+            "type": "string",
+            "maxLength": 1024
+          },
+          "verify": {
+            "type": "string",
+            "enum": [
+              "none",
+              "size",
+              "sha256"
+            ],
+            "default": "sha256"
+          }
         },
-        "required": ["local_path"],
+        "required": [
+          "local_path"
+        ],
         "additionalProperties": false
+      },
+      "effect_contract": {
+        "effect_semantics": "external_effect",
+        "lifetime": "job_owned"
       }
     },
     "upload-tree": {
@@ -173,14 +318,46 @@
       "input_schema": {
         "type": "object",
         "properties": {
-          "profile": {"type": "string", "minLength": 1, "maxLength": 64, "default": "default"},
-          "local_dir": {"type": "string", "minLength": 1, "maxLength": 1024},
-          "remote_dir": {"type": "string", "maxLength": 1024, "default": ""},
-          "verify": {"type": "string", "enum": ["none", "size", "sha256"], "default": "size"},
-          "max_files": {"type": "integer", "minimum": 1, "maximum": 4096, "default": 1024}
+          "profile": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64,
+            "default": "default"
+          },
+          "local_dir": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1024
+          },
+          "remote_dir": {
+            "type": "string",
+            "maxLength": 1024,
+            "default": ""
+          },
+          "verify": {
+            "type": "string",
+            "enum": [
+              "none",
+              "size",
+              "sha256"
+            ],
+            "default": "size"
+          },
+          "max_files": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 4096,
+            "default": 1024
+          }
         },
-        "required": ["local_dir"],
+        "required": [
+          "local_dir"
+        ],
         "additionalProperties": false
+      },
+      "effect_contract": {
+        "effect_semantics": "external_effect",
+        "lifetime": "job_owned"
       }
     },
     "download": {
@@ -192,13 +369,36 @@
       "input_schema": {
         "type": "object",
         "properties": {
-          "profile": {"type": "string", "minLength": 1, "maxLength": 64, "default": "default"},
-          "remote_path": {"type": "string", "minLength": 1, "maxLength": 1024},
-          "local_path": {"type": "string", "minLength": 1, "maxLength": 1024},
-          "overwrite": {"type": "boolean", "default": false}
+          "profile": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64,
+            "default": "default"
+          },
+          "remote_path": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1024
+          },
+          "local_path": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1024
+          },
+          "overwrite": {
+            "type": "boolean",
+            "default": false
+          }
         },
-        "required": ["remote_path", "local_path"],
+        "required": [
+          "remote_path",
+          "local_path"
+        ],
         "additionalProperties": false
+      },
+      "effect_contract": {
+        "effect_semantics": "external_effect",
+        "lifetime": "job_owned"
       }
     }
   }

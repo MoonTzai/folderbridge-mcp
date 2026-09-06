@@ -1,5 +1,6 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
+  "runtime_abi": 1,
   "id": "ffmpeg-toolkit",
   "name": "FFmpeg Toolkit",
   "version": "0.1.2",
@@ -28,9 +29,17 @@
       "input_schema": {
         "type": "object",
         "properties": {
-          "tool_dir": {"type": "string", "minLength": 1, "maxLength": 1024}
+          "tool_dir": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1024
+          }
         },
         "additionalProperties": false
+      },
+      "effect_contract": {
+        "effect_semantics": "read_only",
+        "lifetime": "foreground"
       }
     },
     "capabilities": {
@@ -42,14 +51,49 @@
         "properties": {
           "kind": {
             "type": "string",
-            "enum": ["encoders", "decoders", "codecs", "formats", "muxers", "demuxers", "filters", "protocols", "hwaccels", "devices", "bsfs", "pix_fmts", "sample_fmts", "layouts", "colors"]
+            "enum": [
+              "encoders",
+              "decoders",
+              "codecs",
+              "formats",
+              "muxers",
+              "demuxers",
+              "filters",
+              "protocols",
+              "hwaccels",
+              "devices",
+              "bsfs",
+              "pix_fmts",
+              "sample_fmts",
+              "layouts",
+              "colors"
+            ]
           },
-          "contains": {"type": "string", "minLength": 1, "maxLength": 256},
-          "max_items": {"type": "integer", "minimum": 1, "maximum": 2000, "default": 500},
-          "tool_dir": {"type": "string", "minLength": 1, "maxLength": 1024}
+          "contains": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256
+          },
+          "max_items": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 2000,
+            "default": 500
+          },
+          "tool_dir": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1024
+          }
         },
-        "required": ["kind"],
+        "required": [
+          "kind"
+        ],
         "additionalProperties": false
+      },
+      "effect_contract": {
+        "effect_semantics": "read_only",
+        "lifetime": "foreground"
       }
     },
     "probe": {
@@ -60,29 +104,69 @@
       "input_schema": {
         "type": "object",
         "properties": {
-          "path": {"type": "string", "minLength": 1, "maxLength": 1024},
+          "path": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1024
+          },
           "args": {
             "type": "array",
             "maxItems": 512,
-            "items": {"type": "string", "minLength": 1, "maxLength": 8192}
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 8192
+            }
           },
           "paths": {
             "type": "object",
             "additionalProperties": {
               "type": "object",
               "properties": {
-                "path": {"type": "string", "minLength": 1, "maxLength": 1024},
-                "mode": {"type": "string", "enum": ["input", "input_pattern", "input_dir"]}
+                "path": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 1024
+                },
+                "mode": {
+                  "type": "string",
+                  "enum": [
+                    "input",
+                    "input_pattern",
+                    "input_dir"
+                  ]
+                }
               },
-              "required": ["path", "mode"],
+              "required": [
+                "path",
+                "mode"
+              ],
               "additionalProperties": false
             }
           },
-          "tool_dir": {"type": "string", "minLength": 1, "maxLength": 1024},
-          "timeout_seconds": {"type": "integer", "minimum": 1, "maximum": 3600, "default": 120},
-          "max_output_chars": {"type": "integer", "minimum": 1024, "maximum": 262144, "default": 131072}
+          "tool_dir": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1024
+          },
+          "timeout_seconds": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 3600,
+            "default": 120
+          },
+          "max_output_chars": {
+            "type": "integer",
+            "minimum": 1024,
+            "maximum": 262144,
+            "default": 131072
+          }
         },
         "additionalProperties": false
+      },
+      "effect_contract": {
+        "effect_semantics": "read_only",
+        "lifetime": "foreground"
       }
     },
     "run": {
@@ -98,28 +182,75 @@
             "type": "array",
             "minItems": 1,
             "maxItems": 512,
-            "items": {"type": "string", "minLength": 1, "maxLength": 8192}
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 8192
+            }
           },
           "paths": {
             "type": "object",
             "additionalProperties": {
               "type": "object",
               "properties": {
-                "path": {"type": "string", "minLength": 1, "maxLength": 1024},
-                "mode": {"type": "string", "enum": ["input", "input_pattern", "input_dir", "output", "output_pattern", "output_dir"]}
+                "path": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 1024
+                },
+                "mode": {
+                  "type": "string",
+                  "enum": [
+                    "input",
+                    "input_pattern",
+                    "input_dir",
+                    "output",
+                    "output_pattern",
+                    "output_dir"
+                  ]
+                }
               },
-              "required": ["path", "mode"],
+              "required": [
+                "path",
+                "mode"
+              ],
               "additionalProperties": false
             }
           },
-          "tool_dir": {"type": "string", "minLength": 1, "maxLength": 1024},
-          "overwrite": {"type": "boolean", "default": false},
-          "create_output_parents": {"type": "boolean", "default": true},
-          "timeout_seconds": {"type": "integer", "minimum": 0, "maximum": 86400, "default": 7200},
-          "max_artifacts": {"type": "integer", "minimum": 1, "maximum": 256, "default": 100}
+          "tool_dir": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1024
+          },
+          "overwrite": {
+            "type": "boolean",
+            "default": false
+          },
+          "create_output_parents": {
+            "type": "boolean",
+            "default": true
+          },
+          "timeout_seconds": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 86400,
+            "default": 7200
+          },
+          "max_artifacts": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 256,
+            "default": 100
+          }
         },
-        "required": ["args"],
+        "required": [
+          "args"
+        ],
         "additionalProperties": false
+      },
+      "effect_contract": {
+        "effect_semantics": "external_effect",
+        "lifetime": "job_owned"
       }
     }
   }

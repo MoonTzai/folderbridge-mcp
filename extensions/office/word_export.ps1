@@ -8,6 +8,14 @@ param(
 $ErrorActionPreference = "Stop"
 $ProgressPreference = "SilentlyContinue"
 
+# FolderBridge's Python side treats this stream as a strict UTF-8 protocol.
+# Set the console encodings before any JSON or diagnostic output so redirected
+# stdout/stderr preserve Unicode deterministically on Windows PowerShell 5.1.
+$script:FolderBridgeUtf8NoBom = [Text.UTF8Encoding]::new($false)
+[Console]::InputEncoding = $script:FolderBridgeUtf8NoBom
+[Console]::OutputEncoding = $script:FolderBridgeUtf8NoBom
+$OutputEncoding = $script:FolderBridgeUtf8NoBom
+
 function Get-WordProcessIds {
     return @(Get-Process WINWORD -ErrorAction SilentlyContinue | ForEach-Object { [int]$_.Id })
 }

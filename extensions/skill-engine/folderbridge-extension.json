@@ -1,5 +1,6 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
+  "runtime_abi": 1,
   "id": "skill-engine",
   "name": "Skill Engine",
   "version": "1.0.0",
@@ -23,6 +24,10 @@
         "type": "object",
         "properties": {},
         "additionalProperties": false
+      },
+      "effect_contract": {
+        "effect_semantics": "read_only",
+        "lifetime": "foreground"
       }
     },
     "match": {
@@ -44,8 +49,14 @@
             "default": 3
           }
         },
-        "required": ["task"],
+        "required": [
+          "task"
+        ],
         "additionalProperties": false
+      },
+      "effect_contract": {
+        "effect_semantics": "read_only",
+        "lifetime": "foreground"
       }
     },
     "get": {
@@ -71,8 +82,15 @@
             "maxLength": 1024
           }
         },
-        "required": ["skill_ref", "expected_sha256"],
+        "required": [
+          "skill_ref",
+          "expected_sha256"
+        ],
         "additionalProperties": false
+      },
+      "effect_contract": {
+        "effect_semantics": "read_only",
+        "lifetime": "foreground"
       }
     }
   }

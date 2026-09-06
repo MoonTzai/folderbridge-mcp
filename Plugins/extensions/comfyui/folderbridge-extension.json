@@ -1,9 +1,10 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
+  "runtime_abi": 1,
   "id": "comfyui",
   "name": "Local ComfyUI",
-  "version": "1.3.0",
-  "description": "External hot-load bridge to local ComfyUI at 127.0.0.1:8188. Long workflow runs execute as host-owned jobs, use prompt-scoped cancellation, preflight supported dynamic inputs, and return bounded artifact paths/metadata without embedding generated media by default.",
+  "version": "1.4.0",
+  "description": "External hot-load bridge to local ComfyUI at 127.0.0.1:8188. Long workflow runs execute as host-owned jobs; bounded control actions expose memory release, real ComfyUI job state, targeted cancellation, node/model capability discovery, and transient history retry without arbitrary HTTP access.",
   "entrypoint": "plugin.py",
   "permissions": [
     "network.loopback:127.0.0.1:8188",
@@ -30,6 +31,231 @@
         "type": "object",
         "properties": {},
         "additionalProperties": false
+      },
+      "effect_contract": {
+        "effect_semantics": "read_only",
+        "lifetime": "foreground"
+      }
+    },
+    "free": {
+      "read_only": true,
+      "requires_workspace": false,
+      "authorization": "global",
+      "timeout_seconds": 15,
+      "mutation_scope": {
+        "mode": "none"
+      },
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "unload_models": {
+            "type": "boolean",
+            "default": true
+          },
+          "free_memory": {
+            "type": "boolean",
+            "default": true
+          }
+        },
+        "additionalProperties": false
+      },
+      "effect_contract": {
+        "effect_semantics": "external_effect",
+        "lifetime": "foreground"
+      }
+    },
+    "jobs": {
+      "read_only": true,
+      "requires_workspace": false,
+      "authorization": "global",
+      "timeout_seconds": 10,
+      "mutation_scope": {
+        "mode": "none"
+      },
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "statuses": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "enum": [
+                "pending",
+                "in_progress",
+                "completed",
+                "failed",
+                "cancelled"
+              ]
+            },
+            "minItems": 1,
+            "maxItems": 5
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 100,
+            "default": 20
+          },
+          "offset": {
+            "type": "integer",
+            "minimum": 0,
+            "default": 0
+          },
+          "sort_by": {
+            "type": "string",
+            "enum": [
+              "created_at",
+              "execution_duration"
+            ],
+            "default": "created_at"
+          },
+          "sort_order": {
+            "type": "string",
+            "enum": [
+              "asc",
+              "desc"
+            ],
+            "default": "desc"
+          }
+        },
+        "additionalProperties": false
+      },
+      "effect_contract": {
+        "effect_semantics": "read_only",
+        "lifetime": "foreground"
+      }
+    },
+    "job-status": {
+      "read_only": true,
+      "requires_workspace": false,
+      "authorization": "global",
+      "timeout_seconds": 10,
+      "mutation_scope": {
+        "mode": "none"
+      },
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "prompt_id": {
+            "type": "string",
+            "minLength": 36,
+            "maxLength": 36
+          }
+        },
+        "required": [
+          "prompt_id"
+        ],
+        "additionalProperties": false
+      },
+      "effect_contract": {
+        "effect_semantics": "read_only",
+        "lifetime": "foreground"
+      }
+    },
+    "cancel-prompt": {
+      "read_only": true,
+      "requires_workspace": false,
+      "authorization": "global",
+      "timeout_seconds": 10,
+      "mutation_scope": {
+        "mode": "none"
+      },
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "prompt_id": {
+            "type": "string",
+            "minLength": 36,
+            "maxLength": 36
+          }
+        },
+        "required": [
+          "prompt_id"
+        ],
+        "additionalProperties": false
+      },
+      "effect_contract": {
+        "effect_semantics": "external_effect",
+        "lifetime": "foreground"
+      }
+    },
+    "node-info": {
+      "read_only": true,
+      "requires_workspace": false,
+      "authorization": "global",
+      "timeout_seconds": 10,
+      "mutation_scope": {
+        "mode": "none"
+      },
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "class_name": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256
+          }
+        },
+        "required": [
+          "class_name"
+        ],
+        "additionalProperties": false
+      },
+      "effect_contract": {
+        "effect_semantics": "read_only",
+        "lifetime": "foreground"
+      }
+    },
+    "models": {
+      "read_only": true,
+      "requires_workspace": false,
+      "authorization": "global",
+      "timeout_seconds": 10,
+      "mutation_scope": {
+        "mode": "none"
+      },
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "folder": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256
+          },
+          "contains": {
+            "type": "string",
+            "maxLength": 256
+          },
+          "max_items": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 1000,
+            "default": 200
+          }
+        },
+        "additionalProperties": false
+      },
+      "effect_contract": {
+        "effect_semantics": "read_only",
+        "lifetime": "foreground"
+      }
+    },
+    "features": {
+      "read_only": true,
+      "requires_workspace": false,
+      "authorization": "global",
+      "timeout_seconds": 10,
+      "mutation_scope": {
+        "mode": "none"
+      },
+      "input_schema": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false
+      },
+      "effect_contract": {
+        "effect_semantics": "read_only",
+        "lifetime": "foreground"
       }
     },
     "run": {
@@ -75,8 +301,14 @@
             "default": 7200
           }
         },
-        "required": ["workflow_path"],
+        "required": [
+          "workflow_path"
+        ],
         "additionalProperties": false
+      },
+      "effect_contract": {
+        "effect_semantics": "external_effect",
+        "lifetime": "job_owned"
       }
     }
   }

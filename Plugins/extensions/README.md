@@ -27,7 +27,9 @@ Any later change to a hash-covered Extension file makes the old approval stale a
 
 | Extension | Version | Scope |
 | --- | --- | --- |
-| `comfyui` | 1.3.0 | Hot-load bridge to local ComfyUI with host-owned Jobs, prompt-scoped cancel, bounded artifact metadata, and optional scoped workspace output. |
+| `download-toolkit` | 0.1.0 | Public HTTPS file download and safe GitHub source snapshots with streamed size/SHA verification, SSRF/redirect defenses, no-clobber atomic publish, and no repository-code execution. |
+| `file-ops-toolkit` | 0.1.0 | Same-workspace regular-file copy/move with exact source+destination mutation claims, streamed hashing, no-clobber defaults, SHA-guarded overwrite, atomic publish/replace, and link/reparse denial. |
+| `comfyui` | 1.4.0 | Hot-load bridge to local ComfyUI with host-owned workflow Jobs, targeted prompt cancellation, bounded real-job/model/node inspection, explicit memory release, transient history retry, and optional scoped workspace output. |
 | `gpt-sovits-local` | 0.1.2 | Workspace adapter for the fixed `GPT-SoVITS-Bridge/runner.ps1` workflow. |
 | `ffmpeg-toolkit` | 0.1.2 | Workspace-confined FFmpeg/FFprobe probe, capability discovery, and long-running media jobs. |
 | `pdf-toolkit` | 0.6.0 | Workspace-confined PDF inspection through an exact-provenance PdfPig 0.1.16 / Windows PowerShell 5.1 process seam with deterministic Unicode 14.0.0 literal search, plus parser-independent Windows.Data.Pdf page rendering and transactional exact-hash installation. |

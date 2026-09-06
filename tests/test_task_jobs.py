@@ -9,6 +9,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+import folderbridge_mcp.process_control as process_control
 import folderbridge_mcp.task_runner as task_runner
 import folderbridge_mcp.tools as tools_module
 from folderbridge_mcp.config import Task, load_config
@@ -22,6 +23,11 @@ class TaskJobTests(unittest.TestCase):
 
     def tearDown(self) -> None:
         self.temp.cleanup()
+
+    def test_transport_response_budget_promotes_long_work_early_without_using_poll_cadence_as_deadline(self) -> None:
+        self.assertEqual(process_control.TRANSPORT_RESPONSE_BUDGET_SECONDS, 20.0)
+        self.assertLessEqual(process_control.TRANSPORT_RESPONSE_BUDGET_SECONDS, 20.0)
+        self.assertEqual(process_control.JOB_STATUS_POLL_HINT_SECONDS, 3.0)
 
     def test_long_task_auto_promotes_without_restarting_process(self) -> None:
         marker = self.root / "count.json"
@@ -41,11 +47,14 @@ class TaskJobTests(unittest.TestCase):
             self.assertEqual(started["status"], "running")
             self.assertFalse(finished.is_set())
             self.assertTrue(started["auto_promoted"])
+            self.assertEqual(started["poll_after_seconds"], process_control.JOB_STATUS_POLL_HINT_SECONDS)
             listed = manager.list(workspace=self.root)
             self.assertIn(started["job_id"], {item["job_id"] for item in listed["jobs"]})
 
             deadline = time.monotonic() + 3
             status = manager.status(started["job_id"], workspace=self.root)
+            if status["status"] == "running":
+                self.assertEqual(status["poll_after_seconds"], process_control.JOB_STATUS_POLL_HINT_SECONDS)
             while status["status"] == "running" and time.monotonic() < deadline:
                 time.sleep(0.02)
                 status = manager.status(started["job_id"], workspace=self.root)

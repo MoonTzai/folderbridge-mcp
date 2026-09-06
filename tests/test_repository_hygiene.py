@@ -41,6 +41,7 @@ class RepositoryHygieneTests(unittest.TestCase):
     def test_public_external_plugins_use_the_public_folderbridge_python_helpers(self) -> None:
         public_plugins = (
             "comfyui",
+            "download-toolkit",
             "ffmpeg-toolkit",
             "ftp-toolkit",
             "godot-ai",
@@ -69,7 +70,8 @@ class RepositoryHygieneTests(unittest.TestCase):
 
     def test_published_external_extension_table_matches_manifest_versions(self) -> None:
         published = {
-            "comfyui": ("1.3.0", "test_external_comfyui.py"),
+            "comfyui": ("1.4.0", "test_external_comfyui.py"),
+            "download-toolkit": ("0.1.0", "test_external_download_toolkit.py"),
             "ffmpeg-toolkit": ("0.1.2", "test_external_ffmpeg_toolkit.py"),
             "ftp-toolkit": ("0.2.1", "test_external_ftp_toolkit.py"),
             "godot-ai": ("0.1.0", "test_external_godot_ai.py"),

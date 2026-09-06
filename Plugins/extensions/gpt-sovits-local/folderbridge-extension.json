@@ -1,5 +1,6 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
+  "runtime_abi": 1,
   "id": "gpt-sovits-local",
   "name": "Local GPT-SoVITS",
   "version": "0.1.2",
@@ -28,6 +29,10 @@
         "type": "object",
         "properties": {},
         "additionalProperties": false
+      },
+      "effect_contract": {
+        "effect_semantics": "read_only",
+        "lifetime": "foreground"
       }
     },
     "run": {
@@ -41,7 +46,16 @@
         "properties": {
           "operation": {
             "type": "string",
-            "enum": ["probe", "bootstrap", "prepare-dataset", "asr", "train", "infer", "launch-webui", "stop"]
+            "enum": [
+              "probe",
+              "bootstrap",
+              "prepare-dataset",
+              "asr",
+              "train",
+              "infer",
+              "launch-webui",
+              "stop"
+            ]
           },
           "params": {
             "type": "object",
@@ -54,8 +68,49 @@
             "default": 7200
           }
         },
-        "required": ["operation"],
+        "required": [
+          "operation"
+        ],
         "additionalProperties": false
+      },
+      "effect_contract": {
+        "selector": {
+          "param": "operation",
+          "cases": {
+            "probe": {
+              "effect_semantics": "read_only",
+              "lifetime": "job_owned"
+            },
+            "bootstrap": {
+              "effect_semantics": "external_effect",
+              "lifetime": "job_owned"
+            },
+            "prepare-dataset": {
+              "effect_semantics": "external_effect",
+              "lifetime": "job_owned"
+            },
+            "asr": {
+              "effect_semantics": "external_effect",
+              "lifetime": "job_owned"
+            },
+            "train": {
+              "effect_semantics": "external_effect",
+              "lifetime": "job_owned"
+            },
+            "infer": {
+              "effect_semantics": "external_effect",
+              "lifetime": "job_owned"
+            },
+            "launch-webui": {
+              "effect_semantics": "external_effect",
+              "lifetime": "managed_service"
+            },
+            "stop": {
+              "effect_semantics": "external_effect",
+              "lifetime": "managed_service"
+            }
+          }
+        }
       }
     }
   }

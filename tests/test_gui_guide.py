@@ -31,6 +31,10 @@ class _RunningSupervisor:
     def running() -> bool:
         return True
 
+    @staticmethod
+    def desired_running() -> bool:
+        return True
+
 
 class GuideGuiTests(unittest.TestCase):
     def test_extension_llm_prompt_requires_active_file_requests(self) -> None:
@@ -89,7 +93,7 @@ class GuideGuiTests(unittest.TestCase):
         self.assertIn("self.guide_button.grid(row=0, column=2", header)
         self.assertLess(header.index("self.language_button.grid"), header.index("self.guide_button.grid"))
         self.assertIn('self.settings.language = "en" if self._language == "zh" else "zh"', gui)
-        self.assertIn('self._connection_state == "running"', gui)
+        self.assertIn("self._set_connection_state(self._connection_state, self._connection_pid)", gui)
         self.assertNotIn('self.connection_text.get() == "运行中"', gui)
 
     def test_global_capability_select_all_and_clear(self) -> None:

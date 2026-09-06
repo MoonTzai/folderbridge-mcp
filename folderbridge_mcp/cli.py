@@ -26,6 +26,7 @@ from .config import (
 from .mcp import McpServer
 from .launcher_backend import render_client_config
 from .tools import ToolRuntime
+from .user_paths import clear_internal_config_root_environment, require_internal_child_config_root
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -105,6 +106,17 @@ def _workspace_arguments(parser: argparse.ArgumentParser) -> None:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    if args.command == "extension-worker":
+        try:
+            require_internal_child_config_root()
+        except ValueError as exc:
+            print(f"folderbridge-mcp: internal child state-root validation failed: {exc}", file=sys.stderr)
+            return 2
+    else:
+        # FOLDERBRIDGE_CONFIG_ROOT is reserved parent-to-child propagation, not
+        # a supported top-level production override. Remove even a syntactically
+        # valid inherited marker before any top-level state owner is constructed.
+        clear_internal_config_root_environment()
     if args.command == "gui":
         from .gui import main as gui_main
 
@@ -160,12 +172,6 @@ def main(argv: list[str] | None = None) -> int:
             # tunnel-client needs this secret, but the local MCP subprocess does not.
             # Drop it before any tool or approved repository task can run.
             os.environ.pop("CONTROL_PLANE_API_KEY", None)
-            runtime = ToolRuntime.from_roots(
-                workspaces,
-                read_only=args.read_only,
-                allow_tasks=args.allow_tasks,
-                capabilities=args.capabilities or [],
-            )
             names = ",".join(workspace.name for workspace in workspaces)
             print(
                 f"folderbridge-mcp {__version__}: stdio workspaces={len(workspaces)} ({names}) "
@@ -173,6 +179,18 @@ def main(argv: list[str] | None = None) -> int:
                 f"capabilities={','.join(args.capabilities or []) or 'none'}",
                 file=sys.stderr,
                 flush=True,
+            )
+            # Phase-0 RuntimeHost/StdioSupervisor remains a candidate-only
+            # acceptance seam until Gate 3 authorizes persistent side-effecting
+            # Tunnel cutover. Production stdio must preserve the legacy runtime
+            # contract; otherwise a candidate Operation Receipt can place the
+            # whole live data plane into recovery-control-only mode after an
+            # ordinary schema-v1 Extension call.
+            runtime = ToolRuntime.from_roots(
+                workspaces,
+                read_only=args.read_only,
+                allow_tasks=args.allow_tasks,
+                capabilities=args.capabilities or [],
             )
             McpServer(runtime).serve()
             return 0

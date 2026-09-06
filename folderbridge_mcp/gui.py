@@ -31,8 +31,8 @@ from .launcher_backend import (
     TunnelSupervisor,
     build_doctor_argv,
     build_init_argv,
-    build_run_argv,
     control_plane_environment,
+    prepare_tunnel_run,
     find_tunnel_client,
     mcp_command,
     redact_text,
@@ -973,26 +973,30 @@ class FolderBridgeLauncher:
                 self.managed_service_auto_vars[extension_id] = auto_var
                 service_controls = ttk.Frame(card, style="Card.TFrame")
                 service_controls.pack(fill="x", padx=(22, 0), pady=(4, 0))
+                service_options = ttk.Frame(service_controls, style="Card.TFrame")
+                service_options.pack(fill="x")
                 ttk.Checkbutton(
-                    service_controls,
+                    service_options,
                     text="自动启动",
                     variable=auto_var,
                     command=lambda eid=extension_id: self._toggle_managed_service_auto_start(eid),
                 ).pack(side="left")
                 choose_button = ttk.Button(
-                    service_controls,
+                    service_options,
                     text="选择目录…",
                     command=lambda eid=extension_id: self._select_managed_service_directory(eid),
                 )
                 choose_button.pack(side="left", padx=(6, 0))
+                service_actions = ttk.Frame(service_controls, style="Card.TFrame")
+                service_actions.pack(fill="x", pady=(4, 0))
                 start_button = ttk.Button(
-                    service_controls,
+                    service_actions,
                     text="启动",
                     command=lambda eid=extension_id: self._start_managed_service(eid),
                 )
-                start_button.pack(side="left", padx=(6, 0))
+                start_button.pack(side="left")
                 stop_button = ttk.Button(
-                    service_controls,
+                    service_actions,
                     text="停止",
                     command=lambda eid=extension_id: self._stop_managed_service(eid),
                 )
@@ -1994,7 +1998,7 @@ class FolderBridgeLauncher:
         self.key_entry.configure(show="" if self.show_key_var.get() else "●")
 
     def _toggle_connection(self) -> None:
-        if self.supervisor.running():
+        if self.supervisor.desired_running():
             self._stop_connection()
         else:
             self._start_connection()
@@ -2027,7 +2031,10 @@ class FolderBridgeLauncher:
                         raise LauncherError("Tunnel profile 配置失败，请查看日志")
                     self._queue_event("configured", fingerprint)
                 self._run_doctor(executable, settings.profile, env)
-                pid = self.supervisor.start(build_run_argv(executable, settings.profile), env=env)
+                run_plan = prepare_tunnel_run(executable, settings.profile, env=env)
+                pid = self.supervisor.start(run_plan.argv, env=env)
+                if run_plan.health_url_file is not None:
+                    self.supervisor.start_admin_monitor(run_plan.health_url_file)
                 self._queue_event("started", pid)
             except Exception as exc:  # Keep failures inside the worker boundary.
                 self._queue_event("error", str(exc))
@@ -2601,9 +2608,11 @@ class FolderBridgeLauncher:
                 self._refresh_status_cards()
             elif kind == "started":
                 self._last_exit_reported = None
-                self._set_connection_state("running", int(payload))
-                self._log(f"Tunnel 已启动（PID {payload}）。保持本窗口打开即可使用。")
+                self._set_connection_state("unknown", int(payload))
+                self._log(f"Tunnel 已启动（PID {payload}）。进程存活不等于端到端健康；正在等待结构化健康证据。")
             elif kind == "stopped":
+                self._active_secret = ""
+                self.api_key_var.set("")
                 self._set_connection_state("stopped")
                 self._log(f"连接已停止（退出码 {payload}）。")
             elif kind == "error":
@@ -2653,7 +2662,7 @@ class FolderBridgeLauncher:
             elif kind == "shutdown-error":
                 self._shutdown_in_progress = False
                 self.exit_button.configure(state="normal")
-                if not self.supervisor.running():
+                if not self.supervisor.desired_running():
                     self.start_button.configure(state="normal")
                 self._show_error(str(payload))
             elif kind == "shutdown-complete":
@@ -2664,31 +2673,113 @@ class FolderBridgeLauncher:
     def _poll_process(self) -> None:
         if self._closing:
             return
-        process = self.supervisor.process
-        if process is not None:
-            code = process.poll()
-            if code is not None and self._last_exit_reported is None and self._connection_state == "running":
-                self._last_exit_reported = code
-                self.flight_recorder.record("tunnel.unexpected_exit", severity="error", exit_code=code, pid=process.pid)
+        recovery = self.supervisor.reconcile()
+        if recovery is not None:
+            state = str(recovery.get("state") or "")
+            if state == "scheduled":
+                code = recovery.get("exit_code")
+                previous_pid = recovery.get("previous_pid")
+                attempt = recovery.get("attempt")
+                delay = recovery.get("delay_seconds")
+                self._last_exit_reported = int(code) if isinstance(code, int) else 0
+                self.flight_recorder.record(
+                    "tunnel.unexpected_exit",
+                    severity="error",
+                    exit_code=code,
+                    pid=previous_pid,
+                )
+                self._set_connection_state("recovering")
+                self._log(
+                    f"Tunnel 进程已退出（退出码 {code}）；将在 {delay} 秒后自动恢复"
+                    f"（第 {attempt}/5 次）。"
+                )
+            elif state == "blocked":
+                code = recovery.get("exit_code")
+                proof = recovery.get("quiescence_proof")
+                block_reason = recovery.get("block_reason")
                 self._set_connection_state("error")
-                self._log(f"Tunnel 进程意外退出（退出码 {code}）。请运行诊断。")
+                if block_reason == "automatic-recovery-disabled":
+                    self._log(
+                        f"Tunnel 进程已退出（退出码 {code}）。当前安全策略不启用自动恢复；"
+                        "为避免双 MCP 代际或重复执行，已转为人工诊断/重连。"
+                        "上一代进行中请求的完成状态可能不确定。"
+                    )
+                else:
+                    self._log(
+                        f"Tunnel 进程已退出（退出码 {code}），但上一 MCP 代际无法证明已完全结束"
+                        f"（{proof}）；为避免双代际或重复执行，已阻止自动恢复。"
+                        "上一代进行中请求的完成状态可能不确定；请运行诊断后手动重连。"
+                    )
+            elif state == "restart_failed":
+                attempt = recovery.get("attempt")
+                delay = recovery.get("delay_seconds")
+                self._set_connection_state("recovering")
+                self._log(f"Tunnel 自动恢复启动失败；{delay} 秒后继续尝试（已尝试 {attempt}/5 次）。")
+            elif state == "restarted":
+                pid = recovery.get("pid")
+                attempt = recovery.get("attempt")
+                self._last_exit_reported = None
+                self._set_connection_state("unknown", int(pid) if isinstance(pid, int) else None)
+                self._log(
+                    f"Tunnel 已自动恢复（PID {pid}，第 {attempt}/5 次）；新代际健康状态重新从未知开始。FolderBridge 未主动重放请求，"
+                    "但上一 MCP 代际进行中请求的远端完成状态可能不确定；旧代际本地 Jobs 不会自动恢复。"
+                )
+            elif state == "stable":
+                self._log("Tunnel 自动恢复后已稳定运行 60 秒；恢复预算已复位。")
+            elif state == "exhausted":
+                code = recovery.get("exit_code")
+                self._active_secret = ""
+                self.api_key_var.set("")
+                self._set_connection_state("error")
+                self._log(f"Tunnel 连续自动恢复已耗尽（最后退出码 {code}）。请运行诊断后手动重连。")
+        if recovery is None and self.supervisor.desired_running():
+            health = self.supervisor.health_snapshot()
+            health_state = {
+                "healthy": "running",
+                "ready_not_exercised": "ready_not_exercised",
+                "degraded": "degraded",
+                "unknown": "unknown",
+            }.get(health.summary, "unknown")
+            self._set_connection_state(health_state, self._connection_pid)
         self.root.after(500, self._poll_process)
 
     def _set_connection_state(self, state: str, pid: int | None = None) -> None:
         self._connection_state = state
         self._connection_pid = pid
-        colors = {"stopped": "#98a2b3", "starting": "#f59e0b", "running": "#16a34a", "error": "#dc2626"}
-        labels = {"stopped": "已停止", "starting": "启动中", "running": "运行中", "error": "异常"}
+        colors = {
+            "stopped": "#98a2b3",
+            "starting": "#f59e0b",
+            "unknown": "#f59e0b",
+            "ready_not_exercised": "#f59e0b",
+            "running": "#16a34a",
+            "recovering": "#f59e0b",
+            "degraded": "#dc2626",
+            "error": "#dc2626",
+        }
+        labels = {
+            "stopped": "已停止",
+            "starting": "启动中",
+            "unknown": "运行中 · 健康未知",
+            "ready_not_exercised": "就绪 · 未验证端到端",
+            "running": "端到端健康",
+            "recovering": "恢复中",
+            "degraded": "运行中 · 健康降级",
+            "error": "异常",
+        }
         details = {
             "stopped": "点击启动后建立出站连接",
             "starting": "正在配置并执行官方诊断…",
-            "running": f"官方 doctor 已通过 · 进程 PID {pid}" if pid else "官方 doctor 已通过 · 进程正在运行",
+            "unknown": f"Tunnel 进程 PID {pid} · 尚无端到端健康证明" if pid else "Tunnel 进程正在运行 · 尚无端到端健康证明",
+            "ready_not_exercised": f"MCP 子进程已就绪 · PID {pid} · 端到端数据面尚未验证" if pid else "MCP 子进程已就绪 · 端到端数据面尚未验证",
+            "running": f"端到端健康已由权威信号验证 · PID {pid}" if pid else "端到端健康已由权威信号验证",
+            "recovering": "Tunnel 进程已退出 · 正在有界自动恢复",
+            "degraded": "结构化健康信号异常 · 请查看日志并运行诊断",
             "error": "请查看日志并运行诊断",
         }
         self.status_dot.itemconfigure(self.status_dot_id, fill=colors[state])
         self.connection_text.set(labels[state])
         self.connection_detail.set(details[state])
-        if state == "running":
+        if state in {"unknown", "ready_not_exercised", "running", "recovering", "degraded"}:
             self._set_widget_text(self.start_button, "停止连接")
             self.start_button.configure(bg="#dc2626", activebackground="#b91c1c", state="normal")
             self._set_form_state(False)
@@ -2701,15 +2792,15 @@ class FolderBridgeLauncher:
 
     def _set_busy(self, busy: bool, *, allow_stop: bool = True) -> None:
         self._busy = busy
-        enabled = not busy and not self.supervisor.running()
+        enabled = not busy and not self.supervisor.desired_running()
         for widget in (self.apply_button, self.doctor_button, self.copy_button):
             widget.configure(state="normal" if enabled else "disabled")
         self.guide_button.configure(state="normal")
         if busy:
-            can_stop = allow_stop and self.supervisor.running()
+            can_stop = allow_stop and self.supervisor.desired_running()
             self.start_button.configure(state="normal" if can_stop else "disabled")
             self._set_form_state(False)
-        elif self.supervisor.running():
+        elif self.supervisor.desired_running():
             self.start_button.configure(state="normal")
             self._set_form_state(False)
         else:
@@ -2806,11 +2897,11 @@ class FolderBridgeLauncher:
                 )
                 return
             try:
-                if self.supervisor.running():
-                    self._queue_event("log", "托管插件服务已处理完毕，正在关闭 Tunnel/MCP 进程树…")
+                if self.supervisor.desired_running():
+                    self._queue_event("log", "托管插件服务已处理完毕，正在关闭 Tunnel/MCP 进程树并取消自动恢复…")
                     self.supervisor.stop()
-                if self.supervisor.running():
-                    raise RuntimeError("Tunnel/MCP 进程树仍在运行")
+                if self.supervisor.running() or self.supervisor.desired_running():
+                    raise RuntimeError("Tunnel/MCP 连接或自动恢复仍在运行")
             except Exception as exc:
                 self._queue_event(
                     "shutdown-error",

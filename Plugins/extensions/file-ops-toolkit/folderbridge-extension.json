@@ -1,0 +1,159 @@
+{
+  "schema_version": 2,
+  "runtime_abi": 1,
+  "id": "file-ops-toolkit",
+  "name": "File Ops Toolkit",
+  "version": "0.1.0",
+  "description": "Workspace-confined regular-file copy and move operations with exact source/destination mutation claims, binary streaming, SHA guards, no-clobber defaults, atomic publish/replace, and symlink/reparse-point denial.",
+  "entrypoint": "plugin.py",
+  "permissions": [
+    "workspace.read",
+    "workspace.write"
+  ],
+  "execution": {
+    "mode": "isolated-process",
+    "timeout_seconds": 0
+  },
+  "workspace_adapter": {
+    "mode": "none",
+    "state": "none"
+  },
+  "actions": {
+    "copy-file": {
+      "read_only": false,
+      "requires_workspace": true,
+      "authorization": "global",
+      "run_mode": "foreground",
+      "timeout_seconds": 0,
+      "mutation_scope": {
+        "mode": "paths",
+        "claims": [
+          {
+            "param": "source_path",
+            "kind": "exact"
+          },
+          {
+            "param": "destination_path",
+            "kind": "exact"
+          }
+        ]
+      },
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "source_path": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1024
+          },
+          "destination_path": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1024
+          },
+          "expected_source_sha256": {
+            "type": "string",
+            "minLength": 64,
+            "maxLength": 64
+          },
+          "overwrite": {
+            "type": "boolean",
+            "default": false
+          },
+          "expected_destination_sha256": {
+            "type": "string",
+            "minLength": 64,
+            "maxLength": 64
+          },
+          "create_parents": {
+            "type": "boolean",
+            "default": false
+          },
+          "max_bytes": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 68719476736,
+            "default": 8589934592
+          }
+        },
+        "required": [
+          "source_path",
+          "destination_path"
+        ],
+        "additionalProperties": false
+      },
+      "effect_contract": {
+        "effect_semantics": "guarded_replay_safe",
+        "lifetime": "foreground"
+      }
+    },
+    "move-file": {
+      "read_only": false,
+      "requires_workspace": true,
+      "authorization": "global",
+      "run_mode": "foreground",
+      "timeout_seconds": 0,
+      "mutation_scope": {
+        "mode": "paths",
+        "claims": [
+          {
+            "param": "source_path",
+            "kind": "exact"
+          },
+          {
+            "param": "destination_path",
+            "kind": "exact"
+          }
+        ]
+      },
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "source_path": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1024
+          },
+          "destination_path": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1024
+          },
+          "expected_source_sha256": {
+            "type": "string",
+            "minLength": 64,
+            "maxLength": 64
+          },
+          "overwrite": {
+            "type": "boolean",
+            "default": false
+          },
+          "expected_destination_sha256": {
+            "type": "string",
+            "minLength": 64,
+            "maxLength": 64
+          },
+          "create_parents": {
+            "type": "boolean",
+            "default": false
+          },
+          "max_bytes": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 68719476736,
+            "default": 8589934592
+          }
+        },
+        "required": [
+          "source_path",
+          "destination_path"
+        ],
+        "additionalProperties": false
+      },
+      "effect_contract": {
+        "effect_semantics": "guarded_replay_safe",
+        "lifetime": "foreground"
+      }
+    }
+  }
+}

@@ -10,6 +10,7 @@ from typing import BinaryIO, Callable
 
 from .config import Task
 from .process_control import (
+    JOB_STATUS_POLL_HINT_SECONDS,
     TRANSPORT_RESPONSE_BUDGET_SECONDS,
     owned_process_group_kwargs,
     terminate_owned_process_tree,
@@ -367,6 +368,7 @@ class TaskJobManager:
                 "worker_pid": getattr(job.process, "pid", None),
                 "auto_promoted": True,
                 "promoted_after_seconds": max(0.0, time.monotonic() - started_monotonic),
+                "poll_after_seconds": JOB_STATUS_POLL_HINT_SECONDS,
             }
 
         self._remove_inline(inline_token)
@@ -479,6 +481,8 @@ class TaskJobManager:
                 "finished_at": job.finished_at,
                 "runtime_health": self._runtime_health(job),
             }
+            if job.status in ACTIVE_TASK_JOB_STATUSES:
+                payload["poll_after_seconds"] = JOB_STATUS_POLL_HINT_SECONDS
             if job.result is not None:
                 payload["result"] = job.result
             return payload

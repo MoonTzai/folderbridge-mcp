@@ -47,9 +47,38 @@ def redact_flight_text(value: str) -> str:
 
 def classify_tunnel_output(text: str) -> str | None:
     value = str(text or "")
-    if _TUNNEL_ERROR_RE.search(value):
+    structured_severity: str | None = None
+    unstructured: list[str] = []
+    for raw_line in value.splitlines() or [value]:
+        line = raw_line.strip()
+        if not line:
+            continue
+        try:
+            payload = json.loads(line)
+        except (json.JSONDecodeError, TypeError, ValueError):
+            unstructured.append(line)
+            continue
+        if not isinstance(payload, dict):
+            unstructured.append(line)
+            continue
+        level = str(payload.get("level") or "").strip().upper()
+        if level in {"ERROR", "FATAL", "PANIC"}:
+            structured_severity = "error"
+        elif level in {"WARN", "WARNING"} and structured_severity != "error":
+            structured_severity = "warning"
+        elif level not in {"INFO", "DEBUG", "TRACE"}:
+            # Unknown structured records still get the conservative legacy
+            # text classifier instead of being silently ignored.
+            unstructured.append(line)
+
+    fallback = "\n".join(unstructured)
+    if fallback and _TUNNEL_ERROR_RE.search(fallback):
         return "error"
-    if _TUNNEL_WARNING_RE.search(value):
+    if structured_severity == "error":
+        return "error"
+    if structured_severity == "warning":
+        return "warning"
+    if fallback and _TUNNEL_WARNING_RE.search(fallback):
         return "warning"
     return None
 

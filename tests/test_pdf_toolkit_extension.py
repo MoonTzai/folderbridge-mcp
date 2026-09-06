@@ -18,9 +18,10 @@ SPEC.loader.exec_module(plugin)
 
 
 class PdfToolkitManifestTests(unittest.TestCase):
-    def test_manifest_is_external_v1_and_has_bounded_actions(self):
+    def test_manifest_is_schema_v2_metadata_on_runtime_abi1_and_has_bounded_actions(self):
         manifest = json.loads((PLUGIN_ROOT / "folderbridge-extension.json").read_text(encoding="utf-8"))
-        self.assertEqual(manifest["schema_version"], 1)
+        self.assertEqual(manifest["schema_version"], 2)
+        self.assertEqual(manifest["runtime_abi"], 1)
         self.assertEqual(manifest["id"], "pdf-toolkit")
         self.assertEqual(manifest["version"], "0.6.0")
         self.assertEqual(

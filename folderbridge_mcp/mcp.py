@@ -4,7 +4,7 @@ import json
 import sys
 import threading
 import time
-from typing import Any, BinaryIO
+from typing import Any, BinaryIO, Callable
 
 from .concurrency import (
     CONTROL_MAX_INFLIGHT,
@@ -23,12 +23,84 @@ LEGACY_VERSIONS = ("2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05")
 MODERN_VERSION = "2026-07-28"
 PROTOCOL_META = "io.modelcontextprotocol/protocolVersion"
 SERVER_META = "io.modelcontextprotocol/serverInfo"
+RECOVERY_CONTROL_ONLY_CODE = -32024
+
+
+class McpRequestScheduler:
+    """Transport-neutral bounded MCP request scheduler."""
+
+    def __init__(
+        self,
+        dispatch,
+        *,
+        control_workers: int = CONTROL_WORKERS,
+        control_max_inflight: int = CONTROL_MAX_INFLIGHT,
+        data_workers: int = DATA_WORKERS,
+        data_max_inflight: int = DATA_MAX_INFLIGHT,
+    ) -> None:
+        if not callable(dispatch):
+            raise TypeError("dispatch must be callable")
+        self._dispatch = dispatch
+        self._control = BoundedExecutorLane(
+            workers=control_workers,
+            max_inflight=control_max_inflight,
+            thread_name_prefix="folderbridge-control",
+        )
+        self._data = BoundedExecutorLane(
+            workers=data_workers,
+            max_inflight=data_max_inflight,
+            thread_name_prefix="folderbridge-data",
+        )
+        self._close_lock = threading.Lock()
+        self._closed = False
+
+    def submit(self, request: Any, operation) -> bool:
+        if not callable(operation):
+            raise TypeError("operation must be callable")
+        lane = self._control if _request_lane(request) == "control" else self._data
+        return lane.submit(operation)
+
+    def dispatch_sync(self, request: Any) -> dict[str, Any] | None:
+        completed = threading.Event()
+        holder: dict[str, Any] = {}
+
+        def run() -> None:
+            try:
+                holder["response"] = self._dispatch(request)
+            except Exception:
+                request_id = request.get("id") if isinstance(request, dict) else None
+                holder["response"] = _rpc_error(request_id, -32603, "Internal error")
+            finally:
+                completed.set()
+
+        if not self.submit(request, run):
+            request_id = request.get("id") if isinstance(request, dict) else None
+            return _rpc_error(request_id, SERVER_BUSY_CODE, "Server busy")
+        completed.wait()
+        return holder.get("response")
+
+    def close(self) -> None:
+        with self._close_lock:
+            if self._closed:
+                return
+            self._closed = True
+        self._control.close()
+        self._data.close()
 
 
 class McpServer:
-    def __init__(self, runtime: ToolRuntime, *, flight_recorder: FlightRecorder | None = None) -> None:
+    def __init__(
+        self,
+        runtime: ToolRuntime,
+        *,
+        flight_recorder: FlightRecorder | None = None,
+        request_admission: Callable[[dict[str, Any]], bool] | None = None,
+    ) -> None:
+        if request_admission is not None and not callable(request_admission):
+            raise TypeError("request_admission must be callable when supplied")
         self.runtime = runtime
         self.flight_recorder = flight_recorder or getattr(runtime, "flight_recorder", None)
+        self._request_admission = request_admission
         self._write_lock = threading.Lock()
 
     def _record(self, event: str, *, severity: str = "info", text: str | None = None, **fields: Any) -> None:
@@ -62,6 +134,18 @@ class McpServer:
                 return None
         elif method == "tools/call" and request_id is None:
             return _rpc_error(None, -32600, "tools/call requires a non-null request id")
+        admission = self._request_admission
+        if admission is not None:
+            try:
+                allowed = bool(admission(request))
+            except Exception:
+                return None if notification else _rpc_error(request_id, -32603, "Recovery admission check failed")
+            if not allowed:
+                return None if notification else _rpc_error(
+                    request_id,
+                    RECOVERY_CONTROL_ONLY_CODE,
+                    "Runtime is recovery-control only",
+                )
         modern = _is_modern(params)
         try:
             result = self._handle(method, params, modern=modern)
@@ -113,16 +197,7 @@ class McpServer:
     def serve(self, source: BinaryIO | None = None, destination: BinaryIO | None = None) -> None:
         source = source or sys.stdin.buffer
         destination = destination or sys.stdout.buffer
-        control = BoundedExecutorLane(
-            workers=CONTROL_WORKERS,
-            max_inflight=CONTROL_MAX_INFLIGHT,
-            thread_name_prefix="folderbridge-control",
-        )
-        data = BoundedExecutorLane(
-            workers=DATA_WORKERS,
-            max_inflight=DATA_MAX_INFLIGHT,
-            thread_name_prefix="folderbridge-data",
-        )
+        scheduler = McpRequestScheduler(self.dispatch)
         try:
             while True:
                 try:
@@ -146,18 +221,18 @@ class McpServer:
                     self._write(destination, _rpc_error(None, -32700, "Parse error"))
                     continue
                 lane_name = _request_lane(request)
-                lane = control if lane_name == "control" else data
                 observation = _request_observation(request)
                 enqueued_at = time.monotonic()
                 self._record("mcp.request", lane=lane_name, request_bytes=len(line), **observation)
-                if not lane.submit(
+                if not scheduler.submit(
+                    request,
                     lambda request=request, enqueued_at=enqueued_at, lane_name=lane_name, observation=observation: self._dispatch_and_write(
                         request,
                         destination,
                         enqueued_at=enqueued_at,
                         lane_name=lane_name,
                         observation=observation,
-                    )
+                    ),
                 ):
                     self._record("mcp.busy", severity="warning", lane=lane_name, **observation)
                     if isinstance(request, dict) and "id" in request:
@@ -169,8 +244,7 @@ class McpServer:
                 if callable(begin_shutdown):
                     begin_shutdown()
             finally:
-                control.close()
-                data.close()
+                scheduler.close()
                 close_runtime = getattr(self.runtime, "close", None)
                 if callable(close_runtime):
                     close_runtime()

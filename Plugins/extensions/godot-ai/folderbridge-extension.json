@@ -1,5 +1,6 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
+  "runtime_abi": 1,
   "id": "godot-ai",
   "name": "Godot AI Local Bridge",
   "version": "0.1.0",
@@ -35,6 +36,10 @@
         "type": "object",
         "properties": {},
         "additionalProperties": false
+      },
+      "effect_contract": {
+        "effect_semantics": "read_only",
+        "lifetime": "foreground"
       }
     },
     "inspect-editor": {
@@ -45,6 +50,10 @@
         "type": "object",
         "properties": {},
         "additionalProperties": false
+      },
+      "effect_contract": {
+        "effect_semantics": "read_only",
+        "lifetime": "foreground"
       }
     },
     "inspect-scene": {
@@ -54,11 +63,30 @@
       "input_schema": {
         "type": "object",
         "properties": {
-          "depth": {"type": "integer", "minimum": 1, "maximum": 32, "default": 10},
-          "offset": {"type": "integer", "minimum": 0, "maximum": 10000, "default": 0},
-          "limit": {"type": "integer", "minimum": 1, "maximum": 500, "default": 100}
+          "depth": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 32,
+            "default": 10
+          },
+          "offset": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 10000,
+            "default": 0
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 500,
+            "default": 100
+          }
         },
         "additionalProperties": false
+      },
+      "effect_contract": {
+        "effect_semantics": "read_only",
+        "lifetime": "foreground"
       }
     },
     "inspect-node": {
@@ -68,11 +96,29 @@
       "input_schema": {
         "type": "object",
         "properties": {
-          "path": {"type": "string", "minLength": 1, "maxLength": 1024},
-          "fields": {"type": "array", "maxItems": 64, "items": {"type": "string", "minLength": 1, "maxLength": 128}}
+          "path": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1024
+          },
+          "fields": {
+            "type": "array",
+            "maxItems": 64,
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            }
+          }
         },
-        "required": ["path"],
+        "required": [
+          "path"
+        ],
         "additionalProperties": false
+      },
+      "effect_contract": {
+        "effect_semantics": "read_only",
+        "lifetime": "foreground"
       }
     },
     "read-logs": {
@@ -82,12 +128,38 @@
       "input_schema": {
         "type": "object",
         "properties": {
-          "source": {"type": "string", "enum": ["plugin", "editor", "game", "all"], "default": "all"},
-          "count": {"type": "integer", "minimum": 1, "maximum": 200, "default": 50},
-          "offset": {"type": "integer", "minimum": 0, "maximum": 10000, "default": 0},
-          "include_details": {"type": "boolean", "default": true}
+          "source": {
+            "type": "string",
+            "enum": [
+              "plugin",
+              "editor",
+              "game",
+              "all"
+            ],
+            "default": "all"
+          },
+          "count": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 200,
+            "default": 50
+          },
+          "offset": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 10000,
+            "default": 0
+          },
+          "include_details": {
+            "type": "boolean",
+            "default": true
+          }
         },
         "additionalProperties": false
+      },
+      "effect_contract": {
+        "effect_semantics": "read_only",
+        "lifetime": "foreground"
       }
     },
     "screenshot": {
@@ -98,11 +170,33 @@
       "input_schema": {
         "type": "object",
         "properties": {
-          "source": {"type": "string", "enum": ["viewport", "viewport_2d", "cinematic", "game"], "default": "viewport_2d"},
-          "max_resolution": {"type": "integer", "minimum": 128, "maximum": 1920, "default": 640},
-          "user_prompt": {"type": "string", "maxLength": 1000, "default": ""}
+          "source": {
+            "type": "string",
+            "enum": [
+              "viewport",
+              "viewport_2d",
+              "cinematic",
+              "game"
+            ],
+            "default": "viewport_2d"
+          },
+          "max_resolution": {
+            "type": "integer",
+            "minimum": 128,
+            "maximum": 1920,
+            "default": 640
+          },
+          "user_prompt": {
+            "type": "string",
+            "maxLength": 1000,
+            "default": ""
+          }
         },
         "additionalProperties": false
+      },
+      "effect_contract": {
+        "effect_semantics": "read_only",
+        "lifetime": "foreground"
       }
     },
     "open-scene": {
@@ -112,11 +206,24 @@
       "input_schema": {
         "type": "object",
         "properties": {
-          "path": {"type": "string", "minLength": 1, "maxLength": 1024},
-          "force_reload": {"type": "boolean", "default": false}
+          "path": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1024
+          },
+          "force_reload": {
+            "type": "boolean",
+            "default": false
+          }
         },
-        "required": ["path"],
+        "required": [
+          "path"
+        ],
         "additionalProperties": false
+      },
+      "effect_contract": {
+        "effect_semantics": "external_effect",
+        "lifetime": "foreground"
       }
     },
     "save-scene": {
@@ -127,6 +234,10 @@
         "type": "object",
         "properties": {},
         "additionalProperties": false
+      },
+      "effect_contract": {
+        "effect_semantics": "external_effect",
+        "lifetime": "foreground"
       }
     },
     "create-node": {
@@ -136,13 +247,36 @@
       "input_schema": {
         "type": "object",
         "properties": {
-          "type": {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"},
-          "name": {"type": "string", "maxLength": 128, "default": ""},
-          "parent_path": {"type": "string", "maxLength": 1024, "default": ""},
-          "scene_file": {"type": "string", "maxLength": 1024, "default": ""}
+          "type": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128,
+            "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"
+          },
+          "name": {
+            "type": "string",
+            "maxLength": 128,
+            "default": ""
+          },
+          "parent_path": {
+            "type": "string",
+            "maxLength": 1024,
+            "default": ""
+          },
+          "scene_file": {
+            "type": "string",
+            "maxLength": 1024,
+            "default": ""
+          }
         },
-        "required": ["type"],
+        "required": [
+          "type"
+        ],
         "additionalProperties": false
+      },
+      "effect_contract": {
+        "effect_semantics": "external_effect",
+        "lifetime": "foreground"
       }
     },
     "set-node-property": {
@@ -152,13 +286,33 @@
       "input_schema": {
         "type": "object",
         "properties": {
-          "path": {"type": "string", "minLength": 1, "maxLength": 1024},
-          "property": {"type": "string", "minLength": 1, "maxLength": 256},
+          "path": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1024
+          },
+          "property": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256
+          },
           "value": {},
-          "scene_file": {"type": "string", "maxLength": 1024, "default": ""}
+          "scene_file": {
+            "type": "string",
+            "maxLength": 1024,
+            "default": ""
+          }
         },
-        "required": ["path", "property", "value"],
+        "required": [
+          "path",
+          "property",
+          "value"
+        ],
         "additionalProperties": false
+      },
+      "effect_contract": {
+        "effect_semantics": "external_effect",
+        "lifetime": "foreground"
       }
     },
     "delete-node": {
@@ -168,11 +322,25 @@
       "input_schema": {
         "type": "object",
         "properties": {
-          "path": {"type": "string", "minLength": 1, "maxLength": 1024},
-          "scene_file": {"type": "string", "maxLength": 1024, "default": ""}
+          "path": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1024
+          },
+          "scene_file": {
+            "type": "string",
+            "maxLength": 1024,
+            "default": ""
+          }
         },
-        "required": ["path"],
+        "required": [
+          "path"
+        ],
         "additionalProperties": false
+      },
+      "effect_contract": {
+        "effect_semantics": "external_effect",
+        "lifetime": "foreground"
       }
     },
     "run-project": {
@@ -183,11 +351,30 @@
       "input_schema": {
         "type": "object",
         "properties": {
-          "mode": {"type": "string", "enum": ["main", "current", "custom"], "default": "main"},
-          "scene": {"type": "string", "maxLength": 1024, "default": ""},
-          "autosave": {"type": "boolean", "default": true}
+          "mode": {
+            "type": "string",
+            "enum": [
+              "main",
+              "current",
+              "custom"
+            ],
+            "default": "main"
+          },
+          "scene": {
+            "type": "string",
+            "maxLength": 1024,
+            "default": ""
+          },
+          "autosave": {
+            "type": "boolean",
+            "default": true
+          }
         },
         "additionalProperties": false
+      },
+      "effect_contract": {
+        "effect_semantics": "external_effect",
+        "lifetime": "managed_service"
       }
     },
     "stop-project": {
@@ -198,6 +385,10 @@
         "type": "object",
         "properties": {},
         "additionalProperties": false
+      },
+      "effect_contract": {
+        "effect_semantics": "external_effect",
+        "lifetime": "managed_service"
       }
     },
     "inspect-runtime-tree": {
@@ -207,10 +398,23 @@
       "input_schema": {
         "type": "object",
         "properties": {
-          "depth": {"type": "integer", "minimum": 1, "maximum": 32, "default": 10},
-          "root_path": {"type": "string", "maxLength": 1024, "default": ""}
+          "depth": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 32,
+            "default": 10
+          },
+          "root_path": {
+            "type": "string",
+            "maxLength": 1024,
+            "default": ""
+          }
         },
         "additionalProperties": false
+      },
+      "effect_contract": {
+        "effect_semantics": "read_only",
+        "lifetime": "foreground"
       }
     },
     "send-action": {
@@ -220,12 +424,30 @@
       "input_schema": {
         "type": "object",
         "properties": {
-          "action": {"type": "string", "minLength": 1, "maxLength": 128},
-          "pressed": {"type": "boolean", "default": true},
-          "strength": {"type": "number", "minimum": 0.0, "maximum": 1.0, "default": 1.0}
+          "action": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          },
+          "pressed": {
+            "type": "boolean",
+            "default": true
+          },
+          "strength": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1,
+            "default": 1
+          }
         },
-        "required": ["action"],
+        "required": [
+          "action"
+        ],
         "additionalProperties": false
+      },
+      "effect_contract": {
+        "effect_semantics": "external_effect",
+        "lifetime": "foreground"
       }
     }
   }

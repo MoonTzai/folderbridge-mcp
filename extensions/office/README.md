@@ -24,7 +24,7 @@ The native `render` action is write-capable and therefore requires one-time glob
 - PowerShell execution is restricted to the bundled `office.ps1`, `word_export.ps1`, and `pdf_render.ps1`; no user-supplied command/script/URL parameter exists and subprocess execution uses `shell=False`.
 - Word rendering snapshots the pre-existing `WINWORD.EXE` PID set before COM startup, requires exactly one new Word process for ownership, opens a verified OS process handle to that instance, and reaps only that owned instance on completion, cancellation, or timeout. Existing user Word processes are never targeted by name-wide termination.
 - Intermediate PDFs are stored under the per-user FolderBridge extension state directory, not in the workspace, and are removed after the run.
-- Final PNGs and optional ZIP are written only beneath the explicitly selected workspace.
+- Final PNGs are written only under `output_dir`. With `make_zip=true`, the default archive is `output_dir/render.zip`; an explicit workspace-relative `.zip` `archive_path` may preserve the historical sibling location. ZIP staging always stays inside the claimed `output_dir` tree and archives only the validated generated PNG manifest.
 
 ## Typical calls
 
@@ -55,7 +55,7 @@ Read a bounded Excel region while preserving formulas:
 }
 ```
 
-Render slides/pages/worksheet print pages and create a sibling ZIP:
+Render slides/pages/worksheet print pages and create the default ZIP inside the output tree:
 
 ```json
 {
@@ -72,6 +72,10 @@ Render slides/pages/worksheet print pages and create a sibling ZIP:
 }
 ```
 
-For Excel, optional `sheets` is an array of exact worksheet names. `page_start`/`page_end` then apply independently to each selected worksheet's native print-page PDF. If omitted, every worksheet is exported.
+For Excel, optional `sheets` is an array of exact worksheet names. `page_start`/`page_end` then apply independently to each selected worksheet's native print-page PDF. If omitted, every worksheet is exported. To preserve the historical sibling ZIP location, set e.g. `"archive_path": "renders/example.zip"`; `archive_path` is valid only with `make_zip=true`.
+
+The render action declares `tree(output_dir) + optional exact(archive_path)` mutation claims. Therefore disjoint output trees in the same workspace, including PowerPoint + Excel, are eligible for real parallel execution. Same-application serialization is not imposed by default; packaged/runtime stress decides whether a specific Office application requires a per-Runtime/per-application semaphore. FolderBridge intentionally does not introduce a global Office scheduler.
+
+When callers start multiple renders with `Promise.all`, JavaScript `Promise.all` is fail-fast at the caller: the aggregate promise rejects as soon as one input rejects. That rejection does **not** cancel or transfer ownership of already-started sibling FolderBridge Jobs. Those sibling Jobs remain host-owned and continue to a normal terminal state unless the caller explicitly cancels their returned `job_id`.
 
 The `render` invocation first returns a Job record. Poll `extension(action="job_status", job_id="...")`; when the Job succeeds, its result includes source SHA-256, rendered PNG paths/sizes/SHA-256 values, selected range metadata, and the optional ZIP path/size/SHA-256. Use FolderBridge `image_open` to inspect individual generated PNGs, including PNG members inside the ZIP.

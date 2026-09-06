@@ -4,12 +4,14 @@ import hashlib
 import json
 import os
 import re
+import secrets
 import shutil
 import stat
 import subprocess
 import sys
 import tempfile
 import threading
+import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import BinaryIO, Callable, Iterable
@@ -18,7 +20,18 @@ from . import __version__
 from .capabilities import CAPABILITY_NAMES, normalize_capability_names
 from .config import ConfigError, MAX_WORKSPACES, canonical_workspaces, config_is_trusted, load_config
 from .flight_recorder import FlightRecorder
-from .process_control import owned_process_group_kwargs, terminate_owned_process_tree
+from .process_control import (
+    ProcessGenerationQuiescence,
+    owned_process_group_kwargs,
+    prove_owned_process_generation_quiescent,
+    terminate_owned_process_tree,
+)
+from .tunnel_health import (
+    TunnelAdminHealthMonitor,
+    TunnelAdminSnapshot,
+    TunnelHealthSnapshot,
+    evaluate_tunnel_health,
+)
 from .user_paths import user_config_root
 
 
@@ -390,6 +403,22 @@ def build_run_argv(executable: Path, profile: str) -> list[str]:
     return [str(executable), "run", "--profile", profile]
 
 
+def build_structured_admin_run_argv(
+    executable: Path,
+    profile: str,
+    health_url_file: Path,
+) -> list[str]:
+    """Build the v0.0.14+ normal-run admin argv without changing the legacy path."""
+
+    return [
+        *build_run_argv(executable, profile),
+        "--health.listen-addr",
+        "127.0.0.1:0",
+        "--health.url-file",
+        str(health_url_file),
+    ]
+
+
 def control_plane_environment(api_key: str) -> dict[str, str]:
     env = dict(os.environ)
     if getattr(sys, "frozen", False):
@@ -425,6 +454,22 @@ class CommandResult:
     output: str
     timed_out: bool
     truncated: bool
+
+
+@dataclass(frozen=True)
+class TunnelAdminCapability:
+    supported: bool
+    version: tuple[int, int, int] | None
+    version_text: str
+    capabilities: tuple[str, ...]
+    reason: str
+
+
+@dataclass(frozen=True)
+class TunnelRunPlan:
+    argv: list[str]
+    health_url_file: Path | None
+    admin_capability: TunnelAdminCapability
 
 
 class _BoundedCommandReader(threading.Thread):
@@ -506,18 +551,148 @@ def run_short_command(
     )
 
 
+_TUNNEL_VERSION_RE = re.compile(r"(?<!\d)(\d+)\.(\d+)\.(\d+)(?!\d)")
+_STRUCTURED_ADMIN_FLAGS = ("--health.listen-addr", "--health.url-file")
+
+
+def probe_tunnel_admin_capability(
+    executable: Path,
+    *,
+    env: dict[str, str],
+) -> TunnelAdminCapability:
+    """Fail closed unless both v0.0.14+ and the exact normal-run flags are declared."""
+
+    probe_env = dict(env)
+    probe_env.pop("CONTROL_PLANE_API_KEY", None)
+    version_result = run_short_command(
+        [str(executable), "--version"],
+        env=probe_env,
+        timeout_seconds=8,
+    )
+    version_text = version_result.output.strip()
+    if version_result.timed_out or version_result.exit_code != 0 or version_result.truncated:
+        return TunnelAdminCapability(False, None, version_text, (), "version-probe-failed")
+    match = _TUNNEL_VERSION_RE.search(version_text)
+    if match is None:
+        return TunnelAdminCapability(False, None, version_text, (), "version-unrecognized")
+    version = tuple(int(value) for value in match.groups())
+    if version < (0, 0, 14):
+        return TunnelAdminCapability(False, version, version_text, (), "version-too-old")
+
+    help_result = run_short_command(
+        [str(executable), "run", "--help"],
+        env=probe_env,
+        timeout_seconds=8,
+    )
+    if help_result.timed_out or help_result.exit_code != 0 or help_result.truncated:
+        return TunnelAdminCapability(False, version, version_text, (), "run-help-probe-failed")
+    missing = tuple(flag for flag in _STRUCTURED_ADMIN_FLAGS if flag not in help_result.output)
+    if missing:
+        return TunnelAdminCapability(
+            False,
+            version,
+            version_text,
+            (),
+            "missing-capability:" + ",".join(missing),
+        )
+    return TunnelAdminCapability(
+        True,
+        version,
+        version_text,
+        tuple(flag.removeprefix("--") for flag in _STRUCTURED_ADMIN_FLAGS),
+        "supported",
+    )
+
+
+def _allocate_tunnel_health_url_file(config_root: Path | None = None) -> Path:
+    root = user_config_root() if config_root is None else Path(config_root).expanduser().resolve(strict=False)
+    health_root = root / "tunnel-health"
+    if health_root.is_symlink() or _is_reparse_point(health_root):
+        raise ValueError("tunnel health directory must not be a symlink or reparse point")
+    health_root.mkdir(parents=True, exist_ok=True)
+    try:
+        os.chmod(health_root, 0o700)
+    except OSError:
+        pass
+    if not health_root.is_dir() or health_root.is_symlink() or _is_reparse_point(health_root):
+        raise ValueError("tunnel health directory is not a private regular directory")
+    for _ in range(8):
+        candidate = health_root / f"generation-{secrets.token_hex(16)}.url"
+        if not candidate.exists() and not candidate.is_symlink():
+            return candidate
+    raise OSError("unable to allocate a unique tunnel health URL path")
+
+
+def prepare_tunnel_run(
+    executable: Path,
+    profile: str,
+    *,
+    env: dict[str, str],
+    config_root: Path | None = None,
+) -> TunnelRunPlan:
+    capability = probe_tunnel_admin_capability(executable, env=env)
+    if not capability.supported:
+        return TunnelRunPlan(build_run_argv(executable, profile), None, capability)
+    try:
+        health_url_file = _allocate_tunnel_health_url_file(config_root)
+    except (OSError, ValueError) as exc:
+        unavailable = TunnelAdminCapability(
+            False,
+            capability.version,
+            capability.version_text,
+            (),
+            f"health-url-path-unavailable:{type(exc).__name__}",
+        )
+        return TunnelRunPlan(build_run_argv(executable, profile), None, unavailable)
+    return TunnelRunPlan(
+        build_structured_admin_run_argv(executable, profile, health_url_file),
+        health_url_file,
+        capability,
+    )
+
+
+TUNNEL_RECOVERY_DELAYS = (0.5, 1.0, 2.0, 4.0, 8.0)
+TUNNEL_RECOVERY_STABLE_SECONDS = 60.0
+
+
 class TunnelSupervisor:
+    """Own the tunnel-client lifecycle without coupling transient Tunnel warnings to it.
+
+    The official tunnel-client owns the process-affine stdio MCP child.  This
+    supervisor therefore reacts only to a *real tunnel-client process exit*.
+    Poll/TLS/HTTP warning text is deliberately outside this state machine.
+    """
+
     def __init__(
         self,
         output_callback: Callable[[str], None],
         *,
         flight_recorder: FlightRecorder | None = None,
+        quiescence_probe: Callable[[object], ProcessGenerationQuiescence] | None = None,
     ) -> None:
         self._output_callback = output_callback
         self._flight_recorder = flight_recorder
+        # Production stays fail-closed/manual-reconnect until both old-generation
+        # quiescence and new-generation readiness can be verified end-to-end.
+        # The unverified recovery state machine is deliberately private and is
+        # enabled only by tests that exercise future ownership/readiness seams.
+        self._automatic_recovery = False
+        self._quiescence_probe = quiescence_probe or prove_owned_process_generation_quiescent
         self._process: subprocess.Popen[bytes] | None = None
         self._reader: threading.Thread | None = None
         self._lock = threading.Lock()
+        self._desired_running = False
+        self._launch_argv: tuple[str, ...] | None = None
+        self._launch_env: dict[str, str] | None = None
+        self._recovery_attempts = 0
+        self._next_recovery_at: float | None = None
+        self._last_observed_exit_pid: int | None = None
+        self._process_started_at: float | None = None
+        self._generation_counter = 0
+        self._generation_id: int | None = None
+        self._admin_health_snapshot: TunnelAdminSnapshot | None = None
+        self._admin_monitor: TunnelAdminHealthMonitor | None = None
+        self._end_to_end_health_state = "unknown"
 
     @property
     def process(self) -> subprocess.Popen[bytes] | None:
@@ -528,35 +703,146 @@ class TunnelSupervisor:
         process = self.process
         return process is not None and process.poll() is None
 
+    def desired_running(self) -> bool:
+        with self._lock:
+            return self._desired_running
+
+    def has_cached_launch_spec(self) -> bool:
+        with self._lock:
+            return self._launch_argv is not None and self._launch_env is not None
+
+    def current_generation_id(self) -> int | None:
+        with self._lock:
+            return self._generation_id
+
     def exit_code(self) -> int | None:
         process = self.process
         return process.poll() if process is not None else None
+
+    def reset_health_evidence(self) -> None:
+        with self._lock:
+            self._admin_health_snapshot = None
+            self._end_to_end_health_state = "unknown"
+
+    def update_admin_health(self, snapshot: TunnelAdminSnapshot) -> None:
+        if not isinstance(snapshot, TunnelAdminSnapshot):
+            raise TypeError("snapshot must be a TunnelAdminSnapshot")
+        with self._lock:
+            self._admin_health_snapshot = snapshot
+
+    def update_admin_health_for_generation(
+        self,
+        generation_id: int,
+        snapshot: TunnelAdminSnapshot,
+    ) -> bool:
+        if not isinstance(snapshot, TunnelAdminSnapshot):
+            raise TypeError("snapshot must be a TunnelAdminSnapshot")
+        with self._lock:
+            process = self._process
+            if (
+                generation_id != self._generation_id
+                or not self._desired_running
+                or process is None
+                or process.poll() is not None
+            ):
+                return False
+            self._admin_health_snapshot = snapshot
+            return True
+
+    def start_admin_monitor(self, health_url_file: Path) -> bool:
+        self.stop_admin_monitor()
+        with self._lock:
+            generation_id = self._generation_id
+            process = self._process
+            if (
+                generation_id is None
+                or not self._desired_running
+                or process is None
+                or process.poll() is not None
+            ):
+                return False
+        monitor = TunnelAdminHealthMonitor(
+            health_url_file,
+            publish_snapshot=lambda snapshot: self.update_admin_health_for_generation(
+                generation_id,
+                snapshot,
+            ),
+        )
+        with self._lock:
+            process = self._process
+            if (
+                generation_id != self._generation_id
+                or not self._desired_running
+                or process is None
+                or process.poll() is not None
+            ):
+                return False
+            self._admin_monitor = monitor
+        monitor.start()
+        self._record(
+            "tunnel.admin_monitor_started",
+            generation_id=generation_id,
+            health_url_file=str(health_url_file),
+        )
+        return True
+
+    def stop_admin_monitor(self) -> None:
+        with self._lock:
+            monitor = self._admin_monitor
+            self._admin_monitor = None
+        if monitor is not None:
+            monitor.stop()
+
+    def update_end_to_end_health(self, state: str) -> None:
+        if state not in {"healthy", "degraded", "unknown"}:
+            raise ValueError("end-to-end health state must be healthy, degraded, or unknown")
+        with self._lock:
+            self._end_to_end_health_state = state
+
+    def health_snapshot(self) -> TunnelHealthSnapshot:
+        with self._lock:
+            process = self._process
+            admin = self._admin_health_snapshot
+            end_to_end = self._end_to_end_health_state
+        process_alive = process is not None and process.poll() is None
+        return evaluate_tunnel_health(
+            process_alive=process_alive,
+            admin=admin,
+            end_to_end_state=end_to_end if process_alive else "unknown",
+        )
 
     def start(self, argv: list[str], *, env: dict[str, str]) -> int:
         with self._lock:
             if self._process is not None and self._process.poll() is None:
                 raise LauncherError("连接已经在运行")
+            self._desired_running = True
+            self._launch_argv = tuple(argv)
+            self._launch_env = dict(env)
+            self._recovery_attempts = 0
+            self._next_recovery_at = None
+            self._last_observed_exit_pid = None
+            self._admin_health_snapshot = None
+            self._end_to_end_health_state = "unknown"
             try:
-                process = subprocess.Popen(
-                    argv,
-                    env=env,
-                    stdin=subprocess.DEVNULL,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.STDOUT,
-                    shell=False,
-                    close_fds=True,
-                    **owned_process_group_kwargs(hide_window=True),
-                )
+                return self._spawn_locked(recovery=False)
             except OSError as exc:
+                self._forget_launch_locked()
                 raise LauncherError(f"无法启动 tunnel-client: {exc}") from exc
-            self._process = process
-            self._reader = threading.Thread(target=self._read_output, args=(process,), daemon=True)
-            self._reader.start()
-            self._record("tunnel.process_start", pid=process.pid)
-            return process.pid
 
     def stop(self) -> int | None:
-        process = self.process
+        # Cancel desired-running first so a concurrent GUI reconcile can never
+        # restart the process after an explicit operator stop/shutdown.
+        with self._lock:
+            self._desired_running = False
+            self._next_recovery_at = None
+            self._recovery_attempts = 0
+            self._last_observed_exit_pid = None
+            monitor = self._admin_monitor
+            self._admin_monitor = None
+            self._forget_launch_locked()
+            process = self._process
+        if monitor is not None:
+            monitor.stop()
         if process is None:
             return None
         if process.poll() is None:
@@ -575,6 +861,285 @@ class TunnelSupervisor:
         self._record("tunnel.process_stop", pid=process.pid, exit_code=process.returncode)
         return process.returncode
 
+    def reconcile(self, *, now: float | None = None) -> dict[str, object] | None:
+        """Advance bounded recovery after a real tunnel-client process exit.
+
+        This is intentionally driven by process state, never by Tunnel log text.
+        Production defaults to manual reconnect because safe automatic recovery
+        requires two proofs: the previous generation is quiescent *and* the new
+        generation is ready. The injectable recovery path is retained for tests
+        and future verified ownership/readiness implementations. FolderBridge
+        itself does not replay a request, but an in-flight request from the
+        previous generation can still have an ambiguous remote completion or
+        redelivery outcome.
+        """
+
+        clock = time.monotonic() if now is None else float(now)
+        with self._lock:
+            if not self._desired_running:
+                return None
+            process = self._process
+            if process is None:
+                return None
+
+            exit_code = process.poll()
+            if exit_code is None:
+                if (
+                    self._recovery_attempts > 0
+                    and self._process_started_at is not None
+                    and clock - self._process_started_at >= TUNNEL_RECOVERY_STABLE_SECONDS
+                ):
+                    self._recovery_attempts = 0
+                    self._next_recovery_at = None
+                    self._last_observed_exit_pid = None
+                    event = {"state": "stable", "pid": process.pid, "generation_id": self._generation_id}
+                    self._record("tunnel.recovery_stable", pid=process.pid, generation_id=self._generation_id)
+                    return event
+                return None
+
+            previous_pid = process.pid
+            previous_generation_id = self._generation_id
+            if self._last_observed_exit_pid != previous_pid:
+                self._record(
+                    "tunnel.parent_exit_observed",
+                    severity="warning",
+                    pid=previous_pid,
+                    generation_id=previous_generation_id,
+                    exit_code=exit_code,
+                    ambiguous_inflight=True,
+                )
+                if not self._automatic_recovery:
+                    event = {
+                        "state": "blocked",
+                        "previous_pid": previous_pid,
+                        "previous_generation_id": previous_generation_id,
+                        "exit_code": exit_code,
+                        "block_reason": "automatic-recovery-disabled",
+                        "quiescence_proof": "not-attempted",
+                        "ambiguous_inflight": True,
+                    }
+                    self._record(
+                        "tunnel.recovery_blocked",
+                        severity="error",
+                        pid=previous_pid,
+                        generation_id=previous_generation_id,
+                        exit_code=exit_code,
+                        block_reason="automatic-recovery-disabled",
+                        ambiguous_inflight=True,
+                    )
+                    self._forget_launch_locked()
+                    return event
+                self._record(
+                    "tunnel.previous_generation_fence_begin",
+                    pid=previous_pid,
+                    generation_id=previous_generation_id,
+                )
+                try:
+                    quiescence = self._quiescence_probe(process)
+                except Exception as exc:
+                    quiescence = ProcessGenerationQuiescence(False, f"probe-error-{type(exc).__name__}")
+                if not quiescence.quiescent:
+                    event = {
+                        "state": "blocked",
+                        "previous_pid": previous_pid,
+                        "previous_generation_id": previous_generation_id,
+                        "exit_code": exit_code,
+                        "quiescence_proof": quiescence.proof,
+                        "ambiguous_inflight": True,
+                    }
+                    self._record(
+                        "tunnel.previous_generation_fence_failed",
+                        severity="error",
+                        pid=previous_pid,
+                        generation_id=previous_generation_id,
+                        exit_code=exit_code,
+                        quiescence_proof=quiescence.proof,
+                        ambiguous_inflight=True,
+                    )
+                    self._record(
+                        "tunnel.recovery_blocked",
+                        severity="error",
+                        pid=previous_pid,
+                        generation_id=previous_generation_id,
+                        quiescence_proof=quiescence.proof,
+                    )
+                    self._forget_launch_locked()
+                    return event
+                self._record(
+                    "tunnel.previous_generation_quiescent",
+                    pid=previous_pid,
+                    generation_id=previous_generation_id,
+                    quiescence_proof=quiescence.proof,
+                )
+                if self._recovery_attempts >= len(TUNNEL_RECOVERY_DELAYS):
+                    event = self._exhaust_locked(previous_pid=previous_pid, exit_code=exit_code)
+                    return event
+                attempt = self._recovery_attempts + 1
+                delay = TUNNEL_RECOVERY_DELAYS[self._recovery_attempts]
+                self._last_observed_exit_pid = previous_pid
+                self._next_recovery_at = clock + delay
+                event = {
+                    "state": "scheduled",
+                    "previous_pid": previous_pid,
+                    "previous_generation_id": previous_generation_id,
+                    "exit_code": exit_code,
+                    "attempt": attempt,
+                    "delay_seconds": delay,
+                    "quiescence_proof": quiescence.proof,
+                    "ambiguous_inflight": True,
+                }
+                self._record(
+                    "tunnel.recovery_scheduled",
+                    severity="warning",
+                    pid=previous_pid,
+                    generation_id=previous_generation_id,
+                    exit_code=exit_code,
+                    attempt=attempt,
+                    delay_seconds=delay,
+                    quiescence_proof=quiescence.proof,
+                    ambiguous_inflight=True,
+                )
+                return event
+
+            if self._next_recovery_at is None or clock < self._next_recovery_at:
+                return None
+
+            argv = self._launch_argv
+            env = self._launch_env
+            if argv is None or env is None:
+                return self._exhaust_locked(previous_pid=previous_pid, exit_code=exit_code)
+
+            attempt = self._recovery_attempts + 1
+            try:
+                new_pid = self._spawn_locked(recovery=True)
+                # reconcile() owns the recovery clock.  Keep deterministic
+                # recovery/stability semantics even when callers inject a
+                # monotonic timestamp for tests or scheduling.
+                self._process_started_at = clock
+            except OSError as exc:
+                self._recovery_attempts = attempt
+                if attempt >= len(TUNNEL_RECOVERY_DELAYS):
+                    event = self._exhaust_locked(
+                        previous_pid=previous_pid,
+                        exit_code=exit_code,
+                        exception_type=type(exc).__name__,
+                    )
+                    return event
+                delay = TUNNEL_RECOVERY_DELAYS[attempt]
+                self._next_recovery_at = clock + delay
+                event = {
+                    "state": "restart_failed",
+                    "previous_pid": previous_pid,
+                    "exit_code": exit_code,
+                    "attempt": attempt,
+                    "delay_seconds": delay,
+                    "exception_type": type(exc).__name__,
+                }
+                self._record(
+                    "tunnel.recovery_attempt_failed",
+                    severity="warning",
+                    pid=previous_pid,
+                    exit_code=exit_code,
+                    attempt=attempt,
+                    delay_seconds=delay,
+                    exception_type=type(exc).__name__,
+                )
+                return event
+
+            self._recovery_attempts = attempt
+            event = {
+                "state": "restarted",
+                "pid": new_pid,
+                "generation_id": self._generation_id,
+                "previous_pid": previous_pid,
+                "previous_generation_id": previous_generation_id,
+                "exit_code": exit_code,
+                "attempt": attempt,
+                "ambiguous_inflight": True,
+            }
+            self._record(
+                "tunnel.recovery_succeeded",
+                pid=new_pid,
+                generation_id=self._generation_id,
+                previous_pid=previous_pid,
+                previous_generation_id=previous_generation_id,
+                exit_code=exit_code,
+                attempt=attempt,
+                ambiguous_inflight=True,
+            )
+            return event
+
+    def _spawn_locked(self, *, recovery: bool) -> int:
+        if self._launch_argv is None or self._launch_env is None:
+            raise OSError("Tunnel launch specification is unavailable")
+        process = subprocess.Popen(
+            list(self._launch_argv),
+            env=dict(self._launch_env),
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            shell=False,
+            close_fds=True,
+            **owned_process_group_kwargs(hide_window=True),
+        )
+        self._process = process
+        # Health authority is generation-bound.  Never let a previous
+        # process's admin/E2E evidence make a replacement generation green.
+        self._admin_health_snapshot = None
+        self._end_to_end_health_state = "unknown"
+        self._generation_counter += 1
+        self._generation_id = self._generation_counter
+        generation_id = self._generation_id
+        self._process_started_at = time.monotonic()
+        self._next_recovery_at = None
+        self._last_observed_exit_pid = None
+        self._reader = threading.Thread(target=self._read_output, args=(process, generation_id), daemon=True)
+        self._reader.start()
+        self._record("tunnel.process_start", pid=process.pid, generation_id=generation_id, recovery=recovery)
+        self._record("tunnel.generation_started", pid=process.pid, generation_id=generation_id, recovery=recovery)
+        return process.pid
+
+    def _forget_launch_locked(self) -> None:
+        if self._launch_env is not None:
+            self._launch_env.clear()
+        self._launch_env = None
+        self._launch_argv = None
+        self._desired_running = False
+        self._next_recovery_at = None
+        self._last_observed_exit_pid = None
+        self._process_started_at = None
+        self._admin_health_snapshot = None
+        self._end_to_end_health_state = "unknown"
+
+    def _exhaust_locked(
+        self,
+        *,
+        previous_pid: int,
+        exit_code: int | None,
+        exception_type: str | None = None,
+    ) -> dict[str, object]:
+        attempts = self._recovery_attempts
+        self._next_recovery_at = None
+        self._last_observed_exit_pid = previous_pid
+        event: dict[str, object] = {
+            "state": "exhausted",
+            "previous_pid": previous_pid,
+            "exit_code": exit_code,
+            "attempt": attempts,
+        }
+        if exception_type is not None:
+            event["exception_type"] = exception_type
+        self._record(
+            "tunnel.recovery_exhausted",
+            severity="error",
+            pid=previous_pid,
+            exit_code=exit_code,
+            attempt=attempts,
+            exception_type=exception_type,
+        )
+        self._forget_launch_locked()
+        return event
+
     def _record(self, event: str, *, severity: str = "info", text: str | None = None, **fields: object) -> None:
         if self._flight_recorder is None:
             return
@@ -583,19 +1148,30 @@ class TunnelSupervisor:
         except Exception:
             pass
 
-    def _read_output(self, process: subprocess.Popen[bytes]) -> None:
+    def _read_output(self, process: subprocess.Popen[bytes], generation_id: int | None = None) -> None:
         if process.stdout is None:
             return
+        pending = bytearray()
         while True:
             try:
                 chunk = process.stdout.read(4096)
             except (OSError, ValueError) as exc:
-                self._record("tunnel.output_read_error", severity="error", text=str(exc), exception_type=type(exc).__name__, pid=process.pid)
+                self._record("tunnel.output_read_error", severity="error", text=str(exc), exception_type=type(exc).__name__, pid=process.pid, generation_id=generation_id)
                 return
             if not chunk:
-                self._record("tunnel.output_eof", pid=process.pid, exit_code=process.poll())
+                if pending:
+                    self._output_callback(bytes(pending).decode("utf-8", errors="replace"))
+                self._record("tunnel.output_eof", pid=process.pid, generation_id=generation_id, exit_code=process.poll())
                 return
-            self._output_callback(chunk.decode("utf-8", errors="replace"))
+
+            pending.extend(chunk)
+            while True:
+                newline = pending.find(b"\n")
+                if newline < 0:
+                    break
+                line = bytes(pending[: newline + 1])
+                del pending[: newline + 1]
+                self._output_callback(line.decode("utf-8", errors="replace"))
 
 
 def _posix_join(argv: list[str]) -> str:

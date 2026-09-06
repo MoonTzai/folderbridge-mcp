@@ -16,6 +16,8 @@ CONFIG_NAME = ".folderbridge.json"
 CONFIG_VERSION = 1
 MAX_CONFIG_BYTES = 256 * 1024
 MAX_WORKSPACES = 16
+WORKSPACE_ROOT_IDENTITY_VERSION = 1
+WORKSPACE_RECOVERY_KEY_VERSION = 1
 TASK_NAME_RE = re.compile(r"^[a-zA-Z][a-zA-Z0-9_-]{0,39}$")
 INLINE_RUNNERS = {
     "bash": {"-c"},
@@ -85,6 +87,37 @@ def canonical_workspaces(raw_values: list[str | os.PathLike[str]] | tuple[str | 
 
 def workspace_id(workspace: Path) -> str:
     return hashlib.sha256(str(workspace).encode("utf-8")).hexdigest()[:12]
+
+
+def workspace_root_identity(workspace: Path) -> str:
+    """Return one opaque identity for the currently bound real workspace root.
+
+    This is the shared internal identity primitive for recovery and future
+    cross-process mutation gates.  It intentionally combines the resolved real
+    path with filesystem object identity so accepted case/alias spellings of
+    the same root converge, while a replaced root at the same path does not.
+    It is not a permanent project identity across rename/move/re-home.
+    """
+
+    try:
+        root = Path(workspace).expanduser().resolve(strict=True)
+        metadata = root.stat()
+    except (OSError, RuntimeError) as exc:
+        raise ConfigError(f"Cannot establish workspace root identity: {workspace}") from exc
+    if not stat.S_ISDIR(metadata.st_mode):
+        raise ConfigError(f"Workspace is not a directory: {root}")
+    canonical_path = os.path.normcase(os.path.normpath(str(root)))
+    payload = (
+        f"folderbridge-workspace-root-v{WORKSPACE_ROOT_IDENTITY_VERSION}\\0"
+        f"{sys.platform}\\0{int(metadata.st_dev)}\\0{int(metadata.st_ino)}\\0{canonical_path}"
+    ).encode("utf-8", errors="strict")
+    return hashlib.sha256(payload).hexdigest()
+
+
+def workspace_recovery_key(workspace: Path) -> str:
+    """Return the bounded current-binding key used by durable recovery state."""
+
+    return f"wrk{WORKSPACE_RECOVERY_KEY_VERSION}:{workspace_root_identity(workspace)}"
 
 
 def config_path(workspace: Path) -> Path:

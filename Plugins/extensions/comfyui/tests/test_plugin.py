@@ -24,7 +24,16 @@ if _SPEC is None or _SPEC.loader is None:
 _RUNTIME = importlib.util.module_from_spec(_SPEC)
 _SPEC.loader.exec_module(_RUNTIME)
 comfyui_status = _RUNTIME.comfyui_status
+release_comfyui_memory = _RUNTIME.release_comfyui_memory
+list_jobs = _RUNTIME.list_jobs
+get_job_status = _RUNTIME.get_job_status
+cancel_prompt = _RUNTIME.cancel_prompt
+get_node_info = _RUNTIME.get_node_info
+list_models = _RUNTIME.list_models
+get_features = _RUNTIME.get_features
 run_workflow = _RUNTIME.run_workflow
+
+JOB_ID = "11111111-1111-4111-8111-111111111111"
 
 
 PNG_1X1 = base64.b64decode(
@@ -43,6 +52,33 @@ class _FakeComfyHandler(BaseHTTPRequestHandler):
         if parsed.path == "/system_stats":
             self._json(200, self.server.system_stats)  # type: ignore[attr-defined]
             return
+        if parsed.path == "/features":
+            self._json(200, self.server.features)  # type: ignore[attr-defined]
+            return
+        if parsed.path == "/models":
+            self._json(200, self.server.model_types)  # type: ignore[attr-defined]
+            return
+        if parsed.path.startswith("/models/"):
+            folder = unquote(parsed.path.removeprefix("/models/"))
+            values = self.server.models.get(folder)  # type: ignore[attr-defined]
+            if values is None:
+                self.send_error(404)
+            else:
+                self._json(200, values)
+            return
+        if parsed.path == "/api/jobs":
+            self.server.jobs_requests += 1  # type: ignore[attr-defined]
+            self.server.last_jobs_query = parsed.query  # type: ignore[attr-defined]
+            self._json(200, self.server.jobs_response)  # type: ignore[attr-defined]
+            return
+        if parsed.path.startswith("/api/jobs/"):
+            prompt_id = unquote(parsed.path.removeprefix("/api/jobs/"))
+            self.server.job_status_requests += 1  # type: ignore[attr-defined]
+            if prompt_id != JOB_ID:
+                self.send_error(404)
+            else:
+                self._json(200, self.server.job_details)  # type: ignore[attr-defined]
+            return
         if parsed.path.startswith("/object_info/"):
             class_name = unquote(parsed.path.removeprefix("/object_info/"))
             info = self.server.object_info.get(class_name)  # type: ignore[attr-defined]
@@ -53,6 +89,10 @@ class _FakeComfyHandler(BaseHTTPRequestHandler):
             return
         if parsed.path == "/history/prompt-test":
             self.server.history_requests += 1  # type: ignore[attr-defined]
+            if self.server.history_failures_remaining > 0:  # type: ignore[attr-defined]
+                self.server.history_failures_remaining -= 1  # type: ignore[attr-defined]
+                self._json(503, {"error": "temporarily busy"})
+                return
             self.server.history_entered.set()  # type: ignore[attr-defined]
             gate = self.server.history_gate  # type: ignore[attr-defined]
             if gate is not None:
@@ -81,8 +121,19 @@ class _FakeComfyHandler(BaseHTTPRequestHandler):
         self.send_error(404)
 
     def do_POST(self) -> None:
-        if self.path == "/api/jobs/prompt-test/cancel":
+        if self.path == "/free":
+            length = int(self.headers.get("Content-Length", "0"))
+            body = json.loads(self.rfile.read(length))
+            self.server.free_requests += 1  # type: ignore[attr-defined]
+            self.server.last_free_body = body  # type: ignore[attr-defined]
+            self.send_response(200)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
+        if self.path.startswith("/api/jobs/") and self.path.endswith("/cancel"):
+            prompt_id = unquote(self.path[len("/api/jobs/"):-len("/cancel")])
             self.server.targeted_cancel_requests += 1  # type: ignore[attr-defined]
+            self.server.last_cancel_prompt_id = prompt_id  # type: ignore[attr-defined]
             if not self.server.targeted_cancel_available:  # type: ignore[attr-defined]
                 self.send_error(404)
                 return
@@ -124,12 +175,41 @@ class ComfyUiTests(unittest.TestCase):
             "9": {"images": [{"filename": "result.png", "subfolder": "", "type": "output"}]}
         }
         self.server.object_info = {}  # type: ignore[attr-defined]
+        self.server.features = {"jobs_api": True, "preview_metadata": True}  # type: ignore[attr-defined]
+        self.server.model_types = ["checkpoints", "vae", "diffusion_models"]  # type: ignore[attr-defined]
+        self.server.models = {  # type: ignore[attr-defined]
+            "checkpoints": ["zeta.safetensors", "alpha.safetensors", "alpha-refiner.safetensors"],
+            "vae": ["video_vae.safetensors"],
+        }
+        self.server.jobs_response = {  # type: ignore[attr-defined]
+            "jobs": [{"id": JOB_ID, "status": "in_progress", "create_time": 1234, "outputs_count": 0}],
+            "pagination": {"offset": 0, "limit": 20, "total": 1, "has_more": False},
+        }
+        self.server.job_details = {  # type: ignore[attr-defined]
+            "id": JOB_ID,
+            "status": "completed",
+            "priority": 7,
+            "create_time": 1234,
+            "execution_start_time": 1240,
+            "execution_end_time": 1300,
+            "outputs_count": 1,
+            "preview_output": {"filename": "result.mp4", "subfolder": "video", "type": "output"},
+            "outputs": {"9": {"images": [{"filename": "result.mp4", "subfolder": "video", "type": "output"}]}},
+            "workflow": {"prompt": {"secret": "must-not-leak"}, "extra_data": {"client_id": "hidden"}},
+        }
         self.server.history_complete = True  # type: ignore[attr-defined]
+        self.server.history_failures_remaining = 0  # type: ignore[attr-defined]
         self.server.history_requests = 0  # type: ignore[attr-defined]
         self.server.history_entered = threading.Event()  # type: ignore[attr-defined]
         self.server.history_gate = None  # type: ignore[attr-defined]
         self.server.prompt_requests = 0  # type: ignore[attr-defined]
+        self.server.free_requests = 0  # type: ignore[attr-defined]
+        self.server.last_free_body = None  # type: ignore[attr-defined]
+        self.server.jobs_requests = 0  # type: ignore[attr-defined]
+        self.server.last_jobs_query = ""  # type: ignore[attr-defined]
+        self.server.job_status_requests = 0  # type: ignore[attr-defined]
         self.server.targeted_cancel_requests = 0  # type: ignore[attr-defined]
+        self.server.last_cancel_prompt_id = None  # type: ignore[attr-defined]
         self.server.targeted_cancel_available = True  # type: ignore[attr-defined]
         self.server.global_interrupt_requests = 0  # type: ignore[attr-defined]
         self.server.view_requests = 0  # type: ignore[attr-defined]
@@ -147,6 +227,72 @@ class ComfyUiTests(unittest.TestCase):
         result = comfyui_status(port=self.port)
         self.assertTrue(result["online"])
         self.assertEqual(result["endpoint"], f"http://127.0.0.1:{self.port}")
+
+    def test_free_uses_only_fixed_official_endpoint_and_flags(self) -> None:
+        result = release_comfyui_memory(unload_models=True, free_memory=True, settle_seconds=0, port=self.port)
+        self.assertTrue(result["acknowledged"])
+        self.assertEqual(result["requested"], {"unload_models": True, "free_memory": True})
+        self.assertEqual(self.server.free_requests, 1)  # type: ignore[attr-defined]
+        self.assertEqual(self.server.last_free_body, {"unload_models": True, "free_memory": True})  # type: ignore[attr-defined]
+        self.assertTrue(result["after"]["online"])
+
+    def test_free_rejects_noop_request(self) -> None:
+        with self.assertRaises(ToolError) as raised:
+            release_comfyui_memory(unload_models=False, free_memory=False, settle_seconds=0, port=self.port)
+        self.assertEqual(raised.exception.code, "INVALID_ARGUMENT")
+        self.assertEqual(self.server.free_requests, 0)  # type: ignore[attr-defined]
+
+    def test_jobs_uses_bounded_job_api(self) -> None:
+        result = list_jobs(statuses=["in_progress", "pending"], limit=20, offset=0, port=self.port)
+        self.assertEqual(result["jobs"][0]["id"], JOB_ID)
+        self.assertEqual(result["jobs"][0]["status"], "in_progress")
+        self.assertEqual(self.server.jobs_requests, 1)  # type: ignore[attr-defined]
+        self.assertIn("status=in_progress%2Cpending", self.server.last_jobs_query)  # type: ignore[attr-defined]
+        self.assertIn("limit=20", self.server.last_jobs_query)  # type: ignore[attr-defined]
+
+    def test_job_status_strips_workflow_and_returns_bounded_artifacts(self) -> None:
+        result = get_job_status(JOB_ID, port=self.port)
+        self.assertEqual(result["id"], JOB_ID)
+        self.assertEqual(result["status"], "completed")
+        self.assertNotIn("workflow", result)
+        self.assertNotIn("outputs", result)
+        self.assertEqual(result["artifacts"][0]["filename"], "result.mp4")
+        self.assertEqual(self.server.job_status_requests, 1)  # type: ignore[attr-defined]
+
+    def test_cancel_prompt_is_targeted_and_rejects_non_uuid(self) -> None:
+        result = cancel_prompt(JOB_ID, port=self.port)
+        self.assertTrue(result["cancelled"])
+        self.assertEqual(result["prompt_id"], JOB_ID)
+        self.assertEqual(self.server.last_cancel_prompt_id, JOB_ID)  # type: ignore[attr-defined]
+        with self.assertRaises(ToolError) as raised:
+            cancel_prompt("not-a-uuid", port=self.port)
+        self.assertEqual(raised.exception.code, "INVALID_ARGUMENT")
+        self.assertEqual(self.server.global_interrupt_requests, 0)  # type: ignore[attr-defined]
+
+    def test_node_info_models_and_features_are_bounded_read_only_helpers(self) -> None:
+        self.server.object_info = {  # type: ignore[attr-defined]
+            "SaveVideo": {"name": "SaveVideo", "input": {"required": {"codec": [["auto", "h264"], {}]}}}
+        }
+        node = get_node_info("SaveVideo", port=self.port)
+        self.assertEqual(node["class_name"], "SaveVideo")
+        self.assertEqual(node["info"]["name"], "SaveVideo")
+        folders = list_models(port=self.port)
+        self.assertEqual(folders["folders"], ["checkpoints", "vae", "diffusion_models"])
+        models = list_models(folder="checkpoints", contains="alpha", max_items=1, port=self.port)
+        self.assertEqual(models["models"], ["alpha.safetensors"])
+        self.assertTrue(models["truncated"])
+        features = get_features(port=self.port)
+        self.assertTrue(features["features"]["jobs_api"])
+
+    def test_run_workflow_retries_transient_history_transport_failure_without_resubmitting(self) -> None:
+        self.server.history_failures_remaining = 1  # type: ignore[attr-defined]
+        workflow = {"9": {"class_type": "SaveImage", "inputs": {}}}
+        (self.root / "history-retry.json").write_text(json.dumps(workflow), encoding="utf-8")
+        result = run_workflow(self.workspace, "history-retry.json", timeout_seconds=5, port=self.port, include_image_data=False)
+        self.assertEqual(result["prompt_id"], "prompt-test")
+        self.assertEqual(result["history_transport_failures"], 1)
+        self.assertEqual(self.server.prompt_requests, 1)  # type: ignore[attr-defined]
+        self.assertGreaterEqual(self.server.history_requests, 2)  # type: ignore[attr-defined]
 
     def test_run_workflow_applies_overrides_returns_and_saves_image(self) -> None:
         workflow = {
@@ -480,8 +626,15 @@ class ComfyUiExternalContractTests(unittest.TestCase):
     def test_manifest_is_external_hot_load_contract(self) -> None:
         manifest = json.loads((PLUGIN_ROOT / "folderbridge-extension.json").read_text(encoding="utf-8"))
         self.assertEqual(manifest["id"], "comfyui")
-        self.assertEqual(manifest["version"], "1.3.0")
+        self.assertEqual(manifest["version"], "1.4.0")
         self.assertEqual(manifest["actions"]["status"]["authorization"], "global")
+        self.assertEqual(
+            set(manifest["actions"]),
+            {"status", "free", "jobs", "job-status", "cancel-prompt", "node-info", "models", "features", "run"},
+        )
+        for action_name in ("free", "jobs", "job-status", "cancel-prompt", "node-info", "models", "features"):
+            self.assertEqual(manifest["actions"][action_name]["authorization"], "global")
+            self.assertEqual(manifest["actions"][action_name]["mutation_scope"], {"mode": "none"})
         run = manifest["actions"]["run"]
         self.assertEqual(run["run_mode"], "job")
         self.assertEqual(run["timeout_seconds"], 0)

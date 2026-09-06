@@ -1,5 +1,6 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
+  "runtime_abi": 1,
   "id": "office",
   "name": "Microsoft Office Native",
   "version": "1.1.4",
@@ -28,6 +29,10 @@
         "type": "object",
         "properties": {},
         "additionalProperties": false
+      },
+      "effect_contract": {
+        "effect_semantics": "read_only",
+        "lifetime": "foreground"
       }
     },
     "inspect_docx": {
@@ -37,11 +42,26 @@
       "input_schema": {
         "type": "object",
         "properties": {
-          "path": {"type": "string", "minLength": 1, "maxLength": 1024},
-          "max_items": {"type": "integer", "minimum": 1, "maximum": 10000, "default": 2000}
+          "path": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1024
+          },
+          "max_items": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 10000,
+            "default": 2000
+          }
         },
-        "required": ["path"],
+        "required": [
+          "path"
+        ],
         "additionalProperties": false
+      },
+      "effect_contract": {
+        "effect_semantics": "read_only",
+        "lifetime": "foreground"
       }
     },
     "inspect_xlsx": {
@@ -51,14 +71,40 @@
       "input_schema": {
         "type": "object",
         "properties": {
-          "path": {"type": "string", "minLength": 1, "maxLength": 1024},
-          "sheet": {"type": "string", "minLength": 1, "maxLength": 255},
-          "cell_range": {"type": "string", "minLength": 1, "maxLength": 64},
-          "max_items": {"type": "integer", "minimum": 1, "maximum": 20000, "default": 5000},
-          "include_empty": {"type": "boolean", "default": false}
+          "path": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1024
+          },
+          "sheet": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 255
+          },
+          "cell_range": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64
+          },
+          "max_items": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 20000,
+            "default": 5000
+          },
+          "include_empty": {
+            "type": "boolean",
+            "default": false
+          }
         },
-        "required": ["path"],
+        "required": [
+          "path"
+        ],
         "additionalProperties": false
+      },
+      "effect_contract": {
+        "effect_semantics": "read_only",
+        "lifetime": "foreground"
       }
     },
     "render": {
@@ -66,25 +112,82 @@
       "run_mode": "job",
       "requires_workspace": true,
       "authorization": "global",
+      "mutation_scope": {
+        "mode": "paths",
+        "claims": [
+          {
+            "kind": "tree",
+            "param": "output_dir"
+          },
+          {
+            "kind": "exact",
+            "param": "archive_path",
+            "optional": true
+          }
+        ]
+      },
       "input_schema": {
         "type": "object",
         "properties": {
-          "path": {"type": "string", "minLength": 1, "maxLength": 1024},
-          "output_dir": {"type": "string", "minLength": 1, "maxLength": 1024},
-          "page_start": {"type": "integer", "minimum": 1, "maximum": 10000},
-          "page_end": {"type": "integer", "minimum": 1, "maximum": 10000},
+          "path": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1024
+          },
+          "output_dir": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1024
+          },
+          "archive_path": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1024
+          },
+          "page_start": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 10000
+          },
+          "page_end": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 10000
+          },
           "sheets": {
             "type": "array",
-            "items": {"type": "string", "minLength": 1, "maxLength": 255},
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 255
+            },
             "minItems": 1,
             "maxItems": 100
           },
-          "width": {"type": "integer", "minimum": 320, "maximum": 7680, "default": 1920},
-          "make_zip": {"type": "boolean", "default": true},
-          "overwrite": {"type": "boolean", "default": false}
+          "width": {
+            "type": "integer",
+            "minimum": 320,
+            "maximum": 7680,
+            "default": 1920
+          },
+          "make_zip": {
+            "type": "boolean",
+            "default": true
+          },
+          "overwrite": {
+            "type": "boolean",
+            "default": false
+          }
         },
-        "required": ["path", "output_dir"],
+        "required": [
+          "path",
+          "output_dir"
+        ],
         "additionalProperties": false
+      },
+      "effect_contract": {
+        "effect_semantics": "external_effect",
+        "lifetime": "job_owned"
       }
     }
   }
