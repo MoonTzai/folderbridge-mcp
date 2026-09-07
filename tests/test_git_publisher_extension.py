@@ -39,7 +39,7 @@ class GitPublisherManifestTests(unittest.TestCase):
     def test_manifest_is_explicit_and_does_not_accept_tokens(self) -> None:
         record = load_extension(EXT_DIR, bundled=True)
         self.assertEqual(record.manifest.extension_id, "git-publisher")
-        self.assertEqual(record.manifest.version, "1.4.0")
+        self.assertEqual(record.manifest.version, "1.5.0")
         self.assertEqual(set(record.manifest.actions), {"status", "connect", "commit", "push", "release-assets"})
         self.assertTrue(record.manifest.actions["status"].read_only)
         self.assertEqual(record.manifest.actions["status"].authorization, "none")
@@ -54,6 +54,9 @@ class GitPublisherManifestTests(unittest.TestCase):
         for action in record.manifest.actions.values():
             properties = action.input_schema.get("properties", {})
             self.assertTrue({"token", "password", "pat"}.isdisjoint({str(key).lower() for key in properties}))
+            self.assertIn("repo_path", properties)
+            self.assertEqual(properties["repo_path"]["default"], ".")
+            self.assertEqual(properties["repo_path"]["maxLength"], 1024)
         status_schema = record.manifest.actions["status"].input_schema
         self.assertEqual(status_schema["properties"]["offset"]["minimum"], 0)
         self.assertEqual(status_schema["properties"]["limit"]["maximum"], 500)
@@ -122,6 +125,75 @@ class GitPublisherRuntimeTests(unittest.TestCase):
         git(root, "add", "--", "tracked.txt")
         git(root, "commit", "-m", "initial")
         return temp, root
+
+    def make_nested_repo(self) -> tuple[tempfile.TemporaryDirectory[str], Path, Path]:
+        temp = tempfile.TemporaryDirectory()
+        workspace = Path(temp.name)
+        root = workspace / "Debate-Judge-Public"
+        root.mkdir()
+        git(root, "init", "-b", "main")
+        git(root, "config", "user.name", "FolderBridge Test")
+        git(root, "config", "user.email", "folderbridge-test@example.invalid")
+        git(root, "remote", "add", "origin", "https://github.com/example/debate-judge.git")
+        (root / "tracked.txt").write_text("one\n", encoding="utf-8")
+        git(root, "add", "--", "tracked.txt")
+        git(root, "commit", "-m", "initial")
+        return temp, workspace, root
+
+    def test_nested_repo_status_and_commit_are_confined_to_repo_root(self) -> None:
+        plugin = load_plugin()
+        temp, workspace, root = self.make_nested_repo()
+        self.addCleanup(temp.cleanup)
+        private_dir = workspace / "Upload"
+        private_dir.mkdir()
+        (private_dir / "private.txt").write_text("must stay outside public Git\n", encoding="utf-8")
+        (root / "tracked.txt").write_text("two\n", encoding="utf-8")
+
+        status = plugin.handle(
+            "status",
+            {"repo_path": "Debate-Judge-Public"},
+            {"workspace_root": str(workspace), "workspace_read_only": True},
+        )
+        self.assertEqual(status["repo_path"], "Debate-Judge-Public")
+        self.assertEqual(status["repo"], "debate-judge")
+        self.assertEqual(status["change_count"], 1)
+        self.assertEqual(status["changes"][0]["path"], "tracked.txt")
+
+        result = plugin.handle(
+            "commit",
+            {
+                "repo_path": "Debate-Judge-Public",
+                "paths": ["tracked.txt"],
+                "message": "Update public file",
+            },
+            {"workspace_root": str(workspace), "workspace_read_only": False},
+        )
+        self.assertEqual(result["repo_path"], "Debate-Judge-Public")
+        self.assertEqual(result["paths"], ["tracked.txt"])
+        self.assertEqual(git(root, "show", "--pretty=", "--name-only", "HEAD").splitlines(), ["tracked.txt"])
+        self.assertTrue((private_dir / "private.txt").is_file())
+
+    def test_nested_repo_path_rejects_escape_backslash_and_non_root_selection(self) -> None:
+        plugin = load_plugin()
+        temp, workspace, root = self.make_nested_repo()
+        self.addCleanup(temp.cleanup)
+        (root / "subdir").mkdir()
+
+        for bad in ("../outside", "Debate-Judge-Public\\subdir", "/absolute", " Debate-Judge-Public"):
+            with self.subTest(repo_path=bad):
+                with self.assertRaises(RuntimeError):
+                    plugin.handle(
+                        "status",
+                        {"repo_path": bad},
+                        {"workspace_root": str(workspace), "workspace_read_only": True},
+                    )
+
+        with self.assertRaisesRegex(RuntimeError, "repo_path must itself be the Git repository root"):
+            plugin.handle(
+                "status",
+                {"repo_path": "Debate-Judge-Public/subdir"},
+                {"workspace_root": str(workspace), "workspace_read_only": True},
+            )
 
     def test_commit_includes_only_explicit_files(self) -> None:
         plugin = load_plugin()

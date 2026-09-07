@@ -3,8 +3,8 @@
   "runtime_abi": 1,
   "id": "git-publisher",
   "name": "Git Publisher",
-  "version": "1.4.0",
-  "description": "Safely connect GitHub in a browser, commit explicit files, push only the current branch, or publish explicit Release assets from the selected GitHub repository.",
+  "version": "1.5.0",
+  "description": "Safely operate a selected workspace-root or nested GitHub repository: browser auth, explicit-file commits, current-branch push, and explicit Release assets.",
   "entrypoint": "plugin.py",
   "permissions": [
     "workspace.read",
@@ -41,6 +41,12 @@
             "minimum": 1,
             "maximum": 500,
             "default": 200
+          },
+          "repo_path": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1024,
+            "default": "."
           }
         },
         "additionalProperties": false
@@ -65,6 +71,12 @@
           "force": {
             "type": "boolean",
             "default": false
+          },
+          "repo_path": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1024,
+            "default": "."
           }
         },
         "additionalProperties": false
@@ -95,6 +107,12 @@
             "type": "string",
             "minLength": 1,
             "maxLength": 1000
+          },
+          "repo_path": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1024,
+            "default": "."
           }
         },
         "required": [
@@ -114,7 +132,14 @@
       "authorization": "global",
       "input_schema": {
         "type": "object",
-        "properties": {},
+        "properties": {
+          "repo_path": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1024,
+            "default": "."
+          }
+        },
         "additionalProperties": false
       },
       "effect_contract": {
@@ -173,6 +198,12 @@
           "latest": {
             "type": "boolean",
             "default": true
+          },
+          "repo_path": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1024,
+            "default": "."
           }
         },
         "required": [

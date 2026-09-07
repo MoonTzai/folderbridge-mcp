@@ -20,7 +20,7 @@ EXPECTED_ENGINEERING_SKILLS = {
     "code-review",
     "implement",
 }
-EXPECTED_EXTENSION_VERSIONS = {"git-publisher": "1.4.0", "office": "1.1.4"}
+EXPECTED_EXTENSION_VERSIONS = {"git-publisher": "1.5.0", "office": "1.1.4"}
 
 
 def _project_version() -> str:
@@ -185,6 +185,12 @@ def verify(executable: Path) -> dict[str, Any]:
     }
     if "release" in publisher_action_by_name:
         raise RuntimeError("git-publisher must not expose a project-specific legacy release action")
+    for action_name in ("status", "connect", "commit", "push", "release-assets"):
+        action_meta = publisher_action_by_name.get(action_name)
+        schema = action_meta.get("input_schema") if isinstance(action_meta, dict) else None
+        repo_path = schema.get("properties", {}).get("repo_path") if isinstance(schema, dict) else None
+        if not isinstance(repo_path, dict) or repo_path.get("default") != "." or repo_path.get("type") != "string":
+            raise RuntimeError(f"git-publisher {action_name} nested repo_path contract is missing")
     generic_release = publisher_action_by_name.get("release-assets")
     if not isinstance(generic_release, dict):
         raise RuntimeError("git-publisher generic release-assets action is missing")

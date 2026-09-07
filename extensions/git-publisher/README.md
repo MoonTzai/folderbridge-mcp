@@ -2,11 +2,21 @@
 
 Bundled FolderBridge extension for a narrow GitHub publish workflow:
 
-1. inspect the selected Git repository;
+1. inspect the selected workspace-root repository or one explicit nested Git repository selected by `repo_path`;
 2. connect `github.com` through Git Credential Manager's browser OAuth flow;
 3. commit only an explicit allowlist of regular workspace files;
 4. push only the current named branch to the existing credential-free `https://github.com/<owner>/<repo>[.git]` origin;
 5. publish explicit files from any selected GitHub workspace repository through the generic `release-assets` action.
+
+## Repository selection
+
+Every action accepts an optional `repo_path`, defaulting to `.`. The value is a trimmed POSIX-style path relative to the selected FolderBridge workspace. This lets one FolderBridge project workspace contain an independently published Git repository such as `Debate-Judge-Public/` without registering an overlapping child workspace.
+
+Repository selection is fail-closed: absolute paths, `..`, backslashes, VCS/dependency containers, symlinks, junctions/reparse points, missing directories, and paths that resolve outside the selected workspace are rejected. After selection, `git rev-parse --show-toplevel` must resolve **exactly** to that selected directory; pointing `repo_path` at an ordinary subdirectory inside a larger Git repository is rejected.
+
+When `repo_path` is omitted, Git Publisher 1.5.0 preserves the previous contract exactly: the selected FolderBridge workspace itself must be the Git repository root.
+
+For `commit`, each `paths[]` entry is relative to the selected repository root. For `release-assets`, each `assets[].path` is likewise relative to that repository root. Files elsewhere in the same FolderBridge workspace are outside that Git action's path namespace.
 
 ## Authentication
 
@@ -22,13 +32,13 @@ If browser OAuth is unavailable, a PAT may still be configured outside the MCP c
 
 ## Commit safety
 
-`commit` requires an explicit list of individual workspace paths. It never runs `git add .` and does not support directory commits. Existing selections must be regular workspace files; missing selections are accepted only when they are already Git-tracked and currently deleted. Credential/key-like files, generated/dependency/VCS directories, missing untracked paths, unrelated pre-existing staged changes, and selected files with content-transforming Git attributes are rejected. Existing files are staged normally, validated tracked deletions are removed from the index explicitly, Git hooks and commit signing are disabled for the bounded commit, and staged-set verification uses `--no-renames` so Git's rename detection cannot collapse a delete+add migration and falsely report a missing allowlist path.
+`commit` requires an explicit list of individual repository-relative paths. It never runs `git add .` and does not support directory commits. Existing selections must be regular workspace files; missing selections are accepted only when they are already Git-tracked and currently deleted. Credential/key-like files, generated/dependency/VCS directories, missing untracked paths, unrelated pre-existing staged changes, and selected files with content-transforming Git attributes are rejected. Existing files are staged normally, validated tracked deletions are removed from the index explicitly, Git hooks and commit signing are disabled for the bounded commit, and staged-set verification uses `--no-renames` so Git's rename detection cannot collapse a delete+add migration and falsely report a missing allowlist path.
 
 ## Push safety
 
 `push` re-validates that:
 
-- the selected workspace itself is the repository root;
+- the selected `repo_path` itself is the repository root;
 - HEAD is on a normal named branch;
 - `origin` is a credential-free GitHub HTTPS URL;
 - unsafe repository-local credential helpers, URL rewrites, push URLs, hooks, fsmonitor commands, external diffs, or filter commands are absent.
@@ -37,13 +47,13 @@ The command pushes only `HEAD` to the same current branch, uses `--no-verify`, n
 
 ## Release assets
 
-Git Publisher 1.4.0 has no project-specific release action. Repository-specific version rules, build steps, commit-title conventions, or fixed asset names belong to that repository's own workflow/task layer.
+Git Publisher 1.5.0 has no project-specific release action. Repository-specific version rules, build steps, commit-title conventions, or fixed asset names belong to that repository's own workflow/task layer.
 
-`release-assets` publishes an explicit allowlist of regular files from the **selected workspace repository only**. Its public inputs are:
+`release-assets` publishes an explicit allowlist of regular files from the **selected repository only**, where the repository is the workspace root by default or an explicitly validated nested Git repository selected by `repo_path`. Its public inputs are:
 
 - `tag`: a bounded valid Git tag name;
 - `title`: one bounded non-empty title line;
-- `assets`: 1..64 objects with required workspace-relative `path`, optional GitHub-stable ASCII download `name`, and optional one-line display `label`;
+- `assets`: 1..64 objects with required repository-relative `path`, optional GitHub-stable ASCII download `name`, and optional one-line display `label`;
 - `latest`: boolean, default `true`. `true` explicitly marks the Release as Latest; `false` explicitly passes `--latest=false`.
 
 Before any remote mutation, the action validates the GitHub HTTPS repository, verifies every asset path and SHA-256, obtains Git Credential Manager credentials, and snapshots every asset into a plugin-owned temporary directory. The snapshot can receive a stable download filename such as `App-Windows-v1.2.3.exe` without renaming the repository file, while a separate label such as `Windows版` is passed to GitHub for user-facing display.

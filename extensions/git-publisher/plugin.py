@@ -32,6 +32,9 @@ DENIED_BASENAMES = {
     ".env", ".npmrc", ".pypirc", "id_rsa", "id_ed25519", "credentials", "credentials.json",
 }
 DENIED_SUFFIXES = {".pem", ".key", ".p12", ".pfx"}
+REPO_DENIED_PARTS = {
+    ".git", ".svn", ".hg", ".venv", "venv", "node_modules", "__pycache__",
+}
 RELEASE_DENIED_PARTS = {
     ".git", ".svn", ".hg", ".venv", "venv", "node_modules", "__pycache__", ".idea", ".vscode",
 }
@@ -47,30 +50,34 @@ BRANCH_RE = re.compile(r"^[A-Za-z0-9._/-]{1,240}$")
 
 
 def handle(action: str, params: dict[str, Any], context: dict[str, Any]) -> dict[str, Any]:
-    root = _workspace_root(context)
+    workspace_root = _workspace_root(context)
+    root, repo_path = _repo_root(workspace_root, params.get("repo_path"))
     if action == "status":
-        return _status(
+        result = _status(
             root,
             offset=params.get("offset", 0),
             limit=params.get("limit", DEFAULT_STATUS_PAGE),
         )
-    if bool(context.get("workspace_read_only")):
-        raise RuntimeError("FolderBridge is read-only; Git Publisher mutations are unavailable.")
-    if action == "connect":
-        return _connect(root, username=params.get("username"), force=bool(params.get("force", False)))
-    if action == "commit":
-        return _commit(root, params.get("paths"), params.get("message"))
-    if action == "push":
-        return _push(root)
-    if action == "release-assets":
-        return _release_assets(
-            root,
-            params.get("tag"),
-            params.get("title"),
-            params.get("assets"),
-            latest=params.get("latest", True),
-        )
-    raise RuntimeError(f"unsupported action: {action}")
+    else:
+        if bool(context.get("workspace_read_only")):
+            raise RuntimeError("FolderBridge is read-only; Git Publisher mutations are unavailable.")
+        if action == "connect":
+            result = _connect(root, username=params.get("username"), force=bool(params.get("force", False)))
+        elif action == "commit":
+            result = _commit(root, params.get("paths"), params.get("message"))
+        elif action == "push":
+            result = _push(root)
+        elif action == "release-assets":
+            result = _release_assets(
+                root,
+                params.get("tag"),
+                params.get("title"),
+                params.get("assets"),
+                latest=params.get("latest", True),
+            )
+        else:
+            raise RuntimeError(f"unsupported action: {action}")
+    return {"repo_path": repo_path, **result}
 
 
 def _workspace_root(context: dict[str, Any]) -> Path:
@@ -81,6 +88,32 @@ def _workspace_root(context: dict[str, Any]) -> Path:
     if not root.is_dir():
         raise RuntimeError("workspace_root is not a directory")
     return root
+
+
+def _repo_root(workspace_root: Path, raw_repo_path: Any) -> tuple[Path, str]:
+    raw = "." if raw_repo_path is None else raw_repo_path
+    if not isinstance(raw, str) or not raw or "\x00" in raw or "\\" in raw or raw != raw.strip():
+        raise RuntimeError("repo_path must be a non-empty trimmed POSIX-style workspace-relative path")
+    if raw == ".":
+        candidate = workspace_root
+        normalized = "."
+    else:
+        rel = PurePosixPath(raw)
+        if rel.is_absolute() or ".." in rel.parts or not rel.parts:
+            raise RuntimeError("repo_path must stay inside the selected workspace")
+        if any(part.lower() in REPO_DENIED_PARTS for part in rel.parts):
+            raise RuntimeError("repo_path targets a denied VCS/dependency directory")
+        candidate = workspace_root.joinpath(*rel.parts)
+        normalized = rel.as_posix()
+    _reject_links(workspace_root, candidate)
+    try:
+        resolved = candidate.resolve(strict=True)
+        resolved.relative_to(workspace_root)
+    except (OSError, ValueError) as exc:
+        raise RuntimeError("repo_path does not resolve to a directory inside the selected workspace") from exc
+    if not resolved.is_dir() or resolved.is_symlink() or _is_reparse(resolved):
+        raise RuntimeError("repo_path must resolve to a regular directory inside the selected workspace")
+    return resolved, normalized
 
 
 def _git_executable() -> str:
@@ -255,7 +288,7 @@ def _repo_info(root: Path) -> dict[str, str]:
     top = _text(_run_git(root, "-c", "core.fsmonitor=false", "rev-parse", "--show-toplevel"))
     try:
         if Path(top).resolve(strict=True) != root:
-            raise RuntimeError("selected workspace must itself be the Git repository root")
+            raise RuntimeError("selected repo_path must itself be the Git repository root")
     except OSError as exc:
         raise RuntimeError("could not validate Git repository root") from exc
     branch = _text(_run_git(root, "-c", "core.fsmonitor=false", "symbolic-ref", "--quiet", "--short", "HEAD"))

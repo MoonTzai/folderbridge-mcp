@@ -2,6 +2,12 @@
 
 All notable changes to FolderBridge MCP are documented here.
 
+## 0.8.27 — 2026-09-07
+
+- Upgraded bundled **Git Publisher to 1.5.0** with optional workspace-relative `repo_path` selection for nested Git repositories. The default remains the workspace root; nested selection rejects traversal, absolute/backslash paths, VCS/dependency containers, symlink/junction/reparse components, and any directory whose `git rev-parse --show-toplevel` is not exactly the selected path. Commit and Release paths remain repository-relative, preserving the surrounding workspace as inaccessible to that Git operation.
+- Added explicit nested-repository regression coverage proving that a public child repository can be inspected and selectively committed while sibling private workspace material stays outside the Git action namespace. Full source suite after the feature: **678 tests GREEN, 4 skipped**.
+- Corrected Windows version-resource numeric tuples to match the 0.8.27 package/string metadata so the packaged EXE no longer carries the older 0.8.25 numeric file/product version.
+
 ## 0.8.26 — 2026-09-07
 
 - Added the external **Blender Toolkit 0.1.1** source, installer, tests, and live bridge. Blender 5.x compositor compatibility now uses `Scene.compositing_node_group`, preserves the Blender 4.5-and-earlier `Scene.node_tree` fallback, maps removed legacy `CompositorNodeComposite` requests to `NodeGroupOutput` with an `Image` output interface, and maps removed `CompositorNodeMixRGB` requests to the compatible `ShaderNodeMixRGB` implementation. The full legacy create/set/link compositor chain was accepted live on Blender 5.2.1 LTS and self-test objects/groups were cleaned afterward.

@@ -103,10 +103,13 @@ class RepositoryHygieneTests(unittest.TestCase):
         for text in (publisher_readme, extension_docs):
             self.assertIn("tracked deletions", text)
             self.assertIn("--no-renames", text)
-        self.assertIn("Git Publisher 1.4.0", root_readme)
-        self.assertIn("Git Publisher 1.4.0", root_readme_zh)
+        self.assertIn("Git Publisher 1.5.0", root_readme)
+        self.assertIn("Git Publisher 1.5.0", root_readme_zh)
         self.assertNotIn("compatibility-locked to FolderBridge", root_readme)
         self.assertNotIn("兼容锁定发布路径", root_readme_zh)
+        self.assertIn("repo_path", publisher_readme)
+        self.assertIn("repo_path", extension_docs)
+        self.assertIn("nested Git repository", publisher_readme)
 
 
 if __name__ == "__main__":
