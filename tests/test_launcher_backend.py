@@ -599,6 +599,16 @@ class LauncherBackendTests(unittest.TestCase):
             env = control_plane_environment("\r\n  runtime-key  \t\n")
         self.assertEqual(env["CONTROL_PLANE_API_KEY"], "runtime-key")
 
+    def test_control_plane_environment_strips_inherited_edge_whitespace(self) -> None:
+        with mock.patch.dict(os.environ, {"CONTROL_PLANE_API_KEY": "\r\n  inherited-key  \t\n"}, clear=True):
+            env = control_plane_environment("")
+        self.assertEqual(env["CONTROL_PLANE_API_KEY"], "inherited-key")
+
+    def test_control_plane_environment_rejects_whitespace_only_inherited_key(self) -> None:
+        with mock.patch.dict(os.environ, {"CONTROL_PLANE_API_KEY": " \r\n\t "}, clear=True):
+            with self.assertRaises(LauncherError):
+                control_plane_environment("")
+
     def test_frozen_launcher_resets_pyinstaller_environment_for_nested_server(self) -> None:
         inherited = {
             "_PYI_ARCHIVE_FILE": r"C:\FolderBridge.exe",

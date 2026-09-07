@@ -19,7 +19,7 @@ from folderbridge_mcp.concurrency import (
     WorkspaceMutationCoordinator,
     WorkspaceMutationGate,
 )
-from folderbridge_mcp.mcp import McpServer, _request_lane
+from folderbridge_mcp.mcp import MAX_MESSAGE_BYTES, McpServer, _request_lane
 from folderbridge_mcp.text_writes import TextWriteManager
 from folderbridge_mcp.tools import ToolRuntime
 import folderbridge_mcp.text_writes as text_writes
@@ -85,6 +85,37 @@ class _GuardedDestination(io.BytesIO):
                 self._writing = False
 
 
+class _SignalingDestination(io.BytesIO):
+    def __init__(self) -> None:
+        super().__init__()
+        self.written = threading.Event()
+
+    def write(self, data):
+        result = super().write(data)
+        self.written.set()
+        return result
+
+
+class _BlockingOversizeSource:
+    def __init__(self, next_line: bytes) -> None:
+        self.next_line = next_line
+        self.tail_requested = threading.Event()
+        self.release_tail = threading.Event()
+        self.calls = 0
+
+    def readline(self, limit=-1):
+        self.calls += 1
+        if self.calls == 1:
+            return b"x" * (MAX_MESSAGE_BYTES + 1)
+        if self.calls == 2:
+            self.tail_requested.set()
+            self.release_tail.wait(timeout=2)
+            return b"tail\n"
+        if self.calls == 3:
+            return self.next_line
+        return b""
+
+
 class McpConcurrencyTests(unittest.TestCase):
     def setUp(self) -> None:
         # GUI regression tests run earlier in the same unittest process. Collect
@@ -101,6 +132,27 @@ class McpConcurrencyTests(unittest.TestCase):
                 "params": {"name": tool, "arguments": arguments or {}},
             }
         ).encode("utf-8") + b"\n"
+
+    def test_oversized_request_error_is_written_before_tail_drain_finishes(self) -> None:
+        runtime = _FakeRuntime()
+        server = McpServer(runtime)
+        source = _BlockingOversizeSource(self._line(2, "server_info"))
+        destination = _SignalingDestination()
+        worker = threading.Thread(target=server.serve, args=(source, destination), daemon=True)
+        worker.start()
+        try:
+            self.assertTrue(source.tail_requested.wait(timeout=0.5))
+            self.assertTrue(
+                destination.written.wait(timeout=0.2),
+                "oversize rejection must be emitted before waiting for the rest of the oversized line",
+            )
+        finally:
+            source.release_tail.set()
+        worker.join(timeout=2)
+        self.assertFalse(worker.is_alive())
+        responses = [json.loads(line) for line in destination.getvalue().splitlines()]
+        self.assertEqual(responses[0]["error"]["message"], f"Message exceeds {MAX_MESSAGE_BYTES // (1024 * 1024)} MiB")
+        self.assertEqual(responses[1]["id"], 2)
 
     def test_eof_starts_background_shutdown_before_waiting_for_data_workers(self) -> None:
         runtime = _FakeRuntime()

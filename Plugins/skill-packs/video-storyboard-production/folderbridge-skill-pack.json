@@ -1,0 +1,63 @@
+{
+  "schema_version": 1,
+  "id": "video-storyboard-production",
+  "name": "Video Storyboard Production",
+  "version": "1.0.0",
+  "description": "Narration-first AI video production methods for continuity inventory, semantic shot design, model-aware prompting, MiniMax H3/ComfyUI execution planning, and generated-video review.",
+  "source": {
+    "repository": "https://github.com/Arch-Dog/video-prompt-engineer ; https://github.com/leynos/visual-storytelling-skills",
+    "ref": "2026-09-01 adaptation",
+    "commit": "",
+    "license": "Adaptation; upstream MIT + ISC, see NOTICE.md"
+  },
+  "skills": [
+    {
+      "id": "narration-production-orchestrator",
+      "name": "Narration Production Orchestrator",
+      "path": "skills/narration-production-orchestrator/SKILL.md",
+      "description": "Orchestrate finalized narration into a complete production plan, delegating continuity, shot design, prompt assembly, ComfyUI execution planning, and review in the correct order.",
+      "routing_terms": ["narration video production", "script driven video", "narration storyboard production", "解说视频制作", "旁白驱动视频", "解说词重制", "脚本驱动视频", "按解说重做视频"],
+      "resources": ["references/production-pipeline.md", "references/h3-comfyui-profile.md", "references/quality-rubric.md"]
+    },
+    {
+      "id": "continuity-inventory",
+      "name": "Continuity Inventory",
+      "path": "skills/continuity-inventory/SKILL.md",
+      "description": "Freeze continuity-critical people, places, motifs, props, spatial relationships, and state changes before shot writing.",
+      "routing_terms": ["continuity inventory", "continuity", "character consistency", "scene continuity", "asset inventory", "连续性", "人物一致性", "场景连续", "资产清单", "视觉母题"],
+      "resources": ["references/production-pipeline.md"]
+    },
+    {
+      "id": "narration-to-storyboard",
+      "name": "Narration to Storyboard",
+      "path": "skills/narration-to-storyboard/SKILL.md",
+      "description": "Reverse-engineer finalized spoken narration into semantically accountable visual beats and generation-sized storyboard units without rewriting the narration.",
+      "routing_terms": ["narration to storyboard", "script to storyboard", "storyboard", "shot list", "解说词转分镜", "旁白转分镜", "脚本转分镜", "分镜", "镜头表"],
+      "resources": ["references/production-pipeline.md", "references/shot-language.md"]
+    },
+    {
+      "id": "shot-specifier",
+      "name": "Shot Specifier",
+      "path": "skills/shot-specifier/SKILL.md",
+      "description": "Specify visual evidence, composition, blocking, camera motion, timing, start/end state and transition anchors for each shot.",
+      "routing_terms": ["shot spec", "shot design", "camera blocking", "camera movement", "镜头设计", "运镜", "机位", "景别", "调度", "镜头语言"],
+      "resources": ["references/shot-language.md", "references/quality-rubric.md"]
+    },
+    {
+      "id": "minimax-h3-prompt-workflow",
+      "name": "MiniMax H3 Prompt and Workflow",
+      "path": "skills/minimax-h3-prompt-workflow/SKILL.md",
+      "description": "Compile storyboard shots into MiniMax H3 prompts and ComfyUI job specifications with valid frame grids, keyframe strategy, retake boundaries, native-resolution provenance, and continuity handoffs.",
+      "routing_terms": ["MiniMax H3", "H3 workflow", "ComfyUI video workflow", "video prompt", "prompt engineering", "FL2V", "I2V", "MiniMax提示词", "ComfyUI视频", "首尾帧", "视频工作流"],
+      "resources": ["references/h3-comfyui-profile.md", "references/quality-rubric.md"]
+    },
+    {
+      "id": "generated-video-review",
+      "name": "Generated Video Review",
+      "path": "skills/generated-video-review/SKILL.md",
+      "description": "Audit generated takes against narration semantics, continuity, visible causality, composition, technical provenance, and retake scope before assembly.",
+      "routing_terms": ["video review", "generated video audit", "retake", "shot review", "成片审计", "视频验收", "镜头验收", "返工", "重拍", "语义契合"],
+      "resources": ["references/quality-rubric.md", "references/h3-comfyui-profile.md"]
+    }
+  ]
+}

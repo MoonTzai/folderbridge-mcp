@@ -15,13 +15,11 @@ from pathlib import Path
 from typing import Any
 
 from .security import ToolError, Workspace, _encode_utf8_text, _fsync_directory
+from .transport_limits import MAX_TRANSACTION_CHUNK_BYTES
 from .user_paths import user_config_root
 
 
 MAX_TRANSACTION_TEXT_BYTES = 512 * 1024 * 1024
-# Keep any single chunk safely below the 1 MiB MCP JSON envelope even when
-# every one-byte control character expands to a six-byte JSON escape.
-MAX_TRANSACTION_CHUNK_BYTES = 128 * 1024
 MAX_ACTIVE_TEXT_TRANSACTIONS = 16
 TRANSACTION_TTL_SECONDS = 24 * 60 * 60
 MAX_STALE_STAGING_SCAN = 4096

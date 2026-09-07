@@ -5,6 +5,7 @@ import json
 import subprocess
 import sys
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 
@@ -17,7 +18,7 @@ from folderbridge_mcp.concurrency import (
     DATA_WORKERS,
 )
 from folderbridge_mcp.extensions import MAX_FOREGROUND_EXTENSION_WORKERS
-from folderbridge_mcp.mcp import MAX_MESSAGE_BYTES, McpServer
+from folderbridge_mcp.mcp import MAX_MESSAGE_BYTES, McpServer, _oversized_request_observation
 from folderbridge_mcp.security import MAX_EDIT_TEXT_BYTES
 from folderbridge_mcp.text_writes import (
     MAX_TRANSACTION_CHUNK_BYTES,
@@ -309,7 +310,8 @@ class McpWorkflowTests(unittest.TestCase):
         self.assertEqual(final_info["sha256"], expected_sha256)
 
     def test_transaction_chunk_bound_fits_worst_case_json_escape_inside_mcp_message(self) -> None:
-        self.assertEqual(MAX_MESSAGE_BYTES, 1024 * 1024)
+        self.assertEqual(MAX_MESSAGE_BYTES, 32 * 1024 * 1024)
+        self.assertEqual(MAX_TRANSACTION_CHUNK_BYTES, 4 * 1024 * 1024)
         request = {
             "jsonrpc": "2.0",
             "id": 99,
@@ -325,7 +327,99 @@ class McpWorkflowTests(unittest.TestCase):
             },
         }
         encoded = json.dumps(request).encode("utf-8") + b"\n"
-        self.assertLessEqual(len(encoded), MAX_MESSAGE_BYTES)
+        self.assertLess(len(encoded), MAX_MESSAGE_BYTES)
+
+    def test_real_stdio_accepts_request_above_legacy_one_mib_ceiling(self) -> None:
+        payload = "x" * (2 * 1024 * 1024)
+        response = self.call(
+            198,
+            "tools/call",
+            {
+                "name": "edit_file",
+                "arguments": {
+                    "path": "above-legacy-frame.txt",
+                    "create_content": payload,
+                },
+            },
+        )
+        self.assertFalse(response["result"]["isError"])
+        created = self.workspace / "above-legacy-frame.txt"
+        self.assertTrue(created.is_file())
+        self.assertEqual(created.stat().st_size, len(payload))
+
+    def test_oversize_identity_observation_is_bounded_and_excludes_payload_body(self) -> None:
+        request = {
+            "jsonrpc": "2.0",
+            "id": 4242,
+            "method": "tools/call",
+            "params": {
+                "name": "edit_file",
+                "arguments": {
+                    "workspace_id": "workspace-123",
+                    "path": "sensitive-body-name.txt",
+                    "create_content": "secret-payload-marker" + ("x" * (128 * 1024)),
+                },
+            },
+        }
+        prefix = json.dumps(request, ensure_ascii=False).encode("utf-8")[: MAX_MESSAGE_BYTES + 1]
+        observation = _oversized_request_observation(prefix)
+        self.assertEqual(observation["request_id"], 4242)
+        self.assertEqual(observation["method"], "tools/call")
+        self.assertEqual(observation["tool"], "edit_file")
+        self.assertEqual(observation["workspace_id"], "workspace-123")
+        self.assertNotIn("path", observation)
+        self.assertNotIn("create_content", observation)
+        self.assertNotIn("secret-payload-marker", json.dumps(observation))
+
+    def test_real_stdio_oversize_rejection_precedes_tail_and_same_child_recovers(self) -> None:
+        self.call(
+            200,
+            "initialize",
+            {"protocolVersion": "2025-11-25", "capabilities": {}, "clientInfo": {"name": "test", "version": "1"}},
+        )
+        assert self.process.stdin is not None and self.process.stdout is not None
+        request = {
+            "jsonrpc": "2.0",
+            "id": "oversize-201",
+            "method": "tools/call",
+            "params": {
+                "name": "edit_file",
+                "arguments": {
+                    "path": "oversized.txt",
+                    "create_content": "x" * (MAX_MESSAGE_BYTES + 8192),
+                },
+            },
+        }
+        wire = json.dumps(request).encode("utf-8") + b"\n"
+        self.assertGreater(len(wire), MAX_MESSAGE_BYTES)
+        prefix = wire[: MAX_MESSAGE_BYTES + 1]
+        tail = wire[MAX_MESSAGE_BYTES + 1 :]
+        self.assertFalse(prefix.endswith(b"\n"))
+        self.process.stdin.write(prefix)
+        self.process.stdin.flush()
+
+        response_holder: list[bytes] = []
+        response_ready = threading.Event()
+
+        def read_rejection() -> None:
+            response_holder.append(self.process.stdout.readline())
+            response_ready.set()
+
+        reader = threading.Thread(target=read_rejection, daemon=True)
+        reader.start()
+        self.assertTrue(
+            response_ready.wait(timeout=1.0),
+            "real stdio server must reject before the oversized request tail is delivered",
+        )
+        rejection = json.loads(response_holder[0])
+        self.assertEqual(rejection["id"], "oversize-201")
+        self.assertEqual(rejection["error"]["message"], f"Message exceeds {MAX_MESSAGE_BYTES // (1024 * 1024)} MiB")
+
+        self.process.stdin.write(tail)
+        self.process.stdin.flush()
+        recovered = self.call(202, "tools/call", {"name": "server_info", "arguments": {}})
+        self.assertFalse(recovered["result"]["isError"])
+        self.assertIsNone(self.process.poll())
 
     def test_writable_runtime_lazily_initializes_text_write_staging(self) -> None:
         runtime = ToolRuntime(self.workspace, load_config(self.workspace), read_only=False)
@@ -425,7 +519,8 @@ class McpWorkflowTests(unittest.TestCase):
         self.assertEqual(write_security["stale_cleanup_seconds"], TRANSACTION_TTL_SECONDS)
         self.assertTrue(write_security["process_local"])
         self.assertFalse(write_security["survives_server_restart"])
-        self.assertTrue(write_security["mcp_message_limit_unchanged"])
+        self.assertEqual(info["security"]["mcp_message_max_bytes"], MAX_MESSAGE_BYTES)
+        self.assertEqual(write_security["mcp_message_max_bytes"], MAX_MESSAGE_BYTES)
         self.assertEqual(info["skill_engine"]["gateway"], "extension/skill-engine")
         self.assertEqual(info["skill_engine"]["automatic_invocation"], "model-routed-not-forced")
         self.assertIn("folderbridge-engineering", {item["id"] for item in info["skill_engine"]["packs"]})

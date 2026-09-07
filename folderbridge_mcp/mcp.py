@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import sys
 import threading
 import time
@@ -16,9 +17,10 @@ from .concurrency import (
 )
 from .flight_recorder import FlightRecorder
 from .tools import ToolRuntime
+from .transport_limits import MAX_MCP_MESSAGE_BYTES, MAX_MCP_MESSAGE_MIB
 
 
-MAX_MESSAGE_BYTES = 1024 * 1024
+MAX_MESSAGE_BYTES = MAX_MCP_MESSAGE_BYTES
 LEGACY_VERSIONS = ("2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05")
 MODERN_VERSION = "2026-07-28"
 PROTOCOL_META = "io.modelcontextprotocol/protocolVersion"
@@ -209,10 +211,36 @@ class McpServer:
                     self._record("mcp.eof")
                     break
                 if len(line) > MAX_MESSAGE_BYTES:
-                    self._record("mcp.message_too_large", severity="warning", request_bytes=len(line))
-                    if not line.endswith(b"\n"):
-                        _discard_line(source)
-                    self._write(destination, _rpc_error(None, -32700, "Message exceeds 1 MiB"))
+                    observation = _oversized_request_observation(line)
+                    complete_line = line.endswith(b"\n")
+                    self._record(
+                        "mcp.message_too_large",
+                        severity="warning",
+                        request_bytes=len(line),
+                        request_bytes_is_lower_bound=not complete_line,
+                        **observation,
+                    )
+                    # Emit the bounded rejection before waiting for the remainder
+                    # of an oversized line. A shared-stdio transport can otherwise
+                    # retire/close the logical request while the server is still
+                    # blocked draining bytes that it has already decided to reject.
+                    self._write(
+                        destination,
+                        _rpc_error(observation.get("request_id"), -32700, f"Message exceeds {MAX_MCP_MESSAGE_MIB} MiB"),
+                        observation=observation,
+                    )
+                    if not complete_line:
+                        drained_bytes, terminated_by_newline = _discard_line(source)
+                        self._record(
+                            "mcp.oversize_discard_complete",
+                            severity="info" if terminated_by_newline else "warning",
+                            initial_bytes=len(line),
+                            drained_bytes=drained_bytes,
+                            observed_bytes=len(line) + drained_bytes,
+                            terminated_by_newline=terminated_by_newline,
+                            eof_during_discard=not terminated_by_newline,
+                            **observation,
+                        )
                     continue
                 try:
                     request = json.loads(line, parse_constant=_reject_json_constant)
@@ -403,11 +431,65 @@ def _rpc_error(request_id: Any, code: int, message: str, data: Any = None) -> di
     return {"jsonrpc": "2.0", "id": request_id, "error": error}
 
 
-def _discard_line(source: BinaryIO) -> None:
+_OVERSIZE_IDENTITY_SCAN_BYTES = 64 * 1024
+
+
+def _bounded_json_string_field(prefix: bytes, key: str, *, max_value_bytes: int = 256) -> str | None:
+    sample = prefix[:_OVERSIZE_IDENTITY_SCAN_BYTES]
+    encoded_key = re.escape(key.encode("ascii"))
+    pattern = rb'"' + encoded_key + rb'"\s*:\s*"([^"\\]{0,' + str(max_value_bytes).encode("ascii") + rb'})"'
+    match = re.search(pattern, sample)
+    if match is None:
+        return None
+    try:
+        return match.group(1).decode("utf-8")
+    except UnicodeDecodeError:
+        return None
+
+
+def _oversized_request_observation(prefix: bytes) -> dict[str, Any]:
+    """Best-effort bounded identity extraction for a request too large to parse.
+
+    Only small structural identifiers are retained; payload bodies are never
+    logged. The first MAX_MESSAGE_BYTES+1 bytes are a lower bound when the
+    rejected line did not yet contain its terminating newline.
+    """
+
+    observation: dict[str, Any] = {}
+    sample = prefix[:_OVERSIZE_IDENTITY_SCAN_BYTES]
+    request_id = re.search(rb'"id"\s*:\s*(-?\d{1,20})', sample)
+    if request_id is not None:
+        try:
+            observation["request_id"] = int(request_id.group(1))
+        except ValueError:
+            pass
+    else:
+        string_request_id = _bounded_json_string_field(sample, "id", max_value_bytes=256)
+        if string_request_id is not None:
+            observation["request_id"] = string_request_id
+    method = _bounded_json_string_field(sample, "method", max_value_bytes=64)
+    if method is not None:
+        observation["method"] = method
+    if method == "tools/call":
+        tool = _bounded_json_string_field(sample, "name", max_value_bytes=128)
+        if tool is not None:
+            observation["tool"] = tool
+        for key in ("action", "workspace_id", "extension_id", "extension_action", "job_id"):
+            value = _bounded_json_string_field(sample, key, max_value_bytes=256)
+            if value is not None:
+                observation[key] = value
+    return observation
+
+
+def _discard_line(source: BinaryIO) -> tuple[int, bool]:
+    drained_bytes = 0
     while True:
         chunk = source.readline(MAX_MESSAGE_BYTES + 1)
-        if not chunk or chunk.endswith(b"\n"):
-            return
+        drained_bytes += len(chunk)
+        if not chunk:
+            return drained_bytes, False
+        if chunk.endswith(b"\n"):
+            return drained_bytes, True
 
 
 def _reject_json_constant(value: str) -> None:

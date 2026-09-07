@@ -150,11 +150,42 @@ class V35PrivateHttpAcceptanceTests(unittest.TestCase):
         ).encode() + body
         self.assertEqual(raw(retired), 401)
 
-    def test_private_http_has_64k_header_and_1m_body_ceiling(self) -> None:
+    def test_private_http_has_64k_header_and_32m_body_ceiling(self) -> None:
         from folderbridge_mcp.runtime_transport import MAX_HTTP_HEADER_BYTES, MAX_MCP_REQUEST_BYTES
 
         self.assertEqual(MAX_HTTP_HEADER_BYTES, 64 * 1024)
-        self.assertEqual(MAX_MCP_REQUEST_BYTES, 1024 * 1024)
+        self.assertEqual(MAX_MCP_REQUEST_BYTES, 32 * 1024 * 1024)
+
+    def test_private_http_accepts_body_above_legacy_one_mib_ceiling(self) -> None:
+        server, _admission, token = self._server()
+        body = json.dumps(
+            {
+                "jsonrpc": "2.0",
+                "id": 77,
+                "method": "ping",
+                "params": {"blob": "x" * (2 * 1024 * 1024)},
+            },
+            separators=(",", ":"),
+        ).encode("utf-8")
+        self.assertGreater(len(body), 1024 * 1024)
+        connection = http.client.HTTPConnection("127.0.0.1", server.port, timeout=5)
+        connection.request(
+            "POST",
+            "/mcp",
+            body=body,
+            headers={
+                "Host": f"127.0.0.1:{server.port}",
+                "Content-Type": "application/json",
+                "X-FolderBridge-Generation-Token": token,
+                "Connection": "close",
+            },
+        )
+        response = connection.getresponse()
+        payload = json.loads(response.read().decode("utf-8"))
+        connection.close()
+        self.assertEqual(response.status, 200)
+        self.assertEqual(payload["id"], 77)
+        self.assertEqual(payload["result"]["method"], "ping")
 
 
 class V35TunnelHealthAcceptanceTests(unittest.TestCase):

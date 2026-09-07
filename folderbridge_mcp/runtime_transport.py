@@ -12,9 +12,11 @@ from collections import deque
 from dataclasses import dataclass
 from typing import Any, Callable
 
+from .transport_limits import MAX_MCP_MESSAGE_BYTES
+
 
 MAX_HTTP_HEADER_BYTES = 64 * 1024
-MAX_MCP_REQUEST_BYTES = 1024 * 1024
+MAX_MCP_REQUEST_BYTES = MAX_MCP_MESSAGE_BYTES
 DEFAULT_HTTP_READ_TIMEOUT_SECONDS = 2.0
 DEFAULT_MAX_OPEN_CONNECTIONS = 16
 

@@ -1,0 +1,1651 @@
+{
+  "schema_version": 2,
+  "runtime_abi": 1,
+  "id": "blender-toolkit",
+  "name": "Blender Toolkit",
+  "version": "0.1.1",
+  "description": "Global live Blender 5.x control bridge for FolderBridge with broad declarative scene/RNA, object, mesh, collection, modifier, constraint, node-tree, animation, safe-operator, file and render actions; arbitrary Python/shell execution is intentionally not exposed.",
+  "entrypoint": "plugin.py",
+  "permissions": [
+    "network.loopback:127.0.0.1:8766",
+    "workspace.read",
+    "workspace.write",
+    "process.execute:blender.exe"
+  ],
+  "execution": {
+    "mode": "isolated-process",
+    "timeout_seconds": 60
+  },
+  "workspace_adapter": {
+    "mode": "none",
+    "state": "none"
+  },
+  "actions": {
+    "status": {
+      "read_only": true,
+      "requires_workspace": false,
+      "authorization": "global",
+      "run_mode": "foreground",
+      "input_schema": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false
+      },
+      "effect_contract": {
+        "effect_semantics": "read_only",
+        "lifetime": "foreground"
+      }
+    },
+    "inspect-context": {
+      "read_only": true,
+      "requires_workspace": true,
+      "authorization": "global",
+      "run_mode": "foreground",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "include_addons": {
+            "type": "boolean",
+            "default": true
+          }
+        },
+        "additionalProperties": false
+      },
+      "effect_contract": {
+        "effect_semantics": "read_only",
+        "lifetime": "foreground"
+      }
+    },
+    "list-data": {
+      "read_only": true,
+      "requires_workspace": true,
+      "authorization": "global",
+      "run_mode": "foreground",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "kind": {
+            "type": "string",
+            "enum": [
+              "objects",
+              "collections",
+              "materials",
+              "meshes",
+              "curves",
+              "cameras",
+              "lights",
+              "armatures",
+              "actions",
+              "images",
+              "node_groups",
+              "worlds",
+              "scenes"
+            ]
+          },
+          "offset": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 100000,
+            "default": 0
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 500,
+            "default": 100
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "kind"
+        ]
+      },
+      "effect_contract": {
+        "effect_semantics": "read_only",
+        "lifetime": "foreground"
+      }
+    },
+    "inspect-data": {
+      "read_only": true,
+      "requires_workspace": true,
+      "authorization": "global",
+      "run_mode": "foreground",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "kind": {
+            "type": "string",
+            "enum": [
+              "object",
+              "collection",
+              "material",
+              "mesh",
+              "curve",
+              "camera",
+              "light",
+              "armature",
+              "action",
+              "image",
+              "node_group",
+              "world",
+              "scene"
+            ]
+          },
+          "name": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256
+          },
+          "properties": {
+            "type": "array",
+            "maxItems": 64,
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            }
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "kind",
+          "name"
+        ]
+      },
+      "effect_contract": {
+        "effect_semantics": "read_only",
+        "lifetime": "foreground"
+      }
+    },
+    "screenshot": {
+      "read_only": true,
+      "requires_workspace": true,
+      "authorization": "global",
+      "run_mode": "foreground",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "max_width": {
+            "type": "integer",
+            "minimum": 128,
+            "maximum": 1920,
+            "default": 960
+          }
+        },
+        "additionalProperties": false
+      },
+      "effect_contract": {
+        "effect_semantics": "read_only",
+        "lifetime": "foreground"
+      }
+    },
+    "set-context": {
+      "read_only": false,
+      "requires_workspace": true,
+      "authorization": "global",
+      "run_mode": "foreground",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "active_object": {
+            "type": "string",
+            "maxLength": 256,
+            "default": ""
+          },
+          "selected_objects": {
+            "type": "array",
+            "maxItems": 256,
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 256
+            }
+          },
+          "mode": {
+            "type": "string",
+            "enum": [
+              "OBJECT",
+              "EDIT",
+              "POSE",
+              "SCULPT",
+              "VERTEX_PAINT",
+              "WEIGHT_PAINT",
+              "TEXTURE_PAINT"
+            ],
+            "default": "OBJECT"
+          }
+        },
+        "additionalProperties": false
+      },
+      "effect_contract": {
+        "effect_semantics": "external_effect",
+        "lifetime": "foreground"
+      }
+    },
+    "create-object": {
+      "read_only": false,
+      "requires_workspace": true,
+      "authorization": "global",
+      "run_mode": "foreground",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "object_type": {
+            "type": "string",
+            "enum": [
+              "EMPTY",
+              "MESH",
+              "CURVE",
+              "CAMERA",
+              "LIGHT",
+              "ARMATURE",
+              "FONT"
+            ]
+          },
+          "name": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256
+          },
+          "data_name": {
+            "type": "string",
+            "maxLength": 256,
+            "default": ""
+          },
+          "collection": {
+            "type": "string",
+            "maxLength": 256,
+            "default": ""
+          },
+          "location": {
+            "type": "array",
+            "minItems": 3,
+            "maxItems": 3,
+            "items": {
+              "type": "number",
+              "minimum": -1000000000,
+              "maximum": 1000000000
+            }
+          },
+          "rotation_euler": {
+            "type": "array",
+            "minItems": 3,
+            "maxItems": 3,
+            "items": {
+              "type": "number",
+              "minimum": -1000000000,
+              "maximum": 1000000000
+            }
+          },
+          "scale": {
+            "type": "array",
+            "minItems": 3,
+            "maxItems": 3,
+            "items": {
+              "type": "number",
+              "minimum": -1000000000,
+              "maximum": 1000000000
+            }
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "object_type",
+          "name"
+        ]
+      },
+      "effect_contract": {
+        "effect_semantics": "external_effect",
+        "lifetime": "foreground"
+      }
+    },
+    "delete-object": {
+      "read_only": false,
+      "requires_workspace": true,
+      "authorization": "global",
+      "run_mode": "foreground",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256
+          },
+          "purge_data": {
+            "type": "boolean",
+            "default": false
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "name"
+        ]
+      },
+      "effect_contract": {
+        "effect_semantics": "external_effect",
+        "lifetime": "foreground"
+      }
+    },
+    "create-data": {
+      "read_only": false,
+      "requires_workspace": true,
+      "authorization": "global",
+      "run_mode": "foreground",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "kind": {
+            "type": "string",
+            "enum": [
+              "material",
+              "mesh",
+              "curve",
+              "camera",
+              "light",
+              "armature",
+              "world",
+              "node_group",
+              "action",
+              "collection"
+            ]
+          },
+          "name": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256
+          },
+          "subtype": {
+            "type": "string",
+            "maxLength": 128,
+            "default": ""
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "kind",
+          "name"
+        ]
+      },
+      "effect_contract": {
+        "effect_semantics": "external_effect",
+        "lifetime": "foreground"
+      }
+    },
+    "remove-data": {
+      "read_only": false,
+      "requires_workspace": true,
+      "authorization": "global",
+      "run_mode": "foreground",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "kind": {
+            "type": "string",
+            "enum": [
+              "material",
+              "mesh",
+              "curve",
+              "camera",
+              "light",
+              "armature",
+              "world",
+              "node_group",
+              "action",
+              "collection",
+              "image"
+            ]
+          },
+          "name": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256
+          },
+          "do_unlink": {
+            "type": "boolean",
+            "default": false
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "kind",
+          "name"
+        ]
+      },
+      "effect_contract": {
+        "effect_semantics": "external_effect",
+        "lifetime": "foreground"
+      }
+    },
+    "load-image": {
+      "read_only": false,
+      "requires_workspace": true,
+      "authorization": "global",
+      "run_mode": "foreground",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1024
+          },
+          "name": {
+            "type": "string",
+            "maxLength": 256,
+            "default": ""
+          },
+          "check_existing": {
+            "type": "boolean",
+            "default": true
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "path"
+        ]
+      },
+      "effect_contract": {
+        "effect_semantics": "external_effect",
+        "lifetime": "foreground"
+      }
+    },
+    "set-properties": {
+      "read_only": false,
+      "requires_workspace": true,
+      "authorization": "global",
+      "run_mode": "foreground",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "target": {
+            "type": "string",
+            "enum": [
+              "scene",
+              "world",
+              "object",
+              "object_data",
+              "material",
+              "camera",
+              "light",
+              "modifier",
+              "constraint",
+              "image",
+              "collection"
+            ]
+          },
+          "name": {
+            "type": "string",
+            "maxLength": 256,
+            "default": ""
+          },
+          "subname": {
+            "type": "string",
+            "maxLength": 256,
+            "default": ""
+          },
+          "properties": {
+            "type": "object"
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "target",
+          "properties"
+        ]
+      },
+      "effect_contract": {
+        "effect_semantics": "external_effect",
+        "lifetime": "foreground"
+      }
+    },
+    "set-transform": {
+      "read_only": false,
+      "requires_workspace": true,
+      "authorization": "global",
+      "run_mode": "foreground",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256
+          },
+          "location": {
+            "type": "array",
+            "minItems": 3,
+            "maxItems": 3,
+            "items": {
+              "type": "number",
+              "minimum": -1000000000,
+              "maximum": 1000000000
+            }
+          },
+          "rotation_euler": {
+            "type": "array",
+            "minItems": 3,
+            "maxItems": 3,
+            "items": {
+              "type": "number",
+              "minimum": -1000000000,
+              "maximum": 1000000000
+            }
+          },
+          "scale": {
+            "type": "array",
+            "minItems": 3,
+            "maxItems": 3,
+            "items": {
+              "type": "number",
+              "minimum": -1000000000,
+              "maximum": 1000000000
+            }
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "name"
+        ]
+      },
+      "effect_contract": {
+        "effect_semantics": "external_effect",
+        "lifetime": "foreground"
+      }
+    },
+    "mesh-set-geometry": {
+      "read_only": false,
+      "requires_workspace": true,
+      "authorization": "global",
+      "run_mode": "foreground",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "object": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256
+          },
+          "vertices": {
+            "type": "array",
+            "maxItems": 200000,
+            "items": {
+              "type": "array",
+              "minItems": 3,
+              "maxItems": 3,
+              "items": {
+                "type": "number",
+                "minimum": -1000000000,
+                "maximum": 1000000000
+              }
+            }
+          },
+          "edges": {
+            "type": "array",
+            "maxItems": 400000,
+            "items": {
+              "type": "array",
+              "minItems": 2,
+              "maxItems": 2,
+              "items": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 10000000
+              }
+            }
+          },
+          "faces": {
+            "type": "array",
+            "maxItems": 200000,
+            "items": {
+              "type": "array",
+              "minItems": 3,
+              "maxItems": 1024,
+              "items": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 10000000
+              }
+            }
+          },
+          "validate": {
+            "type": "boolean",
+            "default": true
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "object",
+          "vertices"
+        ]
+      },
+      "effect_contract": {
+        "effect_semantics": "external_effect",
+        "lifetime": "foreground"
+      }
+    },
+    "collection-create": {
+      "read_only": false,
+      "requires_workspace": true,
+      "authorization": "global",
+      "run_mode": "foreground",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256
+          },
+          "parent": {
+            "type": "string",
+            "maxLength": 256,
+            "default": ""
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "name"
+        ]
+      },
+      "effect_contract": {
+        "effect_semantics": "external_effect",
+        "lifetime": "foreground"
+      }
+    },
+    "collection-link": {
+      "read_only": false,
+      "requires_workspace": true,
+      "authorization": "global",
+      "run_mode": "foreground",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "object": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256
+          },
+          "collection": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256
+          },
+          "unlink_other_collections": {
+            "type": "boolean",
+            "default": false
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "object",
+          "collection"
+        ]
+      },
+      "effect_contract": {
+        "effect_semantics": "external_effect",
+        "lifetime": "foreground"
+      }
+    },
+    "modifier-add": {
+      "read_only": false,
+      "requires_workspace": true,
+      "authorization": "global",
+      "run_mode": "foreground",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "object": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256
+          },
+          "name": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256
+          },
+          "type": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          },
+          "properties": {
+            "type": "object"
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "object",
+          "name",
+          "type"
+        ]
+      },
+      "effect_contract": {
+        "effect_semantics": "external_effect",
+        "lifetime": "foreground"
+      }
+    },
+    "modifier-remove": {
+      "read_only": false,
+      "requires_workspace": true,
+      "authorization": "global",
+      "run_mode": "foreground",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "object": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256
+          },
+          "name": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "object",
+          "name"
+        ]
+      },
+      "effect_contract": {
+        "effect_semantics": "external_effect",
+        "lifetime": "foreground"
+      }
+    },
+    "constraint-add": {
+      "read_only": false,
+      "requires_workspace": true,
+      "authorization": "global",
+      "run_mode": "foreground",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "object": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256
+          },
+          "name": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256
+          },
+          "type": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          },
+          "properties": {
+            "type": "object"
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "object",
+          "name",
+          "type"
+        ]
+      },
+      "effect_contract": {
+        "effect_semantics": "external_effect",
+        "lifetime": "foreground"
+      }
+    },
+    "constraint-remove": {
+      "read_only": false,
+      "requires_workspace": true,
+      "authorization": "global",
+      "run_mode": "foreground",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "object": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256
+          },
+          "name": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "object",
+          "name"
+        ]
+      },
+      "effect_contract": {
+        "effect_semantics": "external_effect",
+        "lifetime": "foreground"
+      }
+    },
+    "node-create": {
+      "read_only": false,
+      "requires_workspace": true,
+      "authorization": "global",
+      "run_mode": "foreground",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "tree_type": {
+            "type": "string",
+            "enum": [
+              "material",
+              "world",
+              "compositor",
+              "geometry_nodes",
+              "node_group"
+            ]
+          },
+          "owner": {
+            "type": "string",
+            "maxLength": 256,
+            "default": ""
+          },
+          "modifier": {
+            "type": "string",
+            "maxLength": 256,
+            "default": ""
+          },
+          "node_type": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256
+          },
+          "name": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256
+          },
+          "label": {
+            "type": "string",
+            "maxLength": 256,
+            "default": ""
+          },
+          "location": {
+            "type": "array",
+            "minItems": 2,
+            "maxItems": 2,
+            "items": {
+              "type": "number",
+              "minimum": -10000000,
+              "maximum": 10000000
+            }
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "tree_type",
+          "node_type",
+          "name"
+        ]
+      },
+      "effect_contract": {
+        "effect_semantics": "external_effect",
+        "lifetime": "foreground"
+      }
+    },
+    "node-remove": {
+      "read_only": false,
+      "requires_workspace": true,
+      "authorization": "global",
+      "run_mode": "foreground",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "tree_type": {
+            "type": "string",
+            "enum": [
+              "material",
+              "world",
+              "compositor",
+              "geometry_nodes",
+              "node_group"
+            ]
+          },
+          "owner": {
+            "type": "string",
+            "maxLength": 256,
+            "default": ""
+          },
+          "modifier": {
+            "type": "string",
+            "maxLength": 256,
+            "default": ""
+          },
+          "name": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "tree_type",
+          "name"
+        ]
+      },
+      "effect_contract": {
+        "effect_semantics": "external_effect",
+        "lifetime": "foreground"
+      }
+    },
+    "node-set": {
+      "read_only": false,
+      "requires_workspace": true,
+      "authorization": "global",
+      "run_mode": "foreground",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "tree_type": {
+            "type": "string",
+            "enum": [
+              "material",
+              "world",
+              "compositor",
+              "geometry_nodes",
+              "node_group"
+            ]
+          },
+          "owner": {
+            "type": "string",
+            "maxLength": 256,
+            "default": ""
+          },
+          "modifier": {
+            "type": "string",
+            "maxLength": 256,
+            "default": ""
+          },
+          "name": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256
+          },
+          "properties": {
+            "type": "object"
+          },
+          "inputs": {
+            "type": "object"
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "tree_type",
+          "name"
+        ]
+      },
+      "effect_contract": {
+        "effect_semantics": "external_effect",
+        "lifetime": "foreground"
+      }
+    },
+    "node-link": {
+      "read_only": false,
+      "requires_workspace": true,
+      "authorization": "global",
+      "run_mode": "foreground",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "tree_type": {
+            "type": "string",
+            "enum": [
+              "material",
+              "world",
+              "compositor",
+              "geometry_nodes",
+              "node_group"
+            ]
+          },
+          "owner": {
+            "type": "string",
+            "maxLength": 256,
+            "default": ""
+          },
+          "modifier": {
+            "type": "string",
+            "maxLength": 256,
+            "default": ""
+          },
+          "from_node": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256
+          },
+          "from_socket": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          },
+          "to_node": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256
+          },
+          "to_socket": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "tree_type",
+          "from_node",
+          "from_socket",
+          "to_node",
+          "to_socket"
+        ]
+      },
+      "effect_contract": {
+        "effect_semantics": "external_effect",
+        "lifetime": "foreground"
+      }
+    },
+    "node-unlink": {
+      "read_only": false,
+      "requires_workspace": true,
+      "authorization": "global",
+      "run_mode": "foreground",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "tree_type": {
+            "type": "string",
+            "enum": [
+              "material",
+              "world",
+              "compositor",
+              "geometry_nodes",
+              "node_group"
+            ]
+          },
+          "owner": {
+            "type": "string",
+            "maxLength": 256,
+            "default": ""
+          },
+          "modifier": {
+            "type": "string",
+            "maxLength": 256,
+            "default": ""
+          },
+          "from_node": {
+            "type": "string",
+            "maxLength": 256,
+            "default": ""
+          },
+          "to_node": {
+            "type": "string",
+            "maxLength": 256,
+            "default": ""
+          },
+          "clear_all": {
+            "type": "boolean",
+            "default": false
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "tree_type"
+        ]
+      },
+      "effect_contract": {
+        "effect_semantics": "external_effect",
+        "lifetime": "foreground"
+      }
+    },
+    "node-interface-socket": {
+      "read_only": false,
+      "requires_workspace": true,
+      "authorization": "global",
+      "run_mode": "foreground",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "node_group": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256
+          },
+          "operation": {
+            "type": "string",
+            "enum": [
+              "add",
+              "remove"
+            ]
+          },
+          "name": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256
+          },
+          "in_out": {
+            "type": "string",
+            "enum": [
+              "INPUT",
+              "OUTPUT"
+            ],
+            "default": "INPUT"
+          },
+          "socket_type": {
+            "type": "string",
+            "maxLength": 128,
+            "default": "NodeSocketFloat"
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "node_group",
+          "operation",
+          "name"
+        ]
+      },
+      "effect_contract": {
+        "effect_semantics": "external_effect",
+        "lifetime": "foreground"
+      }
+    },
+    "keyframe-insert": {
+      "read_only": false,
+      "requires_workspace": true,
+      "authorization": "global",
+      "run_mode": "foreground",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "object": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256
+          },
+          "data_path": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512
+          },
+          "frame": {
+            "type": "number",
+            "minimum": -1000000,
+            "maximum": 1000000
+          },
+          "index": {
+            "type": "integer",
+            "minimum": -1,
+            "maximum": 1024,
+            "default": -1
+          },
+          "group": {
+            "type": "string",
+            "maxLength": 256,
+            "default": ""
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "object",
+          "data_path",
+          "frame"
+        ]
+      },
+      "effect_contract": {
+        "effect_semantics": "external_effect",
+        "lifetime": "foreground"
+      }
+    },
+    "keyframe-delete": {
+      "read_only": false,
+      "requires_workspace": true,
+      "authorization": "global",
+      "run_mode": "foreground",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "object": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256
+          },
+          "data_path": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512
+          },
+          "frame": {
+            "type": "number",
+            "minimum": -1000000,
+            "maximum": 1000000
+          },
+          "index": {
+            "type": "integer",
+            "minimum": -1,
+            "maximum": 1024,
+            "default": -1
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "object",
+          "data_path",
+          "frame"
+        ]
+      },
+      "effect_contract": {
+        "effect_semantics": "external_effect",
+        "lifetime": "foreground"
+      }
+    },
+    "set-frame": {
+      "read_only": false,
+      "requires_workspace": true,
+      "authorization": "global",
+      "run_mode": "foreground",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "frame": {
+            "type": "integer",
+            "minimum": -1000000,
+            "maximum": 1000000
+          },
+          "subframe": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1,
+            "default": 0
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "frame"
+        ]
+      },
+      "effect_contract": {
+        "effect_semantics": "external_effect",
+        "lifetime": "foreground"
+      }
+    },
+    "operator-call": {
+      "read_only": false,
+      "requires_workspace": true,
+      "authorization": "global",
+      "run_mode": "foreground",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "operator": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256
+          },
+          "properties": {
+            "type": "object"
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "operator"
+        ]
+      },
+      "effect_contract": {
+        "effect_semantics": "external_effect",
+        "lifetime": "foreground"
+      }
+    },
+    "undo": {
+      "read_only": false,
+      "requires_workspace": true,
+      "authorization": "global",
+      "run_mode": "foreground",
+      "input_schema": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false
+      },
+      "effect_contract": {
+        "effect_semantics": "external_effect",
+        "lifetime": "foreground"
+      }
+    },
+    "redo": {
+      "read_only": false,
+      "requires_workspace": true,
+      "authorization": "global",
+      "run_mode": "foreground",
+      "input_schema": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false
+      },
+      "effect_contract": {
+        "effect_semantics": "external_effect",
+        "lifetime": "foreground"
+      }
+    },
+    "open-blend": {
+      "read_only": false,
+      "requires_workspace": true,
+      "authorization": "global",
+      "run_mode": "foreground",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1024
+          },
+          "load_ui": {
+            "type": "boolean",
+            "default": false
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "path"
+        ]
+      },
+      "effect_contract": {
+        "effect_semantics": "external_effect",
+        "lifetime": "foreground"
+      }
+    },
+    "save-blend": {
+      "read_only": false,
+      "requires_workspace": true,
+      "authorization": "global",
+      "run_mode": "foreground",
+      "mutation_scope": {
+        "mode": "paths",
+        "claims": [
+          {
+            "param": "path",
+            "kind": "exact"
+          }
+        ]
+      },
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1024
+          },
+          "copy": {
+            "type": "boolean",
+            "default": false
+          },
+          "compress": {
+            "type": "boolean",
+            "default": true
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "path"
+        ]
+      },
+      "effect_contract": {
+        "effect_semantics": "external_effect",
+        "lifetime": "foreground"
+      }
+    },
+    "import-asset": {
+      "read_only": false,
+      "requires_workspace": true,
+      "authorization": "global",
+      "run_mode": "foreground",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1024
+          },
+          "format": {
+            "type": "string",
+            "enum": [
+              "OBJ",
+              "FBX",
+              "GLTF",
+              "STL",
+              "PLY",
+              "USD",
+              "ABC"
+            ]
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "path",
+          "format"
+        ]
+      },
+      "effect_contract": {
+        "effect_semantics": "external_effect",
+        "lifetime": "foreground"
+      }
+    },
+    "export-asset": {
+      "read_only": false,
+      "requires_workspace": true,
+      "authorization": "global",
+      "run_mode": "foreground",
+      "mutation_scope": {
+        "mode": "paths",
+        "claims": [
+          {
+            "param": "path",
+            "kind": "exact"
+          }
+        ]
+      },
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1024
+          },
+          "format": {
+            "type": "string",
+            "enum": [
+              "OBJ",
+              "FBX",
+              "GLTF",
+              "STL",
+              "PLY",
+              "USD",
+              "ABC"
+            ]
+          },
+          "selection_only": {
+            "type": "boolean",
+            "default": false
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "path",
+          "format"
+        ]
+      },
+      "effect_contract": {
+        "effect_semantics": "external_effect",
+        "lifetime": "foreground"
+      }
+    },
+    "render-still": {
+      "read_only": false,
+      "requires_workspace": true,
+      "authorization": "global",
+      "run_mode": "job",
+      "timeout_seconds": 0,
+      "mutation_scope": {
+        "mode": "paths",
+        "claims": [
+          {
+            "param": "path",
+            "kind": "exact"
+          }
+        ]
+      },
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1024
+          },
+          "frame": {
+            "type": "integer",
+            "minimum": -1000000,
+            "maximum": 1000000
+          },
+          "write_still": {
+            "type": "boolean",
+            "default": true
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "path"
+        ]
+      },
+      "effect_contract": {
+        "effect_semantics": "external_effect",
+        "lifetime": "job_owned"
+      }
+    },
+    "render-animation": {
+      "read_only": false,
+      "requires_workspace": true,
+      "authorization": "global",
+      "run_mode": "job",
+      "timeout_seconds": 0,
+      "mutation_scope": {
+        "mode": "paths",
+        "claims": [
+          {
+            "param": "output_dir",
+            "kind": "tree"
+          }
+        ]
+      },
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "output_dir": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1024
+          },
+          "filename_prefix": {
+            "type": "string",
+            "maxLength": 256,
+            "default": "frame_"
+          },
+          "frame_start": {
+            "type": "integer",
+            "minimum": -1000000,
+            "maximum": 1000000
+          },
+          "frame_end": {
+            "type": "integer",
+            "minimum": -1000000,
+            "maximum": 1000000
+          },
+          "file_format": {
+            "type": "string",
+            "enum": [
+              "PNG",
+              "JPEG",
+              "OPEN_EXR"
+            ],
+            "default": "PNG"
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "output_dir"
+        ]
+      },
+      "effect_contract": {
+        "effect_semantics": "external_effect",
+        "lifetime": "job_owned"
+      }
+    },
+    "headless-probe": {
+      "read_only": true,
+      "requires_workspace": false,
+      "authorization": "global",
+      "run_mode": "foreground",
+      "input_schema": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false
+      },
+      "effect_contract": {
+        "effect_semantics": "read_only",
+        "lifetime": "foreground"
+      }
+    },
+    "headless-render": {
+      "read_only": false,
+      "requires_workspace": true,
+      "authorization": "global",
+      "run_mode": "job",
+      "timeout_seconds": 0,
+      "mutation_scope": {
+        "mode": "paths",
+        "claims": [
+          {
+            "param": "output_dir",
+            "kind": "tree"
+          }
+        ]
+      },
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "blend_path": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1024
+          },
+          "output_dir": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1024
+          },
+          "frame": {
+            "type": "integer",
+            "minimum": -1000000,
+            "maximum": 1000000
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "blend_path",
+          "output_dir"
+        ]
+      },
+      "effect_contract": {
+        "effect_semantics": "external_effect",
+        "lifetime": "job_owned"
+      }
+    }
+  }
+}

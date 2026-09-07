@@ -48,6 +48,7 @@ from .task_runner import (
     MAX_RUNNING_TASK_JOBS,
     TaskJobManager,
 )
+from .transport_limits import MAX_MCP_MESSAGE_BYTES
 from .text_writes import (
     MAX_ACTIVE_TEXT_TRANSACTIONS,
     MAX_TRANSACTION_CHUNK_BYTES,
@@ -702,6 +703,7 @@ class ToolRuntime:
                 "exact_edit_max_bytes": MAX_EDIT_TEXT_BYTES,
                 "literal_search_max_file_bytes": MAX_SEARCH_TEXT_BYTES,
                 "literal_search_streaming": True,
+                "mcp_message_max_bytes": MAX_MCP_MESSAGE_BYTES,
                 "transactional_text_writes": {
                     "max_active": MAX_ACTIVE_TEXT_TRANSACTIONS,
                     "max_chunk_bytes": MAX_TRANSACTION_CHUNK_BYTES,
@@ -711,7 +713,7 @@ class ToolRuntime:
                     "process_local": True,
                     "survives_server_restart": False,
                     "stale_cleanup_seconds": TRANSACTION_TTL_SECONDS,
-                    "mcp_message_limit_unchanged": True,
+                    "mcp_message_max_bytes": MAX_MCP_MESSAGE_BYTES,
                 },
                 "config_protected_from_mcp": True,
                 "task_warning": "Approved tasks and build/package capabilities execute repository code with the current OS user's permissions.",
@@ -1635,7 +1637,7 @@ WRITE_FILE_TOOL = {
     "name": "write_file",
     "title": "Transactionally write a large UTF-8 file",
     "description": (
-        "Host-owned five-action transaction for large whole-file creates or replacements without increasing the MCP message limit. "
+        "Host-owned five-action transaction for large whole-file creates or replacements without requiring one giant MCP message. "
         "Use begin, then one or more append calls with the exact next UTF-8 byte offset, optionally status, then commit with the complete expected size and SHA-256; abort discards staging. "
         "Staging stays outside the workspace, replace mode rechecks the original target SHA at commit, and successful commit uses a same-directory fsync + atomic replace."
     ),
@@ -1649,7 +1651,7 @@ WRITE_FILE_TOOL = {
             "expected_target_sha256": {"type": "string", "minLength": 64, "maxLength": 64, "description": "Required for begin in replace mode; obtain with file_info."},
             "transaction_id": {"type": "string", "minLength": 1, "maxLength": 128, "description": "Returned by begin; required by append/status/commit/abort."},
             "offset": {"type": "integer", "minimum": 0, "description": "Required for append; exact next UTF-8 byte offset, making retries non-duplicating."},
-            "chunk": {"type": "string", "description": f"Required for append; runtime-enforced maximum is {MAX_TRANSACTION_CHUNK_BYTES // 1024} KiB of UTF-8 bytes so even worst-case JSON escaping stays below the 1 MiB MCP message limit."},
+            "chunk": {"type": "string", "description": f"Required for append; runtime-enforced maximum is {MAX_TRANSACTION_CHUNK_BYTES // (1024 * 1024)} MiB of UTF-8 bytes so even worst-case JSON escaping stays below the MCP message ceiling."},
             "expected_size": {"type": "integer", "minimum": 0, "maximum": MAX_TRANSACTION_TEXT_BYTES, "description": "Required for commit; complete UTF-8 byte length."},
             "expected_sha256": {"type": "string", "minLength": 64, "maxLength": 64, "description": "Required for commit; SHA-256 of complete new UTF-8 bytes."},
         },

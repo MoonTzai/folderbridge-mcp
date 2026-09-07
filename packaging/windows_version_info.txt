@@ -16,12 +16,12 @@ VSVersionInfo(
         [
           StringStruct('CompanyName', 'FolderBridge MCP contributors'),
           StringStruct('FileDescription', 'Safer local-first MCP workspace bridge'),
-          StringStruct('FileVersion', '0.8.25'),
+          StringStruct('FileVersion', '0.8.26'),
           StringStruct('InternalName', 'FolderBridge'),
           StringStruct('LegalCopyright', 'Copyright 2026 MoonTzai'),
           StringStruct('OriginalFilename', 'FolderBridge.exe'),
           StringStruct('ProductName', 'FolderBridge MCP'),
-          StringStruct('ProductVersion', '0.8.25'),
+          StringStruct('ProductVersion', '0.8.26'),
         ],
       )
     ]),

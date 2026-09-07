@@ -235,6 +235,7 @@ class FolderBridgeLauncher:
             for name in CAPABILITY_NAMES
         }
         self.api_key_var = tk.StringVar()
+        self.api_key_var.trace_add("write", self._on_runtime_api_key_changed)
         self.show_key_var = tk.BooleanVar()
 
         make_display_var = lambda value="": _LocalizedStringVar(
@@ -1755,6 +1756,7 @@ class FolderBridgeLauncher:
         key_frame.grid(row=5, column=1, columnspan=3, sticky="ew", pady=(10, 0))
         key_frame.columnconfigure(0, weight=1)
         self.key_entry = self._build_dpi_entry(key_frame, textvariable=self.api_key_var, show="●")
+        self.key_entry.bind("<FocusOut>", lambda _event: self._normalize_runtime_api_key_field(), add="+")
         self.key_entry.grid(
             row=0,
             column=0,
@@ -1997,6 +1999,16 @@ class FolderBridgeLauncher:
     def _toggle_key_visibility(self) -> None:
         self.key_entry.configure(show="" if self.show_key_var.get() else "●")
 
+    def _normalize_runtime_api_key_field(self) -> str:
+        current = self.api_key_var.get()
+        normalized = current.strip()
+        if normalized != current:
+            self.api_key_var.set(normalized)
+        return normalized
+
+    def _on_runtime_api_key_changed(self, *_args: object) -> None:
+        self._normalize_runtime_api_key_field()
+
     def _toggle_connection(self) -> None:
         if self.supervisor.desired_running():
             self._stop_connection()
@@ -2008,7 +2020,7 @@ class FolderBridgeLauncher:
             settings = self._settings_from_form()
             workspaces = settings.validate(require_tunnel_id=True)
             executable = self._require_tunnel_client(settings.tunnel_client_path)
-            env = control_plane_environment(self.api_key_var.get())
+            env = control_plane_environment(self._normalize_runtime_api_key_field())
             fingerprint = settings.fingerprint()
             self._save_form(settings)
         except (LauncherError, OSError) as exc:
@@ -2064,7 +2076,7 @@ class FolderBridgeLauncher:
             settings = self._settings_from_form()
             workspaces = settings.validate(require_tunnel_id=True)
             executable = self._require_tunnel_client(settings.tunnel_client_path)
-            env = control_plane_environment(self.api_key_var.get())
+            env = control_plane_environment(self._normalize_runtime_api_key_field())
             fingerprint = settings.fingerprint()
             self._save_form(settings)
         except (LauncherError, OSError) as exc:
@@ -2095,7 +2107,7 @@ class FolderBridgeLauncher:
             settings = self._settings_from_form()
             settings.validate(require_tunnel_id=False)
             executable = self._require_tunnel_client(settings.tunnel_client_path)
-            env = control_plane_environment(self.api_key_var.get())
+            env = control_plane_environment(self._normalize_runtime_api_key_field())
             self._save_form(settings)
         except (LauncherError, OSError) as exc:
             self._show_error(str(exc))

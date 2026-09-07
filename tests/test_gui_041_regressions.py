@@ -105,6 +105,19 @@ class Gui041RegressionTests(unittest.TestCase):
         self.assertIn('service_actions.pack(fill="x", pady=(4, 0))', self.gui)
         self.assertIn("if busy or not owned:\n                    stop_button.configure(state=\"disabled\")", self.gui)
 
+    def test_runtime_api_key_field_trims_clipboard_edge_whitespace(self) -> None:
+        self.assertIn("def _normalize_runtime_api_key_field(self) -> str:", self.gui)
+        self.assertIn("normalized = current.strip()", self.gui)
+        self.assertIn('self.api_key_var.trace_add("write", self._on_runtime_api_key_changed)', self.gui)
+        self.assertIn("def _on_runtime_api_key_changed(self, *_args: object) -> None:", self.gui)
+        self.assertIn("self._normalize_runtime_api_key_field()", self.gui)
+        self.assertIn('self.key_entry.bind("<FocusOut>", lambda _event: self._normalize_runtime_api_key_field(), add="+")', self.gui)
+        self.assertEqual(
+            self.gui.count("control_plane_environment(self._normalize_runtime_api_key_field())"),
+            3,
+        )
+        self.assertNotIn("self.api_key_var.set(os.environ", self.gui)
+
 
     def test_blocked_tunnel_recovery_preserves_runtime_api_key_in_memory(self) -> None:
         poll_block = self.gui.split("def _poll_process", 1)[1].split("def _set_connection_state", 1)[0]

@@ -431,6 +431,14 @@ def control_plane_environment(api_key: str) -> dict[str, str]:
         raise LauncherError("Runtime API Key 格式无效")
     if memory_key:
         env["CONTROL_PLANE_API_KEY"] = memory_key
+    elif "CONTROL_PLANE_API_KEY" in env:
+        inherited_key = env["CONTROL_PLANE_API_KEY"].strip()
+        if len(inherited_key) > 4096 or "\x00" in inherited_key:
+            raise LauncherError("Runtime API Key 格式无效")
+        if inherited_key:
+            env["CONTROL_PLANE_API_KEY"] = inherited_key
+        else:
+            env.pop("CONTROL_PLANE_API_KEY", None)
     if not env.get("CONTROL_PLANE_API_KEY"):
         raise LauncherError("请输入 Runtime API Key，或预先设置 CONTROL_PLANE_API_KEY")
     return env

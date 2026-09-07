@@ -17,6 +17,15 @@ FolderBridge MCP 是一个零第三方依赖的 Python MCP 服务器和桌面启
 > [!IMPORTANT]
 > 项目目前处于早期公开测试阶段。它可以缩小攻击面，但不是操作系统级沙箱。只应开放你信任的文件夹和代码仓库。
 
+## 0.8.26 重点更新
+
+- **更大的有界 MCP 帧上限：** production stdio 与 Phase-0 私有入口统一到 32 MiB request ceiling；transactional write chunk 提高到 4 MiB，exact edit 仍为 128 MiB，整文件 transactional write / literal search 的更大独立上限不受影响。
+- **超大请求隔离失败：** oversized request 会返回可关联的受限错误并完成 bounded drain/reframe，不再让单个超限请求演变成 shared-stdio 全局 Runtime 掉线。
+- **Runtime API Key 粘贴自动清理：** 输入框内首尾空格、Tab、CR/LF 等边缘空白会立即从内存字段中删除；连接、应用配置、诊断前仍再次归一化，继承的 `CONTROL_PLANE_API_KEY` 也使用同样规则；凭据仍不持久化、不写日志。
+- **外源 Blender Toolkit 0.1.1：** 仓库现包含 exact-hash approved 的 Blender bridge 源码/安装器，并完成 Blender 5.x compositor 迁移兼容；支持本地节点、数据、渲染、动画等受限操作，可用于 deterministic video-control workflow。
+- **外源 File Ops Toolkit 0.1.0：** 提供受限 copy/move 能力，不重新开放 arbitrary shell。
+- **Video Storyboard Production Skill Pack 1.0.0：** 可选本地方法论包覆盖旁白转分镜、连续性清单、镜头规格、MiniMax H3 workflow 与 generated-video review。
+
 ## 0.7.0 重点更新
 
 - **新增本地 Skill Engine，且不扩张 MCP tool 目录：** 可信的方法类 Skill 可按需发现、匹配和加载；统一通过 bundled `skill-engine` Extension 走现有稳定 `extension` 网关，新增 Skill Pack 不会新增 MCP tool 名称。
@@ -247,20 +256,20 @@ JSON 示例采用许多桌面客户端使用的 `mcpServers` 约定：
 
 - `server_info`：报告可用工作区的名称、稳定 `workspace_id`、内建/全局能力和安全边界；
 - `workspace`：在指定 `workspace_id` 内列出和读取文件，对最大 512 MiB 的 UTF-8 文件进行流式 literal search，并以可分页、可按相对路径收窄的方式查看 Git status/diff；
-- `file_info`：读取普通文件的有界元数据与整文件 SHA-256；编辑超过 1 MiB 的文本前，用它取得当前 SHA；
+- `file_info`：读取普通文件的有界元数据与整文件 SHA-256；编辑超过 1 MiB 的文本前，用它取得当前 SHA。这里的 1 MiB 只是 `workspace(read)` 是否顺手返回整文件 hash 的便利阈值，不是编辑能力上限；
 - `pptx_inspect`：安全解析 PPTX 文本、OOXML 图关系和 SmartArt 数据，不执行 Office 内容；
 - `image_open`：把工作区中的 PNG/JPEG/GIF/WebP（包括 ZIP 内精确成员）作为 MCP 图像内容返回；
 - `extension`：固定的插件网关；`list` 返回紧凑且可分页的目录，`info` 返回单个插件的完整 action schema，`run` 执行选定 action；以后安装更多插件不会继续增加 MCP tool 名称；
-- `edit_file`：读写模式下创建小型内联 UTF-8 文件，或精确编辑不超过 128 MiB 的已有 UTF-8 文本；编辑已有文件必须携带当前整文件 SHA-256，大文件整文件新建使用 `write_file`；
-- `write_file`：读写模式下提供 `begin`、`append`、`status`、`commit`、`abort` 五个固定事务动作，用于最大 512 MiB 的整文件 UTF-8 新建或替换，同时保持 MCP 单消息上限仍为 1 MiB。
+- `edit_file`：读写模式下创建内联 UTF-8 文件，或精确编辑不超过 128 MiB 的已有 UTF-8 文本；编辑已有文件必须携带当前整文件 SHA-256，大文件整文件新建使用 `write_file`；
+- `write_file`：读写模式下提供 `begin`、`append`、`status`、`commit`、`abort` 五个固定事务动作，用于最大 512 MiB 的整文件 UTF-8 新建或替换；MCP 请求 framing ceiling 为 32 MiB。
 
 只有一个工作区时，旧客户端可以继续省略 `workspace_id`。存在多个工作区时，所有工作区作用域工具都必须携带 `server_info` 返回的 `workspace_id`；缺失或未知 ID 会被拒绝。重复目录、父子重叠目录和超过 16 项的列表也会在启动前被拒绝。
 
 做局部精确替换时：先列出/搜索并读取所需片段，保留当前整文件 SHA-256，再调用 `edit_file`，最后检查 Git diff。`workspace(read)` 会为不超过 1 MiB 的文件返回整文件 SHA；更大的文件改用 `file_info`。新建文件采用 no-clobber 发布；已有文件会在原子发布前再次复核预期 SHA。如果底层文件系统不能提供安全的原子 no-clobber 发布，新建会安全失败，而不会退化成覆盖已有文件。
 
-做大文件整文件新建或替换时使用 `write_file`：先 `begin`（`replace` 还要携带 `file_info` 得到的旧 SHA），再按精确的 UTF-8 字节 offset 连续 `append`，可用 `status` 查看当前 offset，最后带完整新文件字节数和 SHA-256 执行 `commit`，或用 `abort` 放弃。单块最多 128 KiB，确保最坏 JSON 转义后仍低于不变的 1 MiB MCP 单消息上限。事务只在当前服务器进程内存在，暂存文件位于工作区之外，整文件上限 512 MiB；超过 24 小时的陈旧暂存文件会在后续启动时清理。提交前会再次校验 UTF-8、大小、新 SHA、工作区/链接策略和替换目标旧 SHA，再从同目录完整临时文件原子发布；新建模式不会覆盖 `begin` 后突然出现的目标。
+做大文件整文件新建或替换时使用 `write_file`：先 `begin`（`replace` 还要携带 `file_info` 得到的旧 SHA），再按精确的 UTF-8 字节 offset 连续 `append`，可用 `status` 查看当前 offset，最后带完整新文件字节数和 SHA-256 执行 `commit`，或用 `abort` 放弃。单块最多 4 MiB，即便出现病理级 JSON escaping 也保持在 32 MiB MCP 请求 ceiling 内。事务只在当前服务器进程内存在，暂存文件位于工作区之外，整文件上限 512 MiB；超过 24 小时的陈旧暂存文件会在后续启动时清理。提交前会再次校验 UTF-8、大小、新 SHA、工作区/链接策略和替换目标旧 SHA，再从同目录完整临时文件原子发布；新建模式不会覆盖 `begin` 后突然出现的目标。
 
-大文件检查链路不再退回“小文件搜索”上限。literal search 会以流式方式扫描单个最大 512 MiB 的 UTF-8 文件，并分别报告 binary、非 UTF-8、超限和 I/O 跳过；list/search 使用结果 offset 分页，Git status/diff 使用字节 offset 分页，并可按一个工作区相对路径收窄。这里扩展的是可继续取下一页的能力，而不是放大单次响应；MCP 1 MiB envelope 保持不变。
+大文件检查链路不再退回“小文件搜索”上限。literal search 会以流式方式扫描单个最大 512 MiB 的 UTF-8 文件，并分别报告 binary、非 UTF-8、超限和 I/O 跳过；list/search 使用结果 offset 分页，Git status/diff 使用字节 offset 分页，并可按一个工作区相对路径收窄。这里扩展的是可继续取下一页的能力，而不是无界放大单次响应；MCP 请求 framing 独立限制为 32 MiB。
 
 Skill 路由也采用同样的规模化策略。初始化只携带 64 KiB 的紧凑 round-robin 路由索引，不嵌入 Skill 正文；如果启用的 Skill 放不下，会明确报告遗漏数量，而 `skill-engine match` 始终保留为完整的任务级发现入口。Extension `list` 同样保持紧凑可分页，完整 schema 延后到 `extension(info)` 获取。
 
