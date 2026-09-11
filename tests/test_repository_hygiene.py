@@ -71,7 +71,7 @@ class RepositoryHygieneTests(unittest.TestCase):
     def test_published_external_extension_table_matches_manifest_versions(self) -> None:
         published = {
             "blender-toolkit": ("0.1.2", "test_external_blender_toolkit.py"),
-            "comfyui": ("1.5.0", "test_external_comfyui.py"),
+            "comfyui": ("1.6.0", "test_external_comfyui.py"),
             "download-toolkit": ("0.1.0", "test_external_download_toolkit.py"),
             "ffmpeg-toolkit": ("0.1.2", "test_external_ffmpeg_toolkit.py"),
             "file-ops-toolkit": ("0.1.0", "test_external_file_ops_toolkit.py"),

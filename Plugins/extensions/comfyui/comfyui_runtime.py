@@ -57,7 +57,379 @@ MAX_PROGRESS_NODE_CHARS = 128
 MAX_PROGRESS_OBSERVE_SECONDS = 10.0
 MAX_WS_MESSAGE_BYTES = 256 * 1024
 DIRECTOR_CLASS_NAMES = frozenset({"MiniMaxH3Director"})
+PRODUCTION_PROFILE_AUTO = "auto"
+PRODUCTION_PROFILE_NONE = "none"
+PRODUCTION_PROFILE_MINIMAX_H3_V2V_16GB_1344X768 = "minimax_h3_v2v_16gb_1344x768"
+PRODUCTION_PROFILES = frozenset({
+    PRODUCTION_PROFILE_AUTO,
+    PRODUCTION_PROFILE_NONE,
+    PRODUCTION_PROFILE_MINIMAX_H3_V2V_16GB_1344X768,
+})
+MINIMAX_H3_V2V_PACKED_ROW_BUDGET = 100_000
+MINIMAX_H3_V2V_VALIDATED_BASELINE_FRAMES = 124
+MINIMAX_H3_V2V_PROFILE_WIDTH = 1344
+MINIMAX_H3_V2V_PROFILE_HEIGHT = 768
 WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
+
+
+def _production_profile_reject(profile: str, message: str, **details: Any) -> None:
+    raise ExtensionError(
+        "COMFYUI_PRODUCTION_PROFILE_REJECTED",
+        message,
+        production_profile=profile,
+        **details,
+    )
+
+
+def _minimax_task_key(raw: Any) -> str:
+    if not isinstance(raw, str):
+        return ""
+    normalized = raw.strip().lower()
+    if normalized.startswith("rv2v"):
+        return "rv2v"
+    if normalized.startswith("v2v"):
+        return "v2v"
+    return ""
+
+
+def _numeric_equals(raw: Any, expected: float) -> bool:
+    return isinstance(raw, (int, float)) and not isinstance(raw, bool) and float(raw) == float(expected)
+
+
+def _minimax_align_frame_count(frame_count: int) -> int:
+    n = max(5, int(frame_count))
+    remainder = (n - 5) % 17
+    return n if remainder == 0 else n + (17 - remainder)
+
+
+def _minimax_video_latent_t(frame_count: int) -> int:
+    n = _minimax_align_frame_count(frame_count)
+    return 2 if n <= 5 else ((n - 5) // 17) * 5 + 2
+
+
+def _estimate_minimax_h3_v2v_packed_rows(frame_count: int, width: int, height: int) -> int:
+    frame_rows = max(1, (max(32, int(width)) // 32) * (max(32, int(height)) // 32))
+    return 2 * _minimax_video_latent_t(frame_count) * frame_rows
+
+
+def _recommended_minimax_h3_v2v_max_frames(width: int, height: int) -> int:
+    frame_rows = max(1, (max(32, int(width)) // 32) * (max(32, int(height)) // 32))
+    max_latent_t = max(2, MINIMAX_H3_V2V_PACKED_ROW_BUDGET // (2 * frame_rows))
+    cycles = max(0, (max_latent_t - 2) // 5)
+    return 5 + 17 * cycles
+
+
+def _linked_node(
+    workflow: dict[str, Any],
+    link: Any,
+    *,
+    profile: str,
+    owner_node_id: str,
+    input_name: str,
+) -> tuple[str, dict[str, Any]]:
+    if not isinstance(link, list) or not link:
+        _production_profile_reject(
+            profile,
+            f"Node {owner_node_id} input {input_name} must be linked for this production profile.",
+            node_id=owner_node_id,
+            input_name=input_name,
+        )
+    source_id = str(link[0])
+    source = workflow.get(source_id)
+    if not isinstance(source, dict):
+        _production_profile_reject(
+            profile,
+            f"Node {owner_node_id} input {input_name} references an unknown source node.",
+            node_id=owner_node_id,
+            input_name=input_name,
+            source_node_id=source_id,
+        )
+    return source_id, source
+
+
+def _director_guard_default(*, port: int, profile: str) -> bool:
+    response = _json_request("GET", "/object_info/MiniMaxH3Director", port=port, timeout=5)
+    info = response.get("MiniMaxH3Director") if isinstance(response, dict) else None
+    if not isinstance(info, dict):
+        _production_profile_reject(
+            profile,
+            "Live ComfyUI does not expose MiniMaxH3Director node schema required by this production profile.",
+        )
+    schema_input = info.get("input")
+    if not isinstance(schema_input, dict):
+        _production_profile_reject(profile, "MiniMaxH3Director live node schema has no input contract.")
+    for section_name in ("required", "optional"):
+        section = schema_input.get(section_name)
+        if not isinstance(section, dict):
+            continue
+        descriptor = section.get("guard_long_v2v_segments")
+        if not isinstance(descriptor, list) or len(descriptor) < 2 or not isinstance(descriptor[1], dict):
+            continue
+        default = descriptor[1].get("default")
+        if isinstance(default, bool):
+            return default
+    _production_profile_reject(
+        profile,
+        "Live MiniMaxH3Director lacks guard_long_v2v_segments; update the Director before using this production profile.",
+    )
+
+
+def _profile_segment_checks(director_inputs: dict[str, Any], *, profile: str) -> list[dict[str, Any]]:
+    total_frames = director_inputs.get("total_frames")
+    if not isinstance(total_frames, int) or isinstance(total_frames, bool) or total_frames < 5:
+        _production_profile_reject(profile, "MiniMaxH3Director total_frames must be an integer >= 5.")
+    global_task = _minimax_task_key(director_inputs.get("task_type"))
+    timeline_raw = director_inputs.get("timeline_data")
+    raw_segments: list[Any] | None = None
+    if isinstance(timeline_raw, str) and timeline_raw.strip():
+        try:
+            timeline = json.loads(timeline_raw)
+        except json.JSONDecodeError as exc:
+            _production_profile_reject(profile, "MiniMaxH3Director timeline_data must be valid JSON.", error=str(exc))
+        if not isinstance(timeline, dict):
+            _production_profile_reject(profile, "MiniMaxH3Director timeline_data must decode to an object.")
+        candidate_segments = timeline.get("segments")
+        if candidate_segments is not None:
+            if not isinstance(candidate_segments, list) or not candidate_segments:
+                _production_profile_reject(profile, "MiniMaxH3Director timeline segments must be a non-empty list when present.")
+            raw_segments = candidate_segments
+    if raw_segments is None:
+        raw_segments = [{"frameCount": total_frames, "taskType": director_inputs.get("task_type")}]
+
+    checks: list[dict[str, Any]] = []
+    safe_max = _recommended_minimax_h3_v2v_max_frames(
+        MINIMAX_H3_V2V_PROFILE_WIDTH,
+        MINIMAX_H3_V2V_PROFILE_HEIGHT,
+    )
+    for index, raw_segment in enumerate(raw_segments):
+        if not isinstance(raw_segment, dict):
+            _production_profile_reject(profile, "MiniMaxH3Director timeline contains a non-object segment.", segment=index + 1)
+        raw_frames = raw_segment.get("frameCount", raw_segment.get("length", total_frames))
+        if not isinstance(raw_frames, int) or isinstance(raw_frames, bool) or raw_frames < 5:
+            _production_profile_reject(
+                profile,
+                "MiniMaxH3Director segment frame count must be an integer >= 5.",
+                segment=index + 1,
+            )
+        task = _minimax_task_key(raw_segment.get("taskType")) or global_task
+        if task != "v2v":
+            _production_profile_reject(
+                profile,
+                "This production profile is limited to MiniMax H3 V2V segments.",
+                segment=index + 1,
+                task=task or None,
+            )
+        rows = _estimate_minimax_h3_v2v_packed_rows(
+            raw_frames,
+            MINIMAX_H3_V2V_PROFILE_WIDTH,
+            MINIMAX_H3_V2V_PROFILE_HEIGHT,
+        )
+        if rows > MINIMAX_H3_V2V_PACKED_ROW_BUDGET:
+            _production_profile_reject(
+                profile,
+                "MiniMax H3 V2V segment exceeds the validated 16GB-class packed-row budget; split it before submission.",
+                segment=index + 1,
+                frames=raw_frames,
+                packed_video_rows=rows,
+                packed_video_row_budget=MINIMAX_H3_V2V_PACKED_ROW_BUDGET,
+                recommended_max_frames=safe_max,
+                conservative_baseline_frames=MINIMAX_H3_V2V_VALIDATED_BASELINE_FRAMES,
+            )
+        checks.append(
+            {
+                "segment": index + 1,
+                "frames": raw_frames,
+                "aligned_frames": _minimax_align_frame_count(raw_frames),
+                "packed_video_rows": rows,
+                "budget": MINIMAX_H3_V2V_PACKED_ROW_BUDGET,
+            }
+        )
+    return checks
+
+
+def _resolve_production_profile(workflow: dict[str, Any], requested: str | None) -> tuple[str, str | None]:
+    normalized = PRODUCTION_PROFILE_AUTO if requested is None else requested
+    if not isinstance(normalized, str) or normalized not in PRODUCTION_PROFILES:
+        raise ExtensionError(
+            "INVALID_ARGUMENT",
+            "production_profile must be one of: " + ", ".join(sorted(PRODUCTION_PROFILES)) + ".",
+        )
+    if normalized == PRODUCTION_PROFILE_NONE:
+        return normalized, None
+    if normalized == PRODUCTION_PROFILE_MINIMAX_H3_V2V_16GB_1344X768:
+        return normalized, normalized
+    for node in workflow.values():
+        if not isinstance(node, dict) or node.get("class_type") != "MiniMaxH3Director":
+            continue
+        inputs = node.get("inputs")
+        if not isinstance(inputs, dict):
+            continue
+        if (
+            _minimax_task_key(inputs.get("task_type")) == "v2v"
+            and inputs.get("width") == MINIMAX_H3_V2V_PROFILE_WIDTH
+            and inputs.get("height") == MINIMAX_H3_V2V_PROFILE_HEIGHT
+        ):
+            return normalized, PRODUCTION_PROFILE_MINIMAX_H3_V2V_16GB_1344X768
+    return normalized, None
+
+
+def _validate_production_profile(
+    workflow: dict[str, Any],
+    requested: str | None,
+    *,
+    port: int,
+) -> dict[str, Any]:
+    requested_value, resolved = _resolve_production_profile(workflow, requested)
+    if resolved is None:
+        return {
+            "requested": requested_value,
+            "resolved": None,
+            "validated": True,
+            "reason": "explicitly_disabled" if requested_value == PRODUCTION_PROFILE_NONE else "no_matching_profile",
+        }
+
+    profile = resolved
+    directors = [
+        (str(node_id), node)
+        for node_id, node in workflow.items()
+        if isinstance(node, dict) and node.get("class_type") == "MiniMaxH3Director"
+    ]
+    if len(directors) != 1:
+        _production_profile_reject(
+            profile,
+            "The MiniMax H3 V2V production profile requires exactly one MiniMaxH3Director node.",
+            director_node_count=len(directors),
+        )
+    director_id, director = directors[0]
+    inputs = director.get("inputs")
+    if not isinstance(inputs, dict):
+        _production_profile_reject(profile, "MiniMaxH3Director inputs must be an object.", node_id=director_id)
+
+    expected_values: tuple[tuple[str, Any], ...] = (
+        ("width", MINIMAX_H3_V2V_PROFILE_WIDTH),
+        ("height", MINIMAX_H3_V2V_PROFILE_HEIGHT),
+        ("ref_max_size", 1344),
+        ("frame_rate", 24),
+        ("cfg", 1),
+        ("steps", 8),
+        ("sampler", "dpmpp_2m"),
+        ("scheduler", "simple"),
+        ("shift_video", 12),
+        ("shift_audio", 3),
+        ("clear_vram_between_segments", True),
+    )
+    for input_name, expected in expected_values:
+        actual = inputs.get(input_name)
+        matches = _numeric_equals(actual, float(expected)) if isinstance(expected, (int, float)) and not isinstance(expected, bool) else actual == expected
+        if not matches:
+            _production_profile_reject(
+                profile,
+                f"MiniMaxH3Director input {input_name} does not match the validated production contract.",
+                node_id=director_id,
+                input_name=input_name,
+                expected=expected,
+                actual=actual,
+            )
+    if _minimax_task_key(inputs.get("task_type")) != "v2v":
+        _production_profile_reject(profile, "MiniMaxH3Director task_type must be v2v for this profile.", node_id=director_id)
+
+    attention_id, attention = _linked_node(
+        workflow,
+        inputs.get("model"),
+        profile=profile,
+        owner_node_id=director_id,
+        input_name="model",
+    )
+    if attention.get("class_type") != "MiniMaxLowVRAMAttention":
+        _production_profile_reject(
+            profile,
+            "Director model input must come from MiniMaxLowVRAMAttention.",
+            source_node_id=attention_id,
+            actual_class=attention.get("class_type"),
+        )
+    attention_inputs = attention.get("inputs")
+    if not isinstance(attention_inputs, dict) or attention_inputs.get("head_chunks") != 4:
+        _production_profile_reject(
+            profile,
+            "MiniMaxLowVRAMAttention must use head_chunks=4.",
+            node_id=attention_id,
+        )
+    ffn_id, ffn = _linked_node(
+        workflow,
+        attention_inputs.get("model"),
+        profile=profile,
+        owner_node_id=attention_id,
+        input_name="model",
+    )
+    if ffn.get("class_type") != "MiniMaxChunkFeedForward":
+        _production_profile_reject(
+            profile,
+            "MiniMaxLowVRAMAttention model input must come from MiniMaxChunkFeedForward.",
+            source_node_id=ffn_id,
+            actual_class=ffn.get("class_type"),
+        )
+    ffn_inputs = ffn.get("inputs")
+    if (
+        not isinstance(ffn_inputs, dict)
+        or ffn_inputs.get("chunks") != 2
+        or ffn_inputs.get("seq_threshold") != 4096
+    ):
+        _production_profile_reject(
+            profile,
+            "MiniMaxChunkFeedForward must use chunks=2 and seq_threshold=4096.",
+            node_id=ffn_id,
+        )
+
+    runtime = _compact_runtime_health(comfyui_status(port=port))
+    if runtime.get("online") is not True or runtime.get("fast_disk") is not True:
+        _production_profile_reject(
+            profile,
+            "The validated production profile requires an online ComfyUI runtime launched with --fast-disk.",
+            runtime_online=runtime.get("online"),
+            fast_disk=runtime.get("fast_disk"),
+        )
+
+    live_guard_default = _director_guard_default(port=port, profile=profile)
+    if live_guard_default is not True:
+        _production_profile_reject(
+            profile,
+            "Live MiniMaxH3Director guard_long_v2v_segments default must be true.",
+            live_default=live_guard_default,
+        )
+    workflow_guard = inputs.get("guard_long_v2v_segments")
+    if workflow_guard is not None and workflow_guard is not True:
+        _production_profile_reject(
+            profile,
+            "Workflow explicitly disables guard_long_v2v_segments.",
+            node_id=director_id,
+            actual=workflow_guard,
+        )
+
+    segment_checks = _profile_segment_checks(inputs, profile=profile)
+    return {
+        "requested": requested_value,
+        "resolved": profile,
+        "validated": True,
+        "auto_applied": requested_value == PRODUCTION_PROFILE_AUTO,
+        "canvas": {"width": MINIMAX_H3_V2V_PROFILE_WIDTH, "height": MINIMAX_H3_V2V_PROFILE_HEIGHT},
+        "conservative_baseline_frames": MINIMAX_H3_V2V_VALIDATED_BASELINE_FRAMES,
+        "recommended_max_frames": _recommended_minimax_h3_v2v_max_frames(
+            MINIMAX_H3_V2V_PROFILE_WIDTH,
+            MINIMAX_H3_V2V_PROFILE_HEIGHT,
+        ),
+        "packed_video_row_budget": MINIMAX_H3_V2V_PACKED_ROW_BUDGET,
+        "model_chain": {
+            "chunk_feed_forward": {"node_id": ffn_id, "chunks": 2, "seq_threshold": 4096},
+            "low_vram_attention": {"node_id": attention_id, "head_chunks": 4},
+            "director": {"node_id": director_id},
+        },
+        "guard_long_v2v_segments": {
+            "workflow_value": workflow_guard,
+            "live_default": live_guard_default,
+        },
+        "runtime": {"fast_disk": True},
+        "segments": segment_checks,
+    }
 
 
 def _validate_prompt_id(raw: str) -> str:
@@ -1060,6 +1432,28 @@ def comfyui_status(*, port: int = COMFYUI_PORT) -> dict[str, Any]:
     }
 
 
+def preflight_workflow(
+    workspace_root: Path,
+    workflow_path: str,
+    *,
+    overrides: dict[str, Any] | None = None,
+    production_profile: str | None = PRODUCTION_PROFILE_AUTO,
+    port: int = COMFYUI_PORT,
+) -> dict[str, Any]:
+    workspace = WorkspaceView(workspace_root)
+    workflow = _load_workflow(workspace, workflow_path)
+    _apply_overrides(workflow, overrides)
+    _preflight_dynamic_inputs(workflow, port=port)
+    profile_validation = _validate_production_profile(workflow, production_profile, port=port)
+    return {
+        "ready": True,
+        "endpoint": f"http://{COMFYUI_HOST}:{port}",
+        "workflow_path": workflow_path,
+        "node_count": len(workflow),
+        "production_profile": profile_validation,
+    }
+
+
 def run_workflow(
     workspace_root: Path,
     workflow_path: str,
@@ -1067,6 +1461,7 @@ def run_workflow(
     overrides: dict[str, Any] | None = None,
     save_directory: str | None = None,
     timeout_seconds: int = DEFAULT_TIMEOUT_SECONDS,
+    production_profile: str | None = PRODUCTION_PROFILE_AUTO,
     port: int = COMFYUI_PORT,
     include_image_data: bool = True,
     cancel_token_path: str | None = None,
@@ -1079,6 +1474,7 @@ def run_workflow(
     workflow = _load_workflow(workspace, workflow_path)
     _apply_overrides(workflow, overrides)
     _preflight_dynamic_inputs(workflow, port=port)
+    profile_validation = _validate_production_profile(workflow, production_profile, port=port)
     if _cancel_requested(cancel_token_path):
         raise ExtensionError("COMFYUI_CANCELLED", "ComfyUI workflow cancellation was requested before prompt submission.")
 
@@ -1213,6 +1609,7 @@ def run_workflow(
         "online": True,
         "endpoint": f"http://{COMFYUI_HOST}:{port}",
         "workflow_path": workflow_path,
+        "production_profile": profile_validation,
         "prompt_id": prompt_id,
         "artifacts_found": len(descriptors),
         "artifacts_returned": len(artifacts),

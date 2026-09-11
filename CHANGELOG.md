@@ -2,6 +2,12 @@
 
 All notable changes to FolderBridge MCP are documented here.
 
+## 0.8.33 — 2026-09-11
+
+- Upgraded the external **Local ComfyUI Extension to 1.6.0** with a reusable read-only `preflight` action and a fail-closed `minimax_h3_v2v_16gb_1344x768` production profile. `run` applies the same validation immediately before `/prompt`, so an earlier preflight cannot become stale authority after the workflow or live Runtime changes.
+- The MiniMax H3 V2V production profile pins the accepted 1344×768 / 24 fps / CFG 1 / 8-step `dpmpp_2m` + `simple` path, requires `ChunkFeedForward(chunks=2, seq_threshold=4096)` → `LowVRAMAttention(head_chunks=4)` → Director, requires Launcher-managed `--fast-disk`, and verifies the live Director exposes `guard_long_v2v_segments=true` by default. It enforces a 100,000 packed target+source video-row budget: 124f remains the conservative baseline, the formally accepted 141f path remains within budget, and a pathological 260f single-segment V2V is rejected before submission. Project-specific frame numbers, seeds, prompts, and output names are intentionally not embedded in the reusable Extension contract.
+- Added regression coverage for 141f acceptance, 260f fail-close, incorrect 2×4 model-chain rejection, missing `--fast-disk`, a disabled/missing Director guard contract, explicit expert opt-out, manifest/effect-contract registration, and the published Extension version table.
+
 ## 0.8.32 — 2026-09-11
 
 - Refined the managed ComfyUI Extension card action layout for the fixed-width sidebar: `启动` / `停止` occupy a right-aligned primary row, while `详情` / `撤销批准` occupy a second right-aligned row. This keeps two controls per line so no button is clipped at normal DPI/sidebar widths. Button behavior, ownership checks, approval semantics, and managed-service state logic are unchanged.

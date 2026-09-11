@@ -16,6 +16,7 @@ from comfyui_runtime import (
     list_jobs,
     list_models,
     release_comfyui_memory,
+    preflight_workflow,
     run_workflow,
 )
 
@@ -58,7 +59,7 @@ def handle(action: str, params: dict[str, Any], context: dict[str, Any]) -> dict
         )
     if action == "features":
         return get_features()
-    if action != "run":
+    if action not in {"preflight", "run"}:
         raise ExtensionError("EXTENSION_ACTION_NOT_FOUND", f"Unsupported ComfyUI action: {action}")
 
     workspace_root = context.get("workspace_root")
@@ -71,12 +72,21 @@ def handle(action: str, params: dict[str, Any], context: dict[str, Any]) -> dict
     if not root.is_dir():
         raise ExtensionError("WORKSPACE_REQUIRED", "ComfyUI workspace root is not a directory.")
 
+    if action == "preflight":
+        return preflight_workflow(
+            root,
+            params["workflow_path"],
+            overrides=params.get("overrides"),
+            production_profile=params.get("production_profile", "auto"),
+        )
+
     return run_workflow(
         root,
         params["workflow_path"],
         overrides=params.get("overrides"),
         save_directory=params.get("save_directory"),
         timeout_seconds=params.get("timeout_seconds", 2 * 60 * 60),
+        production_profile=params.get("production_profile", "auto"),
         include_image_data=False,
         cancel_token_path=context.get("job_cancel_path"),
     )

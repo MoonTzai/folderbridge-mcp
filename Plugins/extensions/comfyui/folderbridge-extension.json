@@ -3,8 +3,8 @@
   "runtime_abi": 1,
   "id": "comfyui",
   "name": "Local ComfyUI",
-  "version": "1.5.0",
-  "description": "External hot-load bridge to local ComfyUI at 127.0.0.1:8188. Long workflow runs execute as host-owned jobs; bounded control actions expose memory release, real ComfyUI job state, exact progress observation, reusable read-only health snapshots, targeted cancellation, node/model capability discovery, and transient history retry without arbitrary HTTP access.",
+  "version": "1.6.0",
+  "description": "External hot-load bridge to local ComfyUI at 127.0.0.1:8188. Long workflow runs execute as host-owned jobs; bounded control actions expose memory release, real ComfyUI job state, exact progress observation, reusable read-only health snapshots, targeted cancellation, node/model capability discovery, transient history retry, and fail-closed reusable production preflight profiles without arbitrary HTTP access.",
   "entrypoint": "plugin.py",
   "permissions": [
     "network.loopback:127.0.0.1:8188",
@@ -323,6 +323,49 @@
         "lifetime": "foreground"
       }
     },
+    "preflight": {
+      "read_only": true,
+      "requires_workspace": true,
+      "authorization": "global",
+      "timeout_seconds": 25,
+      "mutation_scope": {
+        "mode": "none"
+      },
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "workflow_path": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1024
+          },
+          "overrides": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "object",
+              "additionalProperties": true
+            }
+          },
+          "production_profile": {
+            "type": "string",
+            "enum": [
+              "auto",
+              "none",
+              "minimax_h3_v2v_16gb_1344x768"
+            ],
+            "default": "auto"
+          }
+        },
+        "required": [
+          "workflow_path"
+        ],
+        "additionalProperties": false
+      },
+      "effect_contract": {
+        "effect_semantics": "read_only",
+        "lifetime": "foreground"
+      }
+    },
     "run": {
       "read_only": true,
       "requires_workspace": true,
@@ -353,6 +396,15 @@
               "type": "object",
               "additionalProperties": true
             }
+          },
+          "production_profile": {
+            "type": "string",
+            "enum": [
+              "auto",
+              "none",
+              "minimax_h3_v2v_16gb_1344x768"
+            ],
+            "default": "auto"
           },
           "save_directory": {
             "type": "string",

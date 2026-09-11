@@ -114,6 +114,10 @@ EXPECTED_EFFECTS = {
             "read_only",
             "foreground"
         ],
+        "preflight": [
+            "read_only",
+            "foreground"
+        ],
         "run": [
             "external_effect",
             "job_owned"

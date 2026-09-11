@@ -28,7 +28,24 @@ Open **Extensions & Skills**, click **重新扫描**, review the exact directory
 - `jobs` / `job-status`: inspect real ComfyUI prompt state and bounded output metadata.
 - `progress`: explicit advanced diagnostic for one exact FolderBridge-submitted MiniMax Director prompt/node. It observes a bounded client-specific WebSocket interval and reports unavailable instead of inventing a percentage. It is not invoked implicitly by `health-check`.
 - `health-check`: reusable cross-project read-only snapshot for one exact prompt. It aggregates compact job state, output/artifact count, exact queue presence, numeric RAM/VRAM headroom, ComfyUI launch arguments (including `--fast-disk` detection), and advertises supported optional progress capability without opening a WebSocket. A single snapshot never declares a stall.
-- `run`: executes one API-format workflow JSON from the selected FolderBridge workspace as a host-owned Job. It supports bounded overrides, dynamic-combo preflight, prompt-scoped cancellation, bounded artifact metadata, and optional image copying into a workspace `save_directory`.
+- `preflight`: validates one API-format workflow without submitting it. It applies bounded overrides, dynamic-combo checks, and the same reusable production-profile gate used by `run`.
+- `run`: executes one API-format workflow JSON from the selected FolderBridge workspace as a host-owned Job. It supports bounded overrides, dynamic-combo preflight, prompt-scoped cancellation, bounded artifact metadata, optional image copying into a workspace `save_directory`, and production-profile validation before `/prompt` submission.
+
+### Production profiles
+
+`preflight` and `run` accept `production_profile`. The default is `auto`; `none` is an explicit expert opt-out. `auto` currently recognizes native **MiniMax H3 V2V at 1344×768** and applies the built-in `minimax_h3_v2v_16gb_1344x768` profile before any prompt is submitted.
+
+That profile is the reusable FolderBridge-side form of the production path accepted on 2026-09-11. It deliberately contains **no project-specific frame numbers, seed, prompt text, or output names**. Instead it fail-closes on the portable execution contract:
+
+- one `MiniMaxH3Director` V2V node at 1344×768 / 24 fps with `ref_max_size=1344`;
+- production sampling `cfg=1`, `8` steps, `dpmpp_2m` + `simple`, video/audio shifts `12/3`;
+- model chain `MiniMaxChunkFeedForward(chunks=2, seq_threshold=4096)` → `MiniMaxLowVRAMAttention(head_chunks=4)` → Director;
+- `clear_vram_between_segments=true`;
+- live ComfyUI must be running with `--fast-disk`;
+- live `MiniMaxH3Director` schema must expose `guard_long_v2v_segments` with default `true`, and a workflow may not explicitly disable it;
+- every V2V segment must stay within the 100,000 target+source packed-video-row budget. At 1344×768 this yields a hard recommended maximum of 158 aligned frames; **124f is the conservative baseline**, while the formally accepted 141f production segment also remains inside the same budget. A 260f single segment is rejected before `/prompt`.
+
+Use `preflight` when preparing or auditing a production workflow. `run` repeats the same validation immediately before submission, so passing an earlier preflight cannot become stale authority if the workflow or live Director/runtime changes later.
 
 ### Standard long-run check
 

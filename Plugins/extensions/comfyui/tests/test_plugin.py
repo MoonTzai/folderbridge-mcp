@@ -34,6 +34,7 @@ cancel_prompt = _RUNTIME.cancel_prompt
 get_node_info = _RUNTIME.get_node_info
 list_models = _RUNTIME.list_models
 get_features = _RUNTIME.get_features
+preflight_workflow = _RUNTIME.preflight_workflow
 run_workflow = _RUNTIME.run_workflow
 
 JOB_ID = "11111111-1111-4111-8111-111111111111"
@@ -200,7 +201,15 @@ class ComfyUiTests(unittest.TestCase):
         self.server.history_outputs = {  # type: ignore[attr-defined]
             "9": {"images": [{"filename": "result.png", "subfolder": "", "type": "output"}]}
         }
-        self.server.object_info = {}  # type: ignore[attr-defined]
+        self.server.object_info = {  # type: ignore[attr-defined]
+            "MiniMaxH3Director": {
+                "input": {
+                    "optional": {
+                        "guard_long_v2v_segments": ["BOOLEAN", {"default": True}],
+                    }
+                }
+            }
+        }
         self.server.features = {"jobs_api": True, "preview_metadata": True}  # type: ignore[attr-defined]
         self.server.model_types = ["checkpoints", "vae", "diffusion_models"]  # type: ignore[attr-defined]
         self.server.models = {  # type: ignore[attr-defined]
@@ -259,6 +268,53 @@ class ComfyUiTests(unittest.TestCase):
         self.server.server_close()
         self.thread.join(timeout=5)
         self.temporary.cleanup()
+
+    def _safe_minimax_profile_workflow(
+        self,
+        *,
+        frames: int = 124,
+        chunks: int = 2,
+        head_chunks: int = 4,
+        guard: bool | None = None,
+    ) -> dict[str, object]:
+        timeline = {
+            "version": 4,
+            "segments": [
+                {"id": "s0", "start": 0, "length": frames, "frameCount": frames, "taskType": ""}
+            ],
+        }
+        director_inputs: dict[str, object] = {
+            "model": ["9", 0],
+            "task_type": "v2v — Video to Video",
+            "cfg": 1,
+            "frame_rate": 24,
+            "width": 1344,
+            "height": 768,
+            "ref_max_size": 1344,
+            "total_frames": frames,
+            "timeline_data": json.dumps(timeline),
+            "steps": 8,
+            "sampler": "dpmpp_2m",
+            "scheduler": "simple",
+            "shift_video": 12,
+            "shift_audio": 3,
+            "clear_vram_between_segments": True,
+        }
+        if guard is not None:
+            director_inputs["guard_long_v2v_segments"] = guard
+        return {
+            "1": {"class_type": "UNETLoader", "inputs": {}},
+            "8": {
+                "class_type": "MiniMaxChunkFeedForward",
+                "inputs": {"model": ["1", 0], "chunks": chunks, "seq_threshold": 4096},
+            },
+            "9": {
+                "class_type": "MiniMaxLowVRAMAttention",
+                "inputs": {"model": ["8", 0], "head_chunks": head_chunks},
+            },
+            "5": {"class_type": "MiniMaxH3Director", "inputs": director_inputs},
+            "7": {"class_type": "SaveVideo", "inputs": {}},
+        }
 
     def test_status_uses_loopback_comfyui(self) -> None:
         result = comfyui_status(port=self.port)
@@ -583,6 +639,100 @@ class ComfyUiTests(unittest.TestCase):
         self.assertTrue(models["truncated"])
         features = get_features(port=self.port)
         self.assertTrue(features["features"]["jobs_api"])
+
+    def test_production_profile_preflight_auto_accepts_formal_141f_path_without_submitting(self) -> None:
+        workflow = self._safe_minimax_profile_workflow(frames=141)
+        (self.root / "profile-141.json").write_text(json.dumps(workflow), encoding="utf-8")
+
+        result = preflight_workflow(self.workspace, "profile-141.json", port=self.port)
+
+        self.assertTrue(result["ready"])
+        profile = result["production_profile"]
+        self.assertEqual(profile["requested"], "auto")
+        self.assertEqual(profile["resolved"], "minimax_h3_v2v_16gb_1344x768")
+        self.assertTrue(profile["auto_applied"])
+        self.assertEqual(profile["conservative_baseline_frames"], 124)
+        self.assertEqual(profile["recommended_max_frames"], 158)
+        self.assertEqual(profile["segments"][0]["frames"], 141)
+        self.assertEqual(profile["segments"][0]["packed_video_rows"], 84672)
+        self.assertEqual(profile["model_chain"]["chunk_feed_forward"]["chunks"], 2)
+        self.assertEqual(profile["model_chain"]["low_vram_attention"]["head_chunks"], 4)
+        self.assertTrue(profile["guard_long_v2v_segments"]["live_default"])
+        self.assertTrue(profile["runtime"]["fast_disk"])
+        self.assertEqual(self.server.prompt_requests, 0)  # type: ignore[attr-defined]
+
+    def test_production_profile_auto_rejects_260f_before_prompt_submission(self) -> None:
+        workflow = self._safe_minimax_profile_workflow(frames=260)
+        (self.root / "profile-260.json").write_text(json.dumps(workflow), encoding="utf-8")
+
+        with self.assertRaises(ToolError) as raised:
+            run_workflow(
+                self.workspace,
+                "profile-260.json",
+                timeout_seconds=5,
+                port=self.port,
+                include_image_data=False,
+            )
+
+        self.assertEqual(raised.exception.code, "COMFYUI_PRODUCTION_PROFILE_REJECTED")
+        self.assertEqual(raised.exception.details["frames"], 260)
+        self.assertEqual(raised.exception.details["packed_video_rows"], 155232)
+        self.assertEqual(raised.exception.details["recommended_max_frames"], 158)
+        self.assertEqual(self.server.prompt_requests, 0)  # type: ignore[attr-defined]
+
+    def test_production_profile_rejects_wrong_2x4_chain_before_submission(self) -> None:
+        workflow = self._safe_minimax_profile_workflow(frames=124, chunks=4)
+        (self.root / "profile-wrong-chain.json").write_text(json.dumps(workflow), encoding="utf-8")
+
+        with self.assertRaises(ToolError) as raised:
+            preflight_workflow(self.workspace, "profile-wrong-chain.json", port=self.port)
+
+        self.assertEqual(raised.exception.code, "COMFYUI_PRODUCTION_PROFILE_REJECTED")
+        self.assertIn("chunks=2", raised.exception.message)
+        self.assertEqual(self.server.prompt_requests, 0)  # type: ignore[attr-defined]
+
+    def test_production_profile_requires_fast_disk_before_submission(self) -> None:
+        self.server.system_stats["system"]["argv"] = [str(self.comfy_root / "main.py")]  # type: ignore[index]
+        workflow = self._safe_minimax_profile_workflow(frames=124)
+        (self.root / "profile-no-fast-disk.json").write_text(json.dumps(workflow), encoding="utf-8")
+
+        with self.assertRaises(ToolError) as raised:
+            preflight_workflow(self.workspace, "profile-no-fast-disk.json", port=self.port)
+
+        self.assertEqual(raised.exception.code, "COMFYUI_PRODUCTION_PROFILE_REJECTED")
+        self.assertFalse(raised.exception.details["fast_disk"])
+        self.assertEqual(self.server.prompt_requests, 0)  # type: ignore[attr-defined]
+
+    def test_production_profile_requires_live_director_guard_default_true(self) -> None:
+        self.server.object_info["MiniMaxH3Director"]["input"]["optional"]["guard_long_v2v_segments"][1]["default"] = False  # type: ignore[index]
+        workflow = self._safe_minimax_profile_workflow(frames=124)
+        (self.root / "profile-guard-false.json").write_text(json.dumps(workflow), encoding="utf-8")
+
+        with self.assertRaises(ToolError) as raised:
+            preflight_workflow(self.workspace, "profile-guard-false.json", port=self.port)
+
+        self.assertEqual(raised.exception.code, "COMFYUI_PRODUCTION_PROFILE_REJECTED")
+        self.assertIn("default must be true", raised.exception.message)
+        self.assertEqual(self.server.prompt_requests, 0)  # type: ignore[attr-defined]
+
+    def test_production_profile_none_is_explicit_expert_opt_out(self) -> None:
+        workflow = self._safe_minimax_profile_workflow(frames=260, chunks=8, head_chunks=16, guard=False)
+        (self.root / "profile-opt-out.json").write_text(json.dumps(workflow), encoding="utf-8")
+
+        result = run_workflow(
+            self.workspace,
+            "profile-opt-out.json",
+            production_profile="none",
+            timeout_seconds=5,
+            port=self.port,
+            include_image_data=False,
+        )
+
+        self.assertEqual(result["prompt_id"], "prompt-test")
+        self.assertEqual(result["production_profile"]["requested"], "none")
+        self.assertIsNone(result["production_profile"]["resolved"])
+        self.assertEqual(result["production_profile"]["reason"], "explicitly_disabled")
+        self.assertEqual(self.server.prompt_requests, 1)  # type: ignore[attr-defined]
 
     def test_run_workflow_retries_transient_history_transport_failure_without_resubmitting(self) -> None:
         self.server.history_failures_remaining = 1  # type: ignore[attr-defined]
@@ -926,11 +1076,11 @@ class ComfyUiExternalContractTests(unittest.TestCase):
     def test_manifest_is_external_hot_load_contract(self) -> None:
         manifest = json.loads((PLUGIN_ROOT / "folderbridge-extension.json").read_text(encoding="utf-8"))
         self.assertEqual(manifest["id"], "comfyui")
-        self.assertEqual(manifest["version"], "1.5.0")
+        self.assertEqual(manifest["version"], "1.6.0")
         self.assertEqual(manifest["actions"]["status"]["authorization"], "global")
         self.assertEqual(
             set(manifest["actions"]),
-            {"status", "free", "jobs", "job-status", "progress", "health-check", "cancel-prompt", "node-info", "models", "features", "run"},
+            {"status", "free", "jobs", "job-status", "progress", "health-check", "cancel-prompt", "node-info", "models", "features", "preflight", "run"},
         )
         self.assertLessEqual(len(manifest["actions"]), 64)
         self.assertTrue(manifest["actions"]["progress"]["read_only"])
@@ -941,12 +1091,23 @@ class ComfyUiExternalContractTests(unittest.TestCase):
         self.assertEqual(health["timeout_seconds"], 25)
         self.assertEqual(set(health["input_schema"]["properties"]), {"prompt_id"})
         self.assertEqual(health["input_schema"]["required"], ["prompt_id"])
-        for action_name in ("free", "jobs", "job-status", "progress", "health-check", "cancel-prompt", "node-info", "models", "features"):
+        preflight = manifest["actions"]["preflight"]
+        self.assertTrue(preflight["read_only"])
+        self.assertTrue(preflight["requires_workspace"])
+        self.assertEqual(preflight["mutation_scope"], {"mode": "none"})
+        self.assertEqual(preflight["input_schema"]["required"], ["workflow_path"])
+        self.assertEqual(
+            preflight["input_schema"]["properties"]["production_profile"]["enum"],
+            ["auto", "none", "minimax_h3_v2v_16gb_1344x768"],
+        )
+        self.assertEqual(preflight["input_schema"]["properties"]["production_profile"]["default"], "auto")
+        for action_name in ("free", "jobs", "job-status", "progress", "health-check", "cancel-prompt", "node-info", "models", "features", "preflight"):
             self.assertEqual(manifest["actions"][action_name]["authorization"], "global")
             self.assertEqual(manifest["actions"][action_name]["mutation_scope"], {"mode": "none"})
         run = manifest["actions"]["run"]
         self.assertEqual(run["run_mode"], "job")
         self.assertEqual(run["timeout_seconds"], 0)
+        self.assertEqual(run["input_schema"]["properties"]["production_profile"]["default"], "auto")
         self.assertEqual(
             run["mutation_scope"],
             {"mode": "paths", "claims": [{"param": "save_directory", "kind": "tree", "optional": True}]},
