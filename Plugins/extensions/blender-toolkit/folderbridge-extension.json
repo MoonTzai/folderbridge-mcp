@@ -3,7 +3,7 @@
   "runtime_abi": 1,
   "id": "blender-toolkit",
   "name": "Blender Toolkit",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Global live Blender 5.x control bridge for FolderBridge with broad declarative scene/RNA, object, mesh, collection, modifier, constraint, node-tree, animation, safe-operator, file and render actions; arbitrary Python/shell execution is intentionally not exposed.",
   "entrypoint": "plugin.py",
   "permissions": [
@@ -33,6 +33,33 @@
       },
       "effect_contract": {
         "effect_semantics": "read_only",
+        "lifetime": "foreground"
+      }
+    },
+    "launch-ui": {
+      "read_only": false,
+      "requires_workspace": true,
+      "authorization": "global",
+      "run_mode": "foreground",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "blend_path": {
+            "type": "string",
+            "maxLength": 1024,
+            "default": ""
+          },
+          "wait_seconds": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 30,
+            "default": 15
+          }
+        },
+        "additionalProperties": false
+      },
+      "effect_contract": {
+        "effect_semantics": "external_effect",
         "lifetime": "foreground"
       }
     },

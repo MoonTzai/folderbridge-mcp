@@ -11,6 +11,7 @@ from unittest import mock
 
 from folderbridge_mcp.launcher_backend import (
     CommandResult,
+    LauncherError,
     LauncherSettingsStore,
     TunnelAdminCapability,
     TunnelSupervisor,
@@ -171,7 +172,7 @@ class StructuredAdminCapabilityTests(unittest.TestCase):
             [str(executable), "run", "--profile", "folderbridge"],
         )
 
-    def test_prepare_run_falls_back_to_legacy_when_capability_is_unavailable(self) -> None:
+    def test_prepare_run_rejects_v0013_instead_of_falling_back_to_legacy(self) -> None:
         executable = Path("tunnel-client.exe")
         unavailable = TunnelAdminCapability(
             supported=False,
@@ -184,11 +185,24 @@ class StructuredAdminCapabilityTests(unittest.TestCase):
             "folderbridge_mcp.launcher_backend.probe_tunnel_admin_capability",
             return_value=unavailable,
         ):
-            plan = prepare_tunnel_run(executable, "folderbridge", env={})
+            with self.assertRaisesRegex(LauncherError, "0\\.0\\.14"):
+                prepare_tunnel_run(executable, "folderbridge", env={})
 
-        self.assertEqual(plan.argv, build_run_argv(executable, "folderbridge"))
-        self.assertIsNone(plan.health_url_file)
-        self.assertFalse(plan.admin_capability.supported)
+    def test_prepare_run_rejects_unverifiable_tunnel_version(self) -> None:
+        executable = Path("tunnel-client.exe")
+        unavailable = TunnelAdminCapability(
+            supported=False,
+            version=None,
+            version_text="",
+            capabilities=(),
+            reason="version-probe-failed",
+        )
+        with mock.patch(
+            "folderbridge_mcp.launcher_backend.probe_tunnel_admin_capability",
+            return_value=unavailable,
+        ):
+            with self.assertRaisesRegex(LauncherError, "0\\.0\\.14"):
+                prepare_tunnel_run(executable, "folderbridge", env={})
 
     def test_prepare_run_uses_private_generation_url_only_after_capability_gate(self) -> None:
         executable = Path("tunnel-client.exe")

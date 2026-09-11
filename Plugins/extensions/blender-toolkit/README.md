@@ -24,6 +24,7 @@ The public surface is intentionally broad enough for production Blender scene au
 The Extension supports:
 
 - live Blender/bridge status and version reporting;
+- safe Blender GUI bootstrap via `launch-ui`, including fixed add-on enable bootstrap, bridge wait, and duplicate-instance avoidance;
 - direct verification of the `ComfyUI Blender` add-on and its `ComfyUI` N-panel registration;
 - context, scene and datablock inspection;
 - object/data/collection creation and deletion;
@@ -56,6 +57,7 @@ This is intentionally "nearly all scene-production functionality", not "run arbi
 Discovery/inspection:
 
 - `status`
+- `launch-ui`
 - `inspect-context`
 - `list-data`
 - `inspect-data`
@@ -133,6 +135,14 @@ Then open FolderBridge **Extensions & Skills**, click **Rescan**, approve the ex
 No FolderBridge rebuild and no MCP tool re-registration is required.
 
 ## Runtime
+
+### Automatic GUI launch
+
+`launch-ui` closes the bootstrap gap between headless Blender and the live bridge. It can launch only the discovered `blender.exe`; it does not accept arbitrary executables, commands, scripts, URLs, or Python from the caller. An optional `blend_path` is workspace-confined and must end in `.blend`.
+
+Before launching, it checks whether the live bridge is already online. If so, it reuses that instance. If a `blender.exe` process already exists but the bridge is offline, it refuses to open a duplicate Blender and reports that the existing process needs the FolderBridge add-on enabled/restarted. If no Blender process exists, it starts the GUI with a fixed internal bootstrap that enables `folderbridge_blender_bridge`, saves the preference, and waits up to the bounded `wait_seconds` value for `127.0.0.1:8766` to become healthy.
+
+The fixed bootstrap is implementation-owned; there is still no public arbitrary-Python action.
 
 The Blender add-on adds a small `FolderBridge` tab to the 3D View N-panel. The `status` action reports:
 

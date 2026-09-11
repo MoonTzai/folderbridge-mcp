@@ -932,6 +932,7 @@ class FolderBridgeLauncher:
                 self._extension_wrapped_labels.append(permissions_label)
 
             controller = self.managed_services.controller(extension_id)
+            extension_action_buttons: ttk.Frame | None = None
             if controller is not None:
                 cached = self._managed_service_states.get(extension_id)
                 config = controller.config()
@@ -988,35 +989,39 @@ class FolderBridgeLauncher:
                     command=lambda eid=extension_id: self._select_managed_service_directory(eid),
                 )
                 choose_button.pack(side="left", padx=(6, 0))
-                service_actions = ttk.Frame(service_controls, style="Card.TFrame")
-                service_actions.pack(fill="x", pady=(4, 0))
+                service_primary_actions = ttk.Frame(service_controls, style="Card.TFrame")
+                service_primary_actions.pack(anchor="e", pady=(4, 0))
                 start_button = ttk.Button(
-                    service_actions,
+                    service_primary_actions,
                     text="启动",
                     command=lambda eid=extension_id: self._start_managed_service(eid),
                 )
                 start_button.pack(side="left")
                 stop_button = ttk.Button(
-                    service_actions,
+                    service_primary_actions,
                     text="停止",
                     command=lambda eid=extension_id: self._stop_managed_service(eid),
                 )
                 stop_button.pack(side="left", padx=(6, 0))
+                service_secondary_actions = ttk.Frame(service_controls, style="Card.TFrame")
+                service_secondary_actions.pack(anchor="e", pady=(4, 0))
+                extension_action_buttons = service_secondary_actions
                 if busy or online or owned or not config.install_root or not item.get("loaded"):
                     start_button.configure(state="disabled")
                 if busy or not owned:
                     stop_button.configure(state="disabled")
 
-            buttons = ttk.Frame(card, style="Card.TFrame")
-            buttons.pack(anchor="e", pady=(3, 0))
+            if extension_action_buttons is None:
+                extension_action_buttons = ttk.Frame(card, style="Card.TFrame")
+                extension_action_buttons.pack(anchor="e", pady=(3, 0))
             ttk.Button(
-                buttons,
+                extension_action_buttons,
                 text="详情",
                 command=lambda eid=extension_id: self._show_extension_details(eid),
-            ).pack(side="left")
+            ).pack(side="left", padx=(6, 0) if controller is not None else 0)
             if item.get("trusted") or item.get("approval_stale"):
                 ttk.Button(
-                    buttons,
+                    extension_action_buttons,
                     text="撤销批准",
                     command=lambda eid=extension_id: self._revoke_extension(eid),
                 ).pack(side="left", padx=(6, 0))

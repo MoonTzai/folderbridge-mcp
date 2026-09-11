@@ -2,6 +2,33 @@
 
 All notable changes to FolderBridge MCP are documented here.
 
+## 0.8.32 — 2026-09-11
+
+- Refined the managed ComfyUI Extension card action layout for the fixed-width sidebar: `启动` / `停止` occupy a right-aligned primary row, while `详情` / `撤销批准` occupy a second right-aligned row. This keeps two controls per line so no button is clipped at normal DPI/sidebar widths. Button behavior, ownership checks, approval semantics, and managed-service state logic are unchanged.
+- Updated GUI regression coverage to require the two distinct right-aligned managed-service action rows and prevent a future four-button single-row regression.
+- Aligned public distribution with the external Extension source tree: the Windows release build now packages every explicitly public external Extension as a versioned ZIP plus SHA-256 asset, and the GitHub Release workflow publishes those assets alongside `FolderBridge.exe`. The private `debate-judge-adapter` remains outside the public allowlist and is regression-guarded from Release publication.
+
+## 0.8.31 — 2026-09-11
+
+- Fixed the managed ComfyUI Extension card action layout: `启动` / `停止` / `详情` / `撤销批准` now share one right-aligned action row instead of splitting service actions and Extension actions across mismatched left/right rows. Button behavior, ownership checks, approval semantics, and managed-service state logic are unchanged.
+- Added GUI regression coverage pinning the shared managed-service action row so future sidebar/DPI work cannot silently reintroduce the alignment drift.
+
+## 0.8.30 — 2026-09-11
+
+- Made Launcher-owned ComfyUI use the same validated production disk mode as the canonical MiniMax launcher by adding the fixed `--fast-disk` argument to the managed-service argv for both source and Portable installs. The existing ownership boundary is unchanged: FolderBridge still launches explicit Python + `main.py` with `shell=False`, never executes BAT/CMD files, never adopts an unknown port owner, and only stops the process handle it created.
+- Added managed-service regression coverage requiring `--fast-disk` while preserving fixed `127.0.0.1:8188`, `--disable-auto-launch`, and process-ownership semantics. Full source suite after the change: **702 tests GREEN, 4 skipped**.
+
+## 0.8.29 — 2026-09-09
+
+- Fixed Tunnel profile staleness after changing the selected `tunnel-client.exe`. The connection fingerprint now binds the resolved client path plus bounded file identity (`size` and `mtime_ns`), so selecting a different client binary or replacing the configured executable in place automatically invalidates the cached profile and reruns `init` on the next connection.
+- Added regression coverage for both client-path changes and in-place binary replacement. This removes the need to manually click **Apply configuration** merely to make a newly selected tunnel-client take effect.
+
+## 0.8.28 — 2026-09-09
+
+- Hardened shared-stdio reliability after a live three-session incident: bounded literal `workspace.search` now stops at **20 seconds** instead of racing a 30-second Tunnel response deadline, leaving explicit transport/serialization headroom while preserving pagination/truncation signaling.
+- The Launcher now **fails closed on tunnel-client versions older than 0.0.14 or whose version cannot be verified**. It no longer silently falls back to the known-risk v0.0.13 shared-stdio path after deadline retirement; the operator receives an explicit 0.0.14+ upgrade requirement instead.
+- Added regression coverage pinning the search-budget headroom and proving v0.0.13 / unverifiable Tunnel clients cannot enter the normal run path. This reliability gate is independent of the still-separate V35 remote-settlement authority model.
+
 ## 0.8.27 — 2026-09-07
 
 - Upgraded bundled **Git Publisher to 1.5.0** with optional workspace-relative `repo_path` selection for nested Git repositories. The default remains the workspace root; nested selection rejects traversal, absolute/backslash paths, VCS/dependency containers, symlink/junction/reparse components, and any directory whose `git rev-parse --show-toplevel` is not exactly the selected path. Commit and Release paths remain repository-relative, preserving the surrounding workspace as inaccessible to that Git operation.

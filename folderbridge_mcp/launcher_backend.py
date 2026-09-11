@@ -101,8 +101,26 @@ class LauncherSettings:
             workspaces = canonical_workspaces(self.workspaces)
         except (ConfigError, OSError) as exc:
             raise LauncherError(str(exc)) from exc
+        raw_client = self.tunnel_client_path.strip().strip('"')
+        client_identity: dict[str, object] = {"path": raw_client, "size": None, "mtime_ns": None}
+        if raw_client:
+            candidate = Path(raw_client).expanduser()
+            try:
+                resolved = candidate.resolve(strict=True)
+                metadata = resolved.stat()
+                client_identity = {
+                    "path": str(resolved),
+                    "size": int(metadata.st_size),
+                    "mtime_ns": int(metadata.st_mtime_ns),
+                }
+            except OSError:
+                try:
+                    client_identity["path"] = str(candidate.resolve(strict=False))
+                except OSError:
+                    client_identity["path"] = str(candidate)
         payload = {
             "version": __version__,
+            "tunnel_client": client_identity,
             "workspaces": [str(workspace) for workspace in workspaces],
             "access_mode": self.access_mode,
             "profile": self.profile,
@@ -560,6 +578,7 @@ def run_short_command(
 
 
 _TUNNEL_VERSION_RE = re.compile(r"(?<!\d)(\d+)\.(\d+)\.(\d+)(?!\d)")
+MIN_RELIABLE_TUNNEL_VERSION = (0, 0, 14)
 _STRUCTURED_ADMIN_FLAGS = ("--health.listen-addr", "--health.url-file")
 
 
@@ -639,6 +658,18 @@ def prepare_tunnel_run(
     config_root: Path | None = None,
 ) -> TunnelRunPlan:
     capability = probe_tunnel_admin_capability(executable, env=env)
+    if capability.version is None:
+        raise LauncherError(
+            "无法确认 tunnel-client 版本；为避免 shared-stdio 超时污染其它会话，"
+            "FolderBridge 现在要求官方 tunnel-client 0.0.14 或更高版本。"
+        )
+    if capability.version < MIN_RELIABLE_TUNNEL_VERSION:
+        detected = ".".join(str(part) for part in capability.version)
+        raise LauncherError(
+            f"检测到 tunnel-client {detected}。该版本存在已知的 shared-stdio deadline/"
+            "request-id 复用故障风险，可能导致所有并行 FolderBridge 会话一起 502。"
+            "请升级并选择官方 tunnel-client 0.0.14 或更高版本。"
+        )
     if not capability.supported:
         return TunnelRunPlan(build_run_argv(executable, profile), None, capability)
     try:

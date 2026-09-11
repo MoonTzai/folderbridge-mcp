@@ -199,6 +199,20 @@ class LauncherBackendTests(unittest.TestCase):
         second = settings.fingerprint()
         self.assertNotEqual(first, second)
 
+    def test_fingerprint_changes_when_tunnel_client_selection_changes(self) -> None:
+        settings = self.settings()
+        first = settings.fingerprint()
+        alternate = Path(self.temp.name) / ("alternate-tunnel-client.exe" if os.name == "nt" else "alternate-tunnel-client")
+        alternate.write_bytes(b"different tunnel client")
+        settings.tunnel_client_path = str(alternate)
+        self.assertNotEqual(first, settings.fingerprint())
+
+    def test_fingerprint_changes_when_selected_tunnel_client_is_replaced_in_place(self) -> None:
+        settings = self.settings()
+        first = settings.fingerprint()
+        self.client.write_bytes(b"replacement tunnel client binary with different size")
+        self.assertNotEqual(first, settings.fingerprint())
+
     def test_global_capabilities_persist_and_flow_into_server_command(self) -> None:
         path = Path(self.temp.name) / "launcher-capabilities.json"
         store = LauncherSettingsStore(path)

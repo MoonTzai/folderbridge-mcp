@@ -77,6 +77,30 @@ jobs:
       - name: Verify packaged executable again
         run: python scripts/verify_windows_bundle.py release/windows-x64/FolderBridge.exe
 
+      - name: Verify public external Extension release assets
+        shell: pwsh
+        run: |
+          $assets = @(Get-ChildItem "release/external-extensions" -File | Sort-Object Name)
+          if ($assets.Count -ne 18) {
+            throw "Expected 18 external Extension Release files (9 ZIP + 9 SHA256); found $($assets.Count)."
+          }
+          if ($assets.Name -match 'debate-judge-adapter') {
+            throw "Private Debate Judge adapter must never be published as a Release asset."
+          }
+          $zips = @($assets | Where-Object { $_.Name -like '*.zip' })
+          $checksums = @($assets | Where-Object { $_.Name -like '*.zip.sha256' })
+          if ($zips.Count -ne 9 -or $checksums.Count -ne 9) {
+            throw "External Extension Release asset shape is incomplete."
+          }
+          foreach ($zip in $zips) {
+            $checksumPath = "$($zip.FullName).sha256"
+            $expected = ((Get-Content -LiteralPath $checksumPath -Raw -Encoding ascii) -split '\s+', 2)[0].Trim().ToLowerInvariant()
+            $actual = (Get-FileHash -Algorithm SHA256 -LiteralPath $zip.FullName).Hash.ToLowerInvariant()
+            if ($expected -ne $actual) {
+              throw "External Extension Release checksum mismatch: $($zip.Name)"
+            }
+          }
+
       - name: Create and push release tag
         if: env.FOLDERBRIDGE_TAG_EXISTS == '0'
         shell: pwsh
@@ -91,19 +115,18 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          $assets = @(
+            "release/windows-x64/FolderBridge.exe",
+            "release/windows-x64/FolderBridge.exe.sha256"
+          ) + @(Get-ChildItem "release/external-extensions" -File | Sort-Object Name | ForEach-Object { $_.FullName })
           gh release view $env:FOLDERBRIDGE_TAG --repo $env:GITHUB_REPOSITORY *> $null
           if ($LASTEXITCODE -eq 0) {
-            gh release upload $env:FOLDERBRIDGE_TAG `
-              release/windows-x64/FolderBridge.exe `
-              release/windows-x64/FolderBridge.exe.sha256 `
-              --clobber --repo $env:GITHUB_REPOSITORY
+            & gh release upload $env:FOLDERBRIDGE_TAG @assets --clobber --repo $env:GITHUB_REPOSITORY
             gh release edit $env:FOLDERBRIDGE_TAG `
               --title "FolderBridge $env:FOLDERBRIDGE_VERSION" `
               --latest --repo $env:GITHUB_REPOSITORY
           } else {
-            gh release create $env:FOLDERBRIDGE_TAG `
-              release/windows-x64/FolderBridge.exe `
-              release/windows-x64/FolderBridge.exe.sha256 `
+            & gh release create $env:FOLDERBRIDGE_TAG @assets `
               --verify-tag `
               --generate-notes `
               --title "FolderBridge $env:FOLDERBRIDGE_VERSION" `

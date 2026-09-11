@@ -24,7 +24,10 @@ MAX_RESULTS = 200
 MAX_LIST_FILES_SCANNED = 50_000
 MAX_SEARCH_FILES_SCANNED = 50_000
 MAX_LIST_SCAN_SECONDS = 10.0
-MAX_SEARCH_SCAN_SECONDS = 30.0
+# Keep literal-search work comfortably inside the shared Tunnel response deadline.
+# A 30s local budget previously raced the v0.0.13 shared-stdio deadline and could
+# retire the logical request just before FolderBridge emitted its response.
+MAX_SEARCH_SCAN_SECONDS = 20.0
 SEARCH_LINE_SEGMENT_CHARS = 256 * 1024
 SEARCH_OVERLAP_CHARS = 4096
 IGNORED_DIRS = {

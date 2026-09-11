@@ -23,6 +23,18 @@ $workDir = Join-Path $projectRoot ".build\pyinstaller"
 $specDir = Join-Path $projectRoot ".build"
 $bundledExtensions = @("git-publisher", "office", "skill-engine")
 $bundledSkillPacks = @("matt-pocock-engineering")
+$publicExternalExtensions = @(
+    "blender-toolkit",
+    "comfyui",
+    "download-toolkit",
+    "ffmpeg-toolkit",
+    "file-ops-toolkit",
+    "ftp-toolkit",
+    "godot-ai",
+    "gpt-sovits-local",
+    "pdf-toolkit"
+)
+$externalReleaseDir = Join-Path $projectRoot "release\external-extensions"
 
 Push-Location $projectRoot
 try {
@@ -77,6 +89,37 @@ try {
     $smoke = (& $executable --version 2>&1 | Out-String).Trim()
     $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $executable).Hash.ToLowerInvariant()
     "$hash *FolderBridge.exe" | Set-Content -LiteralPath (Join-Path $releaseDir "FolderBridge.exe.sha256") -Encoding ascii
+
+    if (Test-Path -LiteralPath $externalReleaseDir) {
+        Remove-Item -LiteralPath $externalReleaseDir -Recurse -Force
+    }
+    New-Item -ItemType Directory -Path $externalReleaseDir -Force | Out-Null
+    foreach ($extensionId in $publicExternalExtensions) {
+        if ($extensionId -eq "debate-judge-adapter") {
+            throw "Private Debate Judge adapter must never enter the public Release allowlist."
+        }
+        $source = Join-Path $projectRoot "Plugins\extensions\$extensionId"
+        $manifestPath = Join-Path $source "folderbridge-extension.json"
+        if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) {
+            throw "Missing public external Extension manifest: $extensionId"
+        }
+        $manifest = Get-Content -LiteralPath $manifestPath -Raw -Encoding UTF8 | ConvertFrom-Json
+        if ($manifest.id -ne $extensionId) {
+            throw "External Extension manifest id mismatch: expected '$extensionId', got '$($manifest.id)'."
+        }
+        $version = [string]$manifest.version
+        if ($version -notmatch '^\d+\.\d+\.\d+(?:[-+][A-Za-z0-9.-]+)?$') {
+            throw "External Extension '$extensionId' has an unsupported Release version '$version'."
+        }
+        $assetName = "FolderBridge-extension-$extensionId-$version.zip"
+        $assetPath = Join-Path $externalReleaseDir $assetName
+        Compress-Archive -Path (Join-Path $source "*") -DestinationPath $assetPath -CompressionLevel Optimal -Force
+        $assetHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $assetPath).Hash.ToLowerInvariant()
+        "$assetHash *$assetName" | Set-Content -LiteralPath ($assetPath + ".sha256") -Encoding ascii
+        Write-Host "Packaged external Extension: $assetName"
+        Write-Host "SHA-256: $assetHash"
+    }
+
     Write-Host "Built: $executable"
     Write-Host "Smoke: $smoke"
     Write-Host "SHA-256: $hash"

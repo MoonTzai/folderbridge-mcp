@@ -70,9 +70,11 @@ class RepositoryHygieneTests(unittest.TestCase):
 
     def test_published_external_extension_table_matches_manifest_versions(self) -> None:
         published = {
-            "comfyui": ("1.4.0", "test_external_comfyui.py"),
+            "blender-toolkit": ("0.1.2", "test_external_blender_toolkit.py"),
+            "comfyui": ("1.5.0", "test_external_comfyui.py"),
             "download-toolkit": ("0.1.0", "test_external_download_toolkit.py"),
             "ffmpeg-toolkit": ("0.1.2", "test_external_ffmpeg_toolkit.py"),
+            "file-ops-toolkit": ("0.1.0", "test_external_file_ops_toolkit.py"),
             "ftp-toolkit": ("0.2.1", "test_external_ftp_toolkit.py"),
             "godot-ai": ("0.1.0", "test_external_godot_ai.py"),
             "gpt-sovits-local": ("0.1.2", "test_external_gpt_sovits.py"),
@@ -87,6 +89,33 @@ class RepositoryHygieneTests(unittest.TestCase):
                 self.assertEqual(manifest["version"], expected_version)
                 self.assertIn(f"| `{plugin_id}` | {expected_version} |", readme)
                 self.assertTrue((ROOT / "tests" / test_name).is_file())
+
+    def test_windows_release_packages_all_public_external_extensions_and_excludes_judge(self) -> None:
+        build = (ROOT / "scripts" / "build_windows.ps1").read_text(encoding="utf-8")
+        workflow = (ROOT / ".github" / "workflows" / "release-windows.yml").read_text(encoding="utf-8")
+        allowlist_start = build.index("$publicExternalExtensions = @(")
+        allowlist_end = build.index(")\n$externalReleaseDir", allowlist_start)
+        allowlist = build[allowlist_start:allowlist_end]
+        expected = {
+            "blender-toolkit",
+            "comfyui",
+            "download-toolkit",
+            "ffmpeg-toolkit",
+            "file-ops-toolkit",
+            "ftp-toolkit",
+            "godot-ai",
+            "gpt-sovits-local",
+            "pdf-toolkit",
+        }
+        for extension_id in expected:
+            self.assertIn(f'"{extension_id}"', allowlist)
+        self.assertNotIn('"debate-judge-adapter"', allowlist)
+        self.assertIn("release\\external-extensions", build)
+        self.assertIn("Compress-Archive", build)
+        self.assertIn("FolderBridge-extension-$extensionId-$version.zip", build)
+        self.assertIn("Expected 18 external Extension Release files (9 ZIP + 9 SHA256)", workflow)
+        self.assertIn("release/external-extensions", workflow)
+        self.assertIn("Private Debate Judge adapter must never be published", workflow)
 
     def test_extension_authoring_guide_uses_only_public_python_abi(self) -> None:
         spec = (ROOT / "folderbridge_mcp" / "extension_spec.py").read_text(encoding="utf-8")

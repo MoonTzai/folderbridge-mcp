@@ -6,6 +6,7 @@ import os
 import re
 import shutil
 import subprocess
+import time
 from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError, URLError
@@ -73,6 +74,8 @@ RESERVED_NAMES = {
 
 
 def handle(action: str, params: dict[str, Any], context: dict[str, Any]) -> dict[str, Any]:
+    if action == "launch-ui":
+        return _launch_ui(params, context)
     if action == "headless-probe":
         return _headless_probe()
     if action == "headless-render":
@@ -135,7 +138,7 @@ def handle(action: str, params: dict[str, Any], context: dict[str, Any]) -> dict
     return output
 
 
-def _request(action: str, params: dict[str, Any], *, workspace_root: str) -> dict[str, Any]:
+def _request(action: str, params: dict[str, Any], *, workspace_root: str, timeout_seconds: float = 60.0) -> dict[str, Any]:
     token = _read_token()
     body = json.dumps(
         {"action": action, "params": params, "workspace_root": workspace_root},
@@ -152,7 +155,7 @@ def _request(action: str, params: dict[str, Any], *, workspace_root: str) -> dic
     )
     opener = build_opener(ProxyHandler({}))
     try:
-        with opener.open(request, timeout=60) as response:
+        with opener.open(request, timeout=max(0.1, float(timeout_seconds))) as response:
             data = response.read(MAX_RESPONSE_BYTES + 1)
     except HTTPError as exc:
         detail = exc.read(4096).decode("utf-8", errors="replace")
@@ -310,6 +313,164 @@ def _find_blender() -> Path | None:
         pass
     existing = [p for p in candidates if p.is_file() and p.name.lower() == "blender.exe"]
     return sorted(existing, key=lambda p: str(p).lower(), reverse=True)[0] if existing else None
+
+
+def _running_blender_pids() -> list[int]:
+    if os.name != "nt":
+        return []
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        TH32CS_SNAPPROCESS = 0x00000002
+        MAX_PATH = 260
+
+        class PROCESSENTRY32W(ctypes.Structure):
+            _fields_ = [
+                ("dwSize", wintypes.DWORD),
+                ("cntUsage", wintypes.DWORD),
+                ("th32ProcessID", wintypes.DWORD),
+                ("th32DefaultHeapID", ctypes.c_size_t),
+                ("th32ModuleID", wintypes.DWORD),
+                ("cntThreads", wintypes.DWORD),
+                ("th32ParentProcessID", wintypes.DWORD),
+                ("pcPriClassBase", wintypes.LONG),
+                ("dwFlags", wintypes.DWORD),
+                ("szExeFile", wintypes.WCHAR * MAX_PATH),
+            ]
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.CreateToolhelp32Snapshot.argtypes = [wintypes.DWORD, wintypes.DWORD]
+        kernel32.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
+        kernel32.Process32FirstW.argtypes = [wintypes.HANDLE, ctypes.POINTER(PROCESSENTRY32W)]
+        kernel32.Process32FirstW.restype = wintypes.BOOL
+        kernel32.Process32NextW.argtypes = [wintypes.HANDLE, ctypes.POINTER(PROCESSENTRY32W)]
+        kernel32.Process32NextW.restype = wintypes.BOOL
+        kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+        kernel32.CloseHandle.restype = wintypes.BOOL
+
+        snapshot = kernel32.CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0)
+        invalid = wintypes.HANDLE(-1).value
+        if snapshot == invalid:
+            return []
+        pids: list[int] = []
+        try:
+            entry = PROCESSENTRY32W()
+            entry.dwSize = ctypes.sizeof(PROCESSENTRY32W)
+            ok = bool(kernel32.Process32FirstW(snapshot, ctypes.byref(entry)))
+            while ok:
+                if str(entry.szExeFile).lower() == "blender.exe":
+                    pids.append(int(entry.th32ProcessID))
+                ok = bool(kernel32.Process32NextW(snapshot, ctypes.byref(entry)))
+        finally:
+            kernel32.CloseHandle(snapshot)
+        return sorted(set(pids))
+    except Exception:
+        return []
+
+
+def _launch_ui(params: dict[str, Any], context: dict[str, Any]) -> dict[str, Any]:
+    root = _workspace_root(context)
+    raw_blend = params.get("blend_path", "")
+    blend_rel = ""
+    blend_abs: Path | None = None
+    if raw_blend:
+        blend_rel = _clean_relative(raw_blend, root, must_exist=True, directory=False)
+        if Path(blend_rel).suffix.lower() != ".blend":
+            raise ExtensionError("BLENDER_LAUNCH_BAD_BLEND", "blend_path must point to a .blend file.")
+        blend_abs = root / Path(blend_rel)
+
+    try:
+        live = _request("status", {}, workspace_root="", timeout_seconds=1.5)
+        return {
+            "ok": True,
+            "launched": False,
+            "bridge_online": True,
+            "state": "already_online",
+            "bridge": live,
+            "blend_path_requested": blend_rel or None,
+        }
+    except ExtensionError as first_error:
+        initial_error = str(first_error)
+
+    running = _running_blender_pids()
+    if running:
+        return {
+            "ok": True,
+            "launched": False,
+            "bridge_online": False,
+            "state": "existing_blender_bridge_offline",
+            "blender_pids": running,
+            "bridge_error": initial_error,
+            "action_required": "Existing Blender process detected. Enable/restart FolderBridge Blender Bridge instead of launching a duplicate instance.",
+        }
+
+    blender = _find_blender()
+    if blender is None:
+        raise ExtensionError("BLENDER_NOT_FOUND", "blender.exe was not found.")
+
+    bootstrap = (
+        "import bpy; "
+        "bpy.ops.preferences.addon_enable(module='folderbridge_blender_bridge'); "
+        "bpy.ops.wm.save_userpref()"
+    )
+    argv = [str(blender)]
+    if blend_abs is not None:
+        argv.append(str(blend_abs))
+    argv.extend(["--python-expr", bootstrap])
+
+    creationflags = 0
+    if os.name == "nt":
+        creationflags |= int(getattr(subprocess, "DETACHED_PROCESS", 0))
+        creationflags |= int(getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0))
+
+    try:
+        proc = subprocess.Popen(
+            argv,
+            cwd=str(root),
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            shell=False,
+            close_fds=True,
+            creationflags=creationflags,
+        )
+    except OSError as exc:
+        raise ExtensionError("BLENDER_LAUNCH_FAILED", f"Failed to launch Blender UI: {exc}") from exc
+
+    wait_seconds = float(params.get("wait_seconds", 15.0))
+    deadline = time.monotonic() + max(0.0, min(wait_seconds, 30.0))
+    last_error = initial_error
+    while time.monotonic() < deadline:
+        if proc.poll() is not None:
+            break
+        try:
+            live = _request("status", {}, workspace_root="", timeout_seconds=1.0)
+            return {
+                "ok": True,
+                "launched": True,
+                "bridge_online": True,
+                "state": "launched_bridge_online",
+                "pid": int(proc.pid),
+                "blender_path": str(blender),
+                "blend_path": blend_rel or None,
+                "bridge": live,
+            }
+        except ExtensionError as exc:
+            last_error = str(exc)
+            time.sleep(0.25)
+
+    return {
+        "ok": True,
+        "launched": True,
+        "bridge_online": False,
+        "state": "launched_bridge_pending" if proc.poll() is None else "launch_exited_before_bridge",
+        "pid": int(proc.pid),
+        "returncode": proc.poll(),
+        "blender_path": str(blender),
+        "blend_path": blend_rel or None,
+        "bridge_error": last_error,
+    }
 
 
 def _headless_probe() -> dict[str, Any]:

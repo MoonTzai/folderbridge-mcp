@@ -3,8 +3,8 @@
   "runtime_abi": 1,
   "id": "comfyui",
   "name": "Local ComfyUI",
-  "version": "1.4.0",
-  "description": "External hot-load bridge to local ComfyUI at 127.0.0.1:8188. Long workflow runs execute as host-owned jobs; bounded control actions expose memory release, real ComfyUI job state, targeted cancellation, node/model capability discovery, and transient history retry without arbitrary HTTP access.",
+  "version": "1.5.0",
+  "description": "External hot-load bridge to local ComfyUI at 127.0.0.1:8188. Long workflow runs execute as host-owned jobs; bounded control actions expose memory release, real ComfyUI job state, exact progress observation, reusable read-only health snapshots, targeted cancellation, node/model capability discovery, and transient history retry without arbitrary HTTP access.",
   "entrypoint": "plugin.py",
   "permissions": [
     "network.loopback:127.0.0.1:8188",
@@ -130,6 +130,71 @@
       "requires_workspace": false,
       "authorization": "global",
       "timeout_seconds": 10,
+      "mutation_scope": {
+        "mode": "none"
+      },
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "prompt_id": {
+            "type": "string",
+            "minLength": 36,
+            "maxLength": 36
+          }
+        },
+        "required": [
+          "prompt_id"
+        ],
+        "additionalProperties": false
+      },
+      "effect_contract": {
+        "effect_semantics": "read_only",
+        "lifetime": "foreground"
+      }
+    },
+    "progress": {
+      "read_only": true,
+      "requires_workspace": false,
+      "authorization": "global",
+      "timeout_seconds": 15,
+      "mutation_scope": {
+        "mode": "none"
+      },
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "prompt_id": {
+            "type": "string",
+            "minLength": 36,
+            "maxLength": 36
+          },
+          "node_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          },
+          "observe_seconds": {
+            "type": "number",
+            "minimum": 0.1,
+            "maximum": 10,
+            "default": 2
+          }
+        },
+        "required": [
+          "prompt_id"
+        ],
+        "additionalProperties": false
+      },
+      "effect_contract": {
+        "effect_semantics": "read_only",
+        "lifetime": "foreground"
+      }
+    },
+    "health-check": {
+      "read_only": true,
+      "requires_workspace": false,
+      "authorization": "global",
+      "timeout_seconds": 25,
       "mutation_scope": {
         "mode": "none"
       },

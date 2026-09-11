@@ -81,6 +81,7 @@ class ManagedServiceTests(unittest.TestCase):
         self.assertEqual(install.argv()[0], str(root / "python_embeded" / "python.exe"))
         self.assertIn("--windows-standalone-build", install.argv())
         self.assertIn("--disable-auto-launch", install.argv())
+        self.assertIn("--fast-disk", install.argv())
         self.assertEqual(install.argv()[-4:], ["--listen", "127.0.0.1", "--port", "8188"])
 
     def test_detects_source_dot_venv_and_venv(self) -> None:
@@ -172,6 +173,7 @@ class ManagedServiceTests(unittest.TestCase):
         self.assertEqual(kwargs["env"]["PYTHONIOENCODING"], "utf-8")
         self.assertEqual(kwargs["env"]["PYTHONUTF8"], "1")
         self.assertIn("--disable-auto-launch", argv)
+        self.assertIn("--fast-disk", argv)
         self.assertFalse(any(str(value).lower().endswith((".bat", ".cmd")) for value in argv))
 
     def test_premature_exit_reports_persistent_startup_log(self) -> None:

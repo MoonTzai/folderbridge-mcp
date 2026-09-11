@@ -101,8 +101,16 @@ class Gui041RegressionTests(unittest.TestCase):
         self.assertIn('text="启动"', self.gui)
         self.assertIn('text="停止"', self.gui)
         self.assertIn('service_options = ttk.Frame(service_controls, style="Card.TFrame")', self.gui)
-        self.assertIn('service_actions = ttk.Frame(service_controls, style="Card.TFrame")', self.gui)
-        self.assertIn('service_actions.pack(fill="x", pady=(4, 0))', self.gui)
+        self.assertIn('service_primary_actions = ttk.Frame(service_controls, style="Card.TFrame")', self.gui)
+        self.assertIn('service_primary_actions.pack(anchor="e", pady=(4, 0))', self.gui)
+        self.assertIn('service_secondary_actions = ttk.Frame(service_controls, style="Card.TFrame")', self.gui)
+        self.assertIn('service_secondary_actions.pack(anchor="e", pady=(4, 0))', self.gui)
+        self.assertIn("extension_action_buttons = service_secondary_actions", self.gui)
+        self.assertIn('ttk.Button(\n                    service_primary_actions,\n                    text="启动"', self.gui)
+        self.assertIn('ttk.Button(\n                    service_primary_actions,\n                    text="停止"', self.gui)
+        self.assertIn('ttk.Button(\n                extension_action_buttons,\n                text="详情"', self.gui)
+        self.assertIn('ttk.Button(\n                    extension_action_buttons,\n                    text="撤销批准"', self.gui)
+        self.assertNotIn("extension_action_buttons = service_primary_actions", self.gui)
         self.assertIn("if busy or not owned:\n                    stop_button.configure(state=\"disabled\")", self.gui)
 
     def test_runtime_api_key_field_trims_clipboard_edge_whitespace(self) -> None:

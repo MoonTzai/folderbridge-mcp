@@ -6,6 +6,7 @@ import json
 import tempfile
 import threading
 import unittest
+from unittest import mock
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -107,12 +108,70 @@ class BlenderToolkitTests(unittest.TestCase):
         self.assertIn("operator-call", manifest["actions"])
         self.assertIn("node-interface-socket", manifest["actions"])
         self.assertIn("render-animation", manifest["actions"])
+        self.assertIn("launch-ui", manifest["actions"])
+        self.assertFalse(manifest["actions"]["launch-ui"]["read_only"])
+        self.assertEqual(manifest["actions"]["launch-ui"]["run_mode"], "foreground")
 
     def test_status_reports_live_comfyui_n_panel(self) -> None:
         result = plugin.handle("status", {}, {})
         self.assertTrue(result["bridge_online"])
         self.assertTrue(result["comfyui_n_panel_present"])
         self.assertTrue(result["comfyui_blender_enabled"])
+
+    def test_launch_ui_reuses_online_bridge_without_duplicate_process(self) -> None:
+        with mock.patch.object(plugin, "_running_blender_pids", return_value=[]), mock.patch.object(
+            plugin.subprocess, "Popen"
+        ) as popen:
+            result = plugin.handle("launch-ui", {}, Context(self.root))
+        self.assertTrue(result["bridge_online"])
+        self.assertFalse(result["launched"])
+        self.assertEqual(result["state"], "already_online")
+        popen.assert_not_called()
+
+    def test_launch_ui_refuses_duplicate_when_existing_blender_has_offline_bridge(self) -> None:
+        old_url = plugin.BRIDGE_URL
+        plugin.BRIDGE_URL = "http://127.0.0.1:1"
+        try:
+            with mock.patch.object(plugin, "_running_blender_pids", return_value=[1234]), mock.patch.object(
+                plugin.subprocess, "Popen"
+            ) as popen:
+                result = plugin.handle("launch-ui", {}, Context(self.root))
+        finally:
+            plugin.BRIDGE_URL = old_url
+        self.assertFalse(result["bridge_online"])
+        self.assertFalse(result["launched"])
+        self.assertEqual(result["state"], "existing_blender_bridge_offline")
+        self.assertEqual(result["blender_pids"], [1234])
+        popen.assert_not_called()
+
+    def test_launch_ui_uses_fixed_blender_bootstrap_and_workspace_blend(self) -> None:
+        old_url = plugin.BRIDGE_URL
+        plugin.BRIDGE_URL = "http://127.0.0.1:1"
+        fake_proc = mock.Mock()
+        fake_proc.pid = 4321
+        fake_proc.poll.return_value = None
+        blender = self.root / "blender.exe"
+        blender.write_bytes(b"MZ")
+        try:
+            with mock.patch.object(plugin, "_running_blender_pids", return_value=[]), mock.patch.object(
+                plugin, "_find_blender", return_value=blender
+            ), mock.patch.object(plugin.subprocess, "Popen", return_value=fake_proc) as popen:
+                result = plugin.handle(
+                    "launch-ui",
+                    {"blend_path": "scene.blend", "wait_seconds": 0},
+                    Context(self.root),
+                )
+        finally:
+            plugin.BRIDGE_URL = old_url
+        self.assertTrue(result["launched"])
+        self.assertFalse(result["bridge_online"])
+        argv = popen.call_args.args[0]
+        self.assertEqual(argv[0], str(blender))
+        self.assertIn(str((self.root / "scene.blend").resolve()), argv)
+        self.assertIn("--python-expr", argv)
+        bootstrap = argv[argv.index("--python-expr") + 1]
+        self.assertIn("folderbridge_blender_bridge", bootstrap)
+        self.assertNotIn("scene.blend", bootstrap)
 
     def test_workspace_relative_read_path_is_forwarded(self) -> None:
         result = plugin.handle("open-blend", {"path": "scene.blend"}, Context(self.root))

@@ -409,6 +409,9 @@ EN_TRANSLATIONS: dict[str, str] = {
     "连接已经在运行": "The connection is already running",
     "无法启动 tunnel-client: ": "Unable to start tunnel-client: ",
     "无法启动 ": "Unable to start ",
+    "无法确认 tunnel-client 版本；为避免 shared-stdio 超时污染其它会话，FolderBridge 现在要求官方 tunnel-client 0.0.14 或更高版本。": "Unable to verify the tunnel-client version. To prevent a shared-stdio timeout from poisoning other sessions, FolderBridge now requires official tunnel-client 0.0.14 or newer.",
+    "检测到 tunnel-client ": "Detected tunnel-client ",
+    "。该版本存在已知的 shared-stdio deadline/request-id 复用故障风险，可能导致所有并行 FolderBridge 会话一起 502。请升级并选择官方 tunnel-client 0.0.14 或更高版本。": ". This version has a known shared-stdio deadline/request-id reuse failure risk that can cause all parallel FolderBridge sessions to return 502. Upgrade and select official tunnel-client 0.0.14 or newer.",
     "<已隐藏>": "<hidden>",
 
     # Source-controlled dynamic fragments. Keep this list specific: broad

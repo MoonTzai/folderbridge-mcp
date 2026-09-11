@@ -10,6 +10,8 @@ from comfyui_runtime import (
     comfyui_status,
     get_features,
     get_job_status,
+    get_health_check,
+    get_progress,
     get_node_info,
     list_jobs,
     list_models,
@@ -36,6 +38,14 @@ def handle(action: str, params: dict[str, Any], context: dict[str, Any]) -> dict
         )
     if action == "job-status":
         return get_job_status(params["prompt_id"])
+    if action == "progress":
+        return get_progress(
+            params["prompt_id"],
+            node_id=params.get("node_id"),
+            observe_seconds=params.get("observe_seconds", 2.0),
+        )
+    if action == "health-check":
+        return get_health_check(params["prompt_id"])
     if action == "cancel-prompt":
         return cancel_prompt(params["prompt_id"])
     if action == "node-info":

@@ -90,6 +90,14 @@ EXPECTED_EFFECTS = {
             "read_only",
             "foreground"
         ],
+        "progress": [
+            "read_only",
+            "foreground"
+        ],
+        "health-check": [
+            "read_only",
+            "foreground"
+        ],
         "cancel-prompt": [
             "external_effect",
             "foreground"

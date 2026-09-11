@@ -9,6 +9,7 @@ venv/
 /release/
 /FolderBridge.exe
 /local-private/
+/external-skills/
 /Plugins/extensions/debate-judge-adapter/
 /Plugins/skill-packs/folderbridge-discipline/
 /FolderBridge - Copy*.exe

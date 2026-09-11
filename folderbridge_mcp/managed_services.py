@@ -62,6 +62,7 @@ class ComfyUIInstall:
         if self.mode == "portable":
             argv.append("--windows-standalone-build")
         argv.append("--disable-auto-launch")
+        argv.append("--fast-disk")
         argv.extend(("--listen", COMFYUI_HOST, "--port", str(COMFYUI_PORT)))
         return argv
 

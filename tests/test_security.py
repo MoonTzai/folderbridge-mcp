@@ -9,7 +9,14 @@ import unittest
 from pathlib import Path
 
 from folderbridge_mcp.config import CONFIG_NAME
-from folderbridge_mcp.security import ToolError, Workspace, _atomic_create, _atomic_replace, sha256_bytes
+from folderbridge_mcp.security import (
+    MAX_SEARCH_SCAN_SECONDS,
+    ToolError,
+    Workspace,
+    _atomic_create,
+    _atomic_replace,
+    sha256_bytes,
+)
 
 
 class WorkspaceSecurityTests(unittest.TestCase):
@@ -135,6 +142,10 @@ class WorkspaceSecurityTests(unittest.TestCase):
         self.assertFalse(result["truncated"])
         self.assertEqual(result["skipped_large_files"], 0)
         self.assertGreaterEqual(result["max_file_bytes"], path.stat().st_size)
+
+    def test_literal_search_budget_keeps_transport_deadline_headroom(self) -> None:
+        self.assertEqual(MAX_SEARCH_SCAN_SECONDS, 20.0)
+        self.assertLess(MAX_SEARCH_SCAN_SECONDS, 30.0)
 
     def test_literal_search_and_list_support_result_pagination(self) -> None:
         for index in range(8):

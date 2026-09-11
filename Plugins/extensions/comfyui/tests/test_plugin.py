@@ -6,6 +6,7 @@ import json
 import tempfile
 import threading
 import unittest
+from unittest import mock
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import unquote, urlparse
@@ -27,6 +28,8 @@ comfyui_status = _RUNTIME.comfyui_status
 release_comfyui_memory = _RUNTIME.release_comfyui_memory
 list_jobs = _RUNTIME.list_jobs
 get_job_status = _RUNTIME.get_job_status
+get_health_check = _RUNTIME.get_health_check
+get_progress = _RUNTIME.get_progress
 cancel_prompt = _RUNTIME.cancel_prompt
 get_node_info = _RUNTIME.get_node_info
 list_models = _RUNTIME.list_models
@@ -65,6 +68,10 @@ class _FakeComfyHandler(BaseHTTPRequestHandler):
                 self.send_error(404)
             else:
                 self._json(200, values)
+            return
+        if parsed.path == "/queue":
+            self.server.queue_requests += 1  # type: ignore[attr-defined]
+            self._json(200, {"queue_running": self.server.queue_running, "queue_pending": self.server.queue_pending})  # type: ignore[attr-defined]
             return
         if parsed.path == "/api/jobs":
             self.server.jobs_requests += 1  # type: ignore[attr-defined]
@@ -170,7 +177,26 @@ class ComfyUiTests(unittest.TestCase):
         self.comfy_root = self.root / "ComfyUI"
         (self.comfy_root / "output").mkdir(parents=True)
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), _FakeComfyHandler)
-        self.server.system_stats = {"system": {"os": "test", "argv": [str(self.comfy_root / "main.py")]}}  # type: ignore[attr-defined]
+        self.server.system_stats = {  # type: ignore[attr-defined]
+            "system": {
+                "os": "test",
+                "comfyui_version": "test-version",
+                "ram_total": 1000,
+                "ram_free": 250,
+                "argv": [str(self.comfy_root / "main.py"), "--fast-disk"],
+            },
+            "devices": [
+                {
+                    "name": "test-gpu",
+                    "type": "cuda",
+                    "index": 0,
+                    "vram_total": 1000,
+                    "vram_free": 150,
+                    "torch_vram_total": 900,
+                    "torch_vram_free": 100,
+                }
+            ],
+        }
         self.server.history_outputs = {  # type: ignore[attr-defined]
             "9": {"images": [{"filename": "result.png", "subfolder": "", "type": "output"}]}
         }
@@ -185,6 +211,16 @@ class ComfyUiTests(unittest.TestCase):
             "jobs": [{"id": JOB_ID, "status": "in_progress", "create_time": 1234, "outputs_count": 0}],
             "pagination": {"offset": 0, "limit": 20, "total": 1, "has_more": False},
         }
+        self.server.queue_running = [  # type: ignore[attr-defined]
+            [
+                4,
+                JOB_ID,
+                {"5": {"class_type": "MiniMaxH3Director", "inputs": {}}, "7": {"class_type": "SaveVideo", "inputs": {}}},
+                {"client_id": "folderbridge-progress-test"},
+                ["7"],
+            ]
+        ]
+        self.server.queue_pending = []  # type: ignore[attr-defined]
         self.server.job_details = {  # type: ignore[attr-defined]
             "id": JOB_ID,
             "status": "completed",
@@ -208,6 +244,7 @@ class ComfyUiTests(unittest.TestCase):
         self.server.jobs_requests = 0  # type: ignore[attr-defined]
         self.server.last_jobs_query = ""  # type: ignore[attr-defined]
         self.server.job_status_requests = 0  # type: ignore[attr-defined]
+        self.server.queue_requests = 0  # type: ignore[attr-defined]
         self.server.targeted_cancel_requests = 0  # type: ignore[attr-defined]
         self.server.last_cancel_prompt_id = None  # type: ignore[attr-defined]
         self.server.targeted_cancel_available = True  # type: ignore[attr-defined]
@@ -258,6 +295,269 @@ class ComfyUiTests(unittest.TestCase):
         self.assertNotIn("outputs", result)
         self.assertEqual(result["artifacts"][0]["filename"], "result.mp4")
         self.assertEqual(self.server.job_status_requests, 1)  # type: ignore[attr-defined]
+
+    def test_health_check_aggregates_generic_runtime_job_and_queue_without_websocket_or_mutation(self) -> None:
+        self.server.job_details = {"id": JOB_ID, "status": "in_progress", "outputs_count": 0}  # type: ignore[attr-defined]
+        with mock.patch.object(_RUNTIME, "_observe_progress_events") as observer:
+            result = get_health_check(JOB_ID, port=self.port)
+        self.assertEqual(result["health_schema_version"], 1)
+        self.assertEqual(result["job"]["status"], "in_progress")
+        self.assertTrue(result["runtime"]["online"])
+        self.assertTrue(result["runtime"]["fast_disk"])
+        self.assertEqual(result["runtime"]["ram"]["free_ratio"], 0.25)
+        self.assertNotIn("class", result["runtime"]["ram"])
+        self.assertEqual(result["runtime"]["devices"][0]["vram"]["free_ratio"], 0.15)
+        self.assertNotIn("class", result["runtime"]["devices"][0]["vram"])
+        self.assertEqual(result["queue"]["exact_prompt_state"], "running")
+        self.assertEqual(result["queue"]["progress_capability"]["provider"], "minimax_h3_director")
+        self.assertTrue(result["queue"]["progress_capability"]["supported"])
+        self.assertEqual(result["queue"]["progress_capability"]["node_ids"], ["5"])
+        self.assertEqual(result["assessment"]["state"], "running_exact_queue_bound")
+        self.assertFalse(result["assessment"]["stall_suspected"])
+        self.assertTrue(result["consistency"]["final_refresh_ok"])
+        self.assertFalse(result["consistency"]["state_changed_during_snapshot"])
+        self.assertEqual(result["single_snapshot_stall_rule"], "never_infer_stall_without_longitudinal_evidence")
+        observer.assert_not_called()
+        self.assertEqual(self.server.job_status_requests, 2)  # type: ignore[attr-defined]
+        self.assertEqual(self.server.queue_requests, 1)  # type: ignore[attr-defined]
+        self.assertEqual(self.server.prompt_requests, 0)  # type: ignore[attr-defined]
+        self.assertEqual(self.server.targeted_cancel_requests, 0)  # type: ignore[attr-defined]
+        self.assertEqual(self.server.free_requests, 0)  # type: ignore[attr-defined]
+
+    def test_health_check_generic_non_director_workflow_remains_healthy_without_progress_provider(self) -> None:
+        self.server.job_details = {"id": JOB_ID, "status": "in_progress", "outputs_count": 0}  # type: ignore[attr-defined]
+        self.server.queue_running = [  # type: ignore[attr-defined]
+            [4, JOB_ID, {"7": {"class_type": "SaveVideo", "inputs": {}}}, {"client_id": "folderbridge-generic-test"}, ["7"]]
+        ]
+        with mock.patch.object(_RUNTIME, "_observe_progress_events") as observer:
+            result = get_health_check(JOB_ID, port=self.port)
+        self.assertEqual(result["assessment"]["state"], "running_exact_queue_bound")
+        self.assertEqual(result["queue"]["exact_prompt_state"], "running")
+        capability = result["queue"]["progress_capability"]
+        self.assertFalse(capability["supported"])
+        self.assertIsNone(capability["provider"])
+        self.assertEqual(capability["reason"], "unsupported_workflow")
+        observer.assert_not_called()
+
+    def test_health_check_terminal_prompt_skips_queue_and_websocket_observation(self) -> None:
+        self.server.job_details = {"id": JOB_ID, "status": "completed", "outputs_count": 1, "outputs": {}}  # type: ignore[attr-defined]
+        with mock.patch.object(_RUNTIME, "_observe_progress_events") as observer:
+            result = get_health_check(JOB_ID, port=self.port)
+        self.assertEqual(result["assessment"]["state"], "terminal_completed")
+        self.assertIsNone(result["queue"])
+        self.assertEqual(self.server.queue_requests, 0)  # type: ignore[attr-defined]
+        observer.assert_not_called()
+
+    def test_health_check_failed_and_cancelled_are_terminal_without_queue_observation(self) -> None:
+        for status in ("failed", "cancelled"):
+            with self.subTest(status=status):
+                self.server.job_details = {"id": JOB_ID, "status": status, "outputs_count": 0}  # type: ignore[attr-defined]
+                before_queue_requests = self.server.queue_requests  # type: ignore[attr-defined]
+                result = get_health_check(JOB_ID, port=self.port)
+                self.assertEqual(result["assessment"]["state"], f"terminal_{status}")
+                self.assertIsNone(result["queue"])
+                self.assertEqual(self.server.queue_requests, before_queue_requests)  # type: ignore[attr-defined]
+
+    def test_health_check_pending_prompt_uses_queue_and_final_refresh(self) -> None:
+        self.server.job_details = {"id": JOB_ID, "status": "pending", "outputs_count": 0}  # type: ignore[attr-defined]
+        self.server.queue_running = []  # type: ignore[attr-defined]
+        self.server.queue_pending = [  # type: ignore[attr-defined]
+            [4, JOB_ID, {"7": {"class_type": "SaveVideo", "inputs": {}}}, {"client_id": "folderbridge-pending-test"}, ["7"]]
+        ]
+        result = get_health_check(JOB_ID, port=self.port)
+        self.assertEqual(result["job"]["status"], "pending")
+        self.assertEqual(result["queue"]["exact_prompt_state"], "pending")
+        self.assertEqual(result["assessment"]["state"], "pending")
+        self.assertTrue(result["consistency"]["queue_snapshot_attempted"])
+        self.assertTrue(result["consistency"]["queue_snapshot_ok"])
+        self.assertTrue(result["consistency"]["final_refresh_attempted"])
+        self.assertTrue(result["consistency"]["final_refresh_ok"])
+
+    def test_health_check_final_job_refresh_wins_when_prompt_completes_during_snapshot(self) -> None:
+        initial = {"id": JOB_ID, "status": "in_progress", "outputs_count": 0, "artifacts_found": 0, "artifacts": []}
+        final = {
+            "id": JOB_ID,
+            "status": "completed",
+            "outputs_count": 1,
+            "artifacts_found": 1,
+            "artifacts": [{"filename": "done.mp4", "subfolder": "", "type": "output", "kind": "video", "node_id": "7", "output_key": "video"}],
+        }
+        queue = {"exact_prompt_state": "running", "running_count": 1, "pending_count": 0, "progress_capability": {"provider": "minimax_h3_director", "supported": True, "node_ids": ["5"], "reason": None}}
+        with mock.patch.object(_RUNTIME, "get_job_status", side_effect=[initial, final]), mock.patch.object(
+            _RUNTIME, "_queue_health_snapshot", return_value=queue
+        ), mock.patch.object(_RUNTIME, "_observe_progress_events") as observer:
+            result = get_health_check(JOB_ID, port=self.port)
+        self.assertEqual(result["job"]["status"], "completed")
+        self.assertEqual(result["job"]["outputs_count"], 1)
+        self.assertEqual(result["assessment"]["state"], "terminal_completed")
+        self.assertTrue(result["consistency"]["state_changed_during_snapshot"])
+        self.assertEqual(result["consistency"]["initial_status"], "in_progress")
+        self.assertEqual(result["consistency"]["final_status"], "completed")
+        observer.assert_not_called()
+
+    def test_health_check_queue_failure_does_not_block_final_terminal_authority(self) -> None:
+        initial = {"id": JOB_ID, "status": "in_progress", "outputs_count": 0, "artifacts_found": 0, "artifacts": []}
+        final = {"id": JOB_ID, "status": "completed", "outputs_count": 1, "artifacts_found": 1, "artifacts": []}
+        with mock.patch.object(_RUNTIME, "get_job_status", side_effect=[initial, final]), mock.patch.object(
+            _RUNTIME, "_queue_health_snapshot", side_effect=ToolError("COMFYUI_HTTP_ERROR", "queue temporarily unavailable", status=503)
+        ):
+            result = get_health_check(JOB_ID, port=self.port)
+        self.assertEqual(result["job"]["status"], "completed")
+        self.assertEqual(result["assessment"]["state"], "terminal_completed")
+        self.assertTrue(result["consistency"]["state_changed_during_snapshot"])
+        self.assertFalse(result["consistency"]["queue_snapshot_ok"])
+        self.assertTrue(result["consistency"]["final_refresh_ok"])
+        self.assertEqual(result["consistency"]["queue_error"]["code"], "COMFYUI_HTTP_ERROR")
+
+    def test_health_check_post_queue_refresh_failure_is_explicitly_incomplete(self) -> None:
+        initial = {"id": JOB_ID, "status": "in_progress", "outputs_count": 0, "artifacts_found": 0, "artifacts": []}
+        queue = {"exact_prompt_state": "running", "running_count": 1, "pending_count": 0, "progress_capability": {"provider": None, "supported": False, "node_ids": [], "reason": "unsupported_workflow"}}
+        with mock.patch.object(
+            _RUNTIME, "get_job_status", side_effect=[initial, ToolError("COMFYUI_OFFLINE", "lost during refresh")]
+        ), mock.patch.object(_RUNTIME, "_queue_health_snapshot", return_value=queue):
+            result = get_health_check(JOB_ID, port=self.port)
+        self.assertIsNone(result["job"])
+        self.assertEqual(result["assessment"]["state"], "snapshot_incomplete")
+        self.assertFalse(result["consistency"]["final_refresh_ok"])
+        self.assertIsNone(result["consistency"]["state_changed_during_snapshot"])
+        self.assertEqual(result["consistency"]["refresh_error"]["code"], "COMFYUI_OFFLINE")
+        self.assertFalse(result["assessment"]["stall_suspected"])
+
+    def test_health_check_unknown_prompt_is_explicit_and_websocket_free(self) -> None:
+        unknown = "22222222-2222-4222-8222-222222222222"
+        with mock.patch.object(_RUNTIME, "_observe_progress_events") as observer:
+            result = get_health_check(unknown, port=self.port)
+        self.assertEqual(result["assessment"]["state"], "unknown_prompt")
+        self.assertIsNone(result["job"])
+        self.assertIsNone(result["queue"])
+        self.assertIsNone(result["consistency"]["state_changed_during_snapshot"])
+        observer.assert_not_called()
+
+    def test_health_check_runtime_offline_is_explicit_and_schema_stable(self) -> None:
+        offline = {"online": False, "endpoint": "http://127.0.0.1:8188", "detail": "offline"}
+        with mock.patch.object(_RUNTIME, "comfyui_status", return_value=offline), mock.patch.object(
+            _RUNTIME, "_observe_progress_events"
+        ) as observer:
+            result = get_health_check(JOB_ID, port=self.port)
+        self.assertEqual(result["health_schema_version"], 1)
+        self.assertEqual(result["assessment"]["state"], "runtime_offline")
+        self.assertIsNone(result["job"])
+        self.assertIsNone(result["queue"])
+        self.assertIsNone(result["consistency"]["state_changed_during_snapshot"])
+        self.assertFalse(result["consistency"]["queue_snapshot_attempted"])
+        self.assertIsNone(result["consistency"]["queue_snapshot_ok"])
+        self.assertFalse(result["consistency"]["final_refresh_attempted"])
+        self.assertIsNone(result["consistency"]["final_refresh_ok"])
+        observer.assert_not_called()
+
+    def test_progress_unknown_prompt_is_explicitly_unavailable(self) -> None:
+        unknown = "22222222-2222-4222-8222-222222222222"
+        result = get_progress(unknown, observe_seconds=0.1, port=self.port)
+        self.assertFalse(result["available"])
+        self.assertEqual(result["reason"], "unknown_prompt")
+        self.assertEqual(result["status"], "unknown")
+        self.assertEqual(self.server.queue_requests, 0)  # type: ignore[attr-defined]
+
+    def test_progress_completed_prompt_does_not_observe_or_mutate(self) -> None:
+        result = get_progress(JOB_ID, observe_seconds=0.1, port=self.port)
+        self.assertFalse(result["available"])
+        self.assertEqual(result["reason"], "prompt_not_in_progress")
+        self.assertEqual(result["status"], "completed")
+        self.assertEqual(self.server.queue_requests, 0)  # type: ignore[attr-defined]
+        self.assertEqual(self.server.prompt_requests, 0)  # type: ignore[attr-defined]
+        self.assertEqual(self.server.targeted_cancel_requests, 0)  # type: ignore[attr-defined]
+        self.assertEqual(self.server.free_requests, 0)  # type: ignore[attr-defined]
+
+    def test_progress_binds_exact_running_prompt_and_director_node(self) -> None:
+        self.server.job_details = {"id": JOB_ID, "status": "in_progress", "outputs_count": 0}  # type: ignore[attr-defined]
+        now = _RUNTIME.time.time()
+        observed = {
+            "director_progress": [
+                {"observed_at": now, "data": {"node_id": "5", "phase": "sample", "phase_label": "采样", "phase_value": 0.0, "phase_max": 1, "overall_value": 2.0, "overall_max": 6, "segment": 1, "segment_total": 1, "timeline_segment": 1, "timeline_segment_total": 1, "frames_label": "192f", "task_key": "v2v"}},
+                {"observed_at": now + 0.01, "data": {"node_id": "5", "phase": "sample", "phase_label": "采样", "phase_value": 0.25, "phase_max": 1, "overall_value": 2.25, "overall_max": 6, "segment": 1, "segment_total": 1, "timeline_segment": 1, "timeline_segment_total": 1, "frames_label": "192f", "task_key": "v2v"}},
+            ],
+            "director_preview": [],
+            "node_progress": [
+                {"observed_at": now + 0.01, "data": {"state": "running", "value": 2.25, "max": 6}},
+            ],
+            "executing": [{"observed_at": now, "data": {"node": "5"}}],
+        }
+        with mock.patch.object(_RUNTIME, "_observe_progress_events", return_value=observed) as observer:
+            result = get_progress(JOB_ID, observe_seconds=0.1, port=self.port)
+        self.assertTrue(result["available"])
+        self.assertEqual(result["node_id"], "5")
+        self.assertEqual(result["phase"], "sample")
+        self.assertEqual(result["phase_value"], 0.25)
+        self.assertTrue(result["progress_changed_during_observation"])
+        self.assertEqual(result["binding"], "exact_running_prompt_client_and_director_node")
+        self.assertEqual(result["executing_node"], "5")
+        observer.assert_called_once()
+        self.assertEqual(observer.call_args.kwargs["prompt_id"], JOB_ID)
+        self.assertEqual(observer.call_args.kwargs["node_id"], "5")
+        self.assertEqual(self.server.queue_requests, 1)  # type: ignore[attr-defined]
+        self.assertEqual(self.server.prompt_requests, 0)  # type: ignore[attr-defined]
+        self.assertEqual(self.server.targeted_cancel_requests, 0)  # type: ignore[attr-defined]
+
+    def test_progress_unavailable_when_no_phase_event_is_observed(self) -> None:
+        self.server.job_details = {"id": JOB_ID, "status": "in_progress", "outputs_count": 0}  # type: ignore[attr-defined]
+        empty = {"director_progress": [], "director_preview": [], "node_progress": [], "executing": [{"observed_at": _RUNTIME.time.time(), "data": {"node": "5"}}]}
+        with mock.patch.object(_RUNTIME, "_observe_progress_events", return_value=empty):
+            result = get_progress(JOB_ID, observe_seconds=0.1, port=self.port)
+        self.assertFalse(result["available"])
+        self.assertEqual(result["reason"], "director_phase_event_not_observed")
+        self.assertIsNone(result["last_update"])
+        self.assertIsNone(result["age_seconds"])
+        self.assertEqual(result["executing_node"], "5")
+
+    def test_progress_non_folderbridge_client_fails_closed_without_socket_observation(self) -> None:
+        self.server.job_details = {"id": JOB_ID, "status": "in_progress", "outputs_count": 0}  # type: ignore[attr-defined]
+        self.server.queue_running[0][3]["client_id"] = "webui-client"  # type: ignore[attr-defined]
+        with mock.patch.object(_RUNTIME, "_observe_progress_events") as observer:
+            result = get_progress(JOB_ID, observe_seconds=0.1, port=self.port)
+        self.assertFalse(result["available"])
+        self.assertEqual(result["reason"], "non_folderbridge_client_session_not_observed")
+        observer.assert_not_called()
+
+    def test_progress_rejects_node_not_bound_to_current_prompt(self) -> None:
+        self.server.job_details = {"id": JOB_ID, "status": "in_progress", "outputs_count": 0}  # type: ignore[attr-defined]
+        with mock.patch.object(_RUNTIME, "_observe_progress_events") as observer:
+            result = get_progress(JOB_ID, node_id="99", observe_seconds=0.1, port=self.port)
+        self.assertFalse(result["available"])
+        self.assertEqual(result["reason"], "node_not_bound_to_prompt_director")
+        observer.assert_not_called()
+
+    def test_progress_multiple_directors_require_explicit_node_id(self) -> None:
+        self.server.job_details = {"id": JOB_ID, "status": "in_progress", "outputs_count": 0}  # type: ignore[attr-defined]
+        self.server.queue_running = [  # type: ignore[attr-defined]
+            [
+                4,
+                JOB_ID,
+                {
+                    "5": {"class_type": "MiniMaxH3Director", "inputs": {}},
+                    "6": {"class_type": "MiniMaxH3Director", "inputs": {}},
+                    "7": {"class_type": "SaveVideo", "inputs": {}},
+                },
+                {"client_id": "folderbridge-progress-test"},
+                ["7"],
+            ]
+        ]
+        with mock.patch.object(_RUNTIME, "_observe_progress_events") as observer:
+            result = get_progress(JOB_ID, observe_seconds=0.1, port=self.port)
+        self.assertFalse(result["available"])
+        self.assertEqual(result["reason"], "multiple_director_nodes_require_node_id")
+        self.assertEqual(result["director_node_count"], 2)
+        observer.assert_not_called()
+
+    def test_progress_stale_queue_entry_for_other_prompt_never_binds(self) -> None:
+        self.server.job_details = {"id": JOB_ID, "status": "in_progress", "outputs_count": 0}  # type: ignore[attr-defined]
+        self.server.queue_running = [  # type: ignore[attr-defined]
+            [4, "33333333-3333-4333-8333-333333333333", {"5": {"class_type": "MiniMaxH3Director"}}, {"client_id": "stale"}, ["5"]]
+        ]
+        with mock.patch.object(_RUNTIME, "_observe_progress_events") as observer:
+            result = get_progress(JOB_ID, observe_seconds=0.1, port=self.port)
+        self.assertFalse(result["available"])
+        self.assertEqual(result["reason"], "running_prompt_binding_unavailable")
+        observer.assert_not_called()
 
     def test_cancel_prompt_is_targeted_and_rejects_non_uuid(self) -> None:
         result = cancel_prompt(JOB_ID, port=self.port)
@@ -626,13 +926,22 @@ class ComfyUiExternalContractTests(unittest.TestCase):
     def test_manifest_is_external_hot_load_contract(self) -> None:
         manifest = json.loads((PLUGIN_ROOT / "folderbridge-extension.json").read_text(encoding="utf-8"))
         self.assertEqual(manifest["id"], "comfyui")
-        self.assertEqual(manifest["version"], "1.4.0")
+        self.assertEqual(manifest["version"], "1.5.0")
         self.assertEqual(manifest["actions"]["status"]["authorization"], "global")
         self.assertEqual(
             set(manifest["actions"]),
-            {"status", "free", "jobs", "job-status", "cancel-prompt", "node-info", "models", "features", "run"},
+            {"status", "free", "jobs", "job-status", "progress", "health-check", "cancel-prompt", "node-info", "models", "features", "run"},
         )
-        for action_name in ("free", "jobs", "job-status", "cancel-prompt", "node-info", "models", "features"):
+        self.assertLessEqual(len(manifest["actions"]), 64)
+        self.assertTrue(manifest["actions"]["progress"]["read_only"])
+        self.assertEqual(manifest["actions"]["progress"]["effect_contract"]["effect_semantics"], "read_only")
+        health = manifest["actions"]["health-check"]
+        self.assertTrue(health["read_only"])
+        self.assertEqual(health["effect_contract"]["effect_semantics"], "read_only")
+        self.assertEqual(health["timeout_seconds"], 25)
+        self.assertEqual(set(health["input_schema"]["properties"]), {"prompt_id"})
+        self.assertEqual(health["input_schema"]["required"], ["prompt_id"])
+        for action_name in ("free", "jobs", "job-status", "progress", "health-check", "cancel-prompt", "node-info", "models", "features"):
             self.assertEqual(manifest["actions"][action_name]["authorization"], "global")
             self.assertEqual(manifest["actions"][action_name]["mutation_scope"], {"mode": "none"})
         run = manifest["actions"]["run"]

@@ -4,7 +4,9 @@ import base64
 import hashlib
 import json
 import os
+import socket
 import stat
+import struct
 import threading
 import time
 import uuid
@@ -51,6 +53,11 @@ JOB_SORT_ORDERS = frozenset({"asc", "desc"})
 MAX_JOB_LIST_ITEMS = 100
 MAX_MODEL_LIST_ITEMS = 1000
 MAX_NODE_CLASS_CHARS = 256
+MAX_PROGRESS_NODE_CHARS = 128
+MAX_PROGRESS_OBSERVE_SECONDS = 10.0
+MAX_WS_MESSAGE_BYTES = 256 * 1024
+DIRECTOR_CLASS_NAMES = frozenset({"MiniMaxH3Director"})
+WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 
 
 def _validate_prompt_id(raw: str) -> str:
@@ -183,6 +190,677 @@ def get_job_status(prompt_id: str, *, port: int = COMFYUI_PORT) -> dict[str, Any
     result["artifacts_truncated"] = len(descriptors) > MAX_OUTPUT_ARTIFACTS
     result["endpoint"] = f"http://{COMFYUI_HOST}:{port}"
     return result
+
+
+def _headroom_summary(free_value: Any, total_value: Any) -> dict[str, Any]:
+    if not isinstance(free_value, int) or isinstance(free_value, bool) or free_value < 0:
+        return {"free": free_value, "total": total_value, "free_ratio": None}
+    if not isinstance(total_value, int) or isinstance(total_value, bool) or total_value <= 0:
+        return {"free": free_value, "total": total_value, "free_ratio": None}
+    ratio = max(0.0, min(1.0, free_value / total_value))
+    return {
+        "free": free_value,
+        "total": total_value,
+        "free_ratio": round(ratio, 4),
+    }
+
+
+def _compact_runtime_health(status: dict[str, Any]) -> dict[str, Any]:
+    if status.get("online") is not True:
+        return {
+            "online": False,
+            "endpoint": status.get("endpoint"),
+            "detail": status.get("detail"),
+        }
+    stats = status.get("system_stats")
+    system = stats.get("system") if isinstance(stats, dict) else None
+    devices = stats.get("devices") if isinstance(stats, dict) else None
+    system = system if isinstance(system, dict) else {}
+    argv = system.get("argv")
+    argv_list = [item for item in argv if isinstance(item, str)] if isinstance(argv, list) else []
+    compact_devices: list[dict[str, Any]] = []
+    if isinstance(devices, list):
+        for item in devices[:8]:
+            if not isinstance(item, dict):
+                continue
+            compact_devices.append(
+                {
+                    "name": item.get("name"),
+                    "type": item.get("type"),
+                    "index": item.get("index"),
+                    "vram": _headroom_summary(item.get("vram_free"), item.get("vram_total")),
+                    "torch_vram_free": item.get("torch_vram_free"),
+                    "torch_vram_total": item.get("torch_vram_total"),
+                }
+            )
+    return {
+        "online": True,
+        "endpoint": status.get("endpoint"),
+        "comfyui_version": system.get("comfyui_version"),
+        "os": system.get("os"),
+        "ram": _headroom_summary(system.get("ram_free"), system.get("ram_total")),
+        "devices": compact_devices,
+        "argv": argv_list[:64],
+        "fast_disk": "--fast-disk" in argv_list,
+    }
+
+
+def _queue_health_snapshot(prompt_id: str, *, port: int) -> dict[str, Any]:
+    queue = _json_request("GET", "/queue", port=port, timeout=5)
+    if not isinstance(queue, dict):
+        raise ExtensionError("COMFYUI_INVALID_RESPONSE", "ComfyUI queue response is invalid.")
+    running = queue.get("queue_running")
+    pending = queue.get("queue_pending")
+    if not isinstance(running, list) or not isinstance(pending, list):
+        raise ExtensionError("COMFYUI_INVALID_RESPONSE", "ComfyUI queue response is invalid.")
+
+    def find_exact(items: list[Any]) -> list[Any] | None:
+        for item in items:
+            if isinstance(item, list) and len(item) >= 5 and item[1] == prompt_id:
+                return item
+        return None
+
+    bound = find_exact(running)
+    queue_state = "running" if bound is not None else None
+    if bound is None:
+        bound = find_exact(pending)
+        if bound is not None:
+            queue_state = "pending"
+
+    result: dict[str, Any] = {
+        "exact_prompt_state": queue_state,
+        "running_count": len(running),
+        "pending_count": len(pending),
+        "progress_capability": {
+            "provider": None,
+            "supported": False,
+            "node_ids": [],
+            "reason": "exact_prompt_not_in_queue" if bound is None else "unsupported_workflow",
+        },
+    }
+    if bound is None:
+        return result
+
+    prompt = bound[2]
+    extra_data = bound[3]
+    if not isinstance(prompt, dict) or not isinstance(extra_data, dict):
+        result["progress_capability"]["reason"] = "queue_binding_shape_unavailable"
+        return result
+    client_id = extra_data.get("client_id")
+    private_client = isinstance(client_id, str) and client_id.startswith("folderbridge-")
+    director_nodes = [
+        str(candidate_id)
+        for candidate_id, candidate in prompt.items()
+        if isinstance(candidate, dict) and candidate.get("class_type") in DIRECTOR_CLASS_NAMES
+    ]
+    if not private_client:
+        result["progress_capability"]["reason"] = "non_folderbridge_client_session"
+    elif not director_nodes:
+        result["progress_capability"]["reason"] = "unsupported_workflow"
+    else:
+        result["progress_capability"] = {
+            "provider": "minimax_h3_director",
+            "supported": True,
+            "node_ids": director_nodes,
+            "reason": None,
+        }
+    return result
+
+
+def _health_assessment(job: dict[str, Any], queue: dict[str, Any] | None, runtime: dict[str, Any]) -> dict[str, Any]:
+    status = job.get("status")
+    if runtime.get("online") is not True:
+        return {
+            "state": "runtime_offline",
+            "confidence": "high",
+            "stall_suspected": False,
+            "reason": "comfyui_runtime_offline",
+        }
+    if status == "completed":
+        return {
+            "state": "terminal_completed",
+            "confidence": "high",
+            "stall_suspected": False,
+            "reason": "comfyui_job_completed",
+        }
+    if status in {"failed", "cancelled"}:
+        return {
+            "state": f"terminal_{status}",
+            "confidence": "high",
+            "stall_suspected": False,
+            "reason": f"comfyui_job_{status}",
+        }
+    if status == "pending":
+        return {
+            "state": "pending",
+            "confidence": "high",
+            "stall_suspected": False,
+            "reason": "prompt_not_executing_yet",
+        }
+    if status != "in_progress":
+        return {
+            "state": "unknown",
+            "confidence": "low",
+            "stall_suspected": False,
+            "reason": "unrecognized_job_state",
+        }
+    if isinstance(queue, dict) and queue.get("exact_prompt_state") == "running":
+        return {
+            "state": "running_exact_queue_bound",
+            "confidence": "high",
+            "stall_suspected": False,
+            "reason": "job_and_current_queue_agree_prompt_is_running",
+        }
+    return {
+        "state": "running_status_only",
+        "confidence": "low",
+        "stall_suspected": False,
+        "reason": "job_reports_running_without_exact_current_queue_binding",
+    }
+
+
+def _unknown_prompt_health(runtime: dict[str, Any], prompt_id: str, *, started_at: float) -> dict[str, Any]:
+    finished_at = time.time()
+    return {
+        "health_schema_version": 1,
+        "endpoint": runtime.get("endpoint"),
+        "prompt_id": prompt_id,
+        "job": None,
+        "runtime": runtime,
+        "queue": None,
+        "consistency": {
+            "snapshot_started_at": started_at,
+            "snapshot_finished_at": finished_at,
+            "initial_status": "unknown",
+            "final_status": "unknown",
+            "state_changed_during_snapshot": None,
+            "queue_snapshot_attempted": False,
+            "queue_snapshot_ok": None,
+            "final_refresh_attempted": False,
+            "final_refresh_ok": None,
+        },
+        "assessment": {
+            "state": "unknown_prompt",
+            "confidence": "high",
+            "stall_suspected": False,
+            "reason": "comfyui_job_not_found",
+        },
+        "single_snapshot_stall_rule": "never_infer_stall_without_longitudinal_evidence",
+    }
+
+
+def get_health_check(prompt_id: str, *, port: int = COMFYUI_PORT) -> dict[str, Any]:
+    """Return one compact, cross-project, WebSocket-free health snapshot.
+
+    Generic health comes only from standard ComfyUI runtime/job/queue facts. Exact
+    semantic progress remains the separate explicit `progress` action. One health
+    snapshot never declares a stall and never mutates queue, model, memory, prompt,
+    or FolderBridge host state.
+    """
+    prompt_id = _validate_prompt_id(prompt_id)
+    started_at = time.time()
+    runtime = _compact_runtime_health(comfyui_status(port=port))
+    if runtime.get("online") is not True:
+        finished_at = time.time()
+        return {
+            "health_schema_version": 1,
+            "endpoint": runtime.get("endpoint"),
+            "prompt_id": prompt_id,
+            "job": None,
+            "runtime": runtime,
+            "queue": None,
+            "consistency": {
+                "snapshot_started_at": started_at,
+                "snapshot_finished_at": finished_at,
+                "initial_status": "unknown",
+                "final_status": "unknown",
+                "state_changed_during_snapshot": None,
+                "queue_snapshot_attempted": False,
+                "queue_snapshot_ok": None,
+                "final_refresh_attempted": False,
+                "final_refresh_ok": None,
+            },
+            "assessment": _health_assessment({"status": "unknown"}, None, runtime),
+            "single_snapshot_stall_rule": "never_infer_stall_without_longitudinal_evidence",
+        }
+
+    try:
+        initial_job = get_job_status(prompt_id, port=port)
+    except ExtensionError as exc:
+        if exc.code == "COMFYUI_JOB_NOT_FOUND":
+            return _unknown_prompt_health(runtime, prompt_id, started_at=started_at)
+        raise
+
+    queue_snapshot = None
+    queue_snapshot_attempted = False
+    queue_snapshot_ok = None
+    queue_error = None
+    final_job = initial_job
+    final_refresh_attempted = False
+    final_refresh_ok = None
+    refresh_error = None
+    if initial_job.get("status") in {"pending", "in_progress"}:
+        queue_snapshot_attempted = True
+        final_refresh_attempted = True
+        try:
+            queue_snapshot = _queue_health_snapshot(prompt_id, port=port)
+            queue_snapshot_ok = True
+        except ExtensionError as exc:
+            queue_snapshot_ok = False
+            queue_error = {"code": exc.code, "message": exc.message}
+        try:
+            final_job = get_job_status(prompt_id, port=port)
+            final_refresh_ok = True
+        except ExtensionError as exc:
+            final_refresh_ok = False
+            refresh_error = {"code": exc.code, "message": exc.message}
+            final_job = None
+
+    finished_at = time.time()
+    initial_status = initial_job.get("status")
+    final_status = final_job.get("status") if isinstance(final_job, dict) else None
+    consistency = {
+        "snapshot_started_at": started_at,
+        "snapshot_finished_at": finished_at,
+        "initial_status": initial_status,
+        "final_status": final_status,
+        "state_changed_during_snapshot": None if final_status is None else final_status != initial_status,
+        "queue_snapshot_attempted": queue_snapshot_attempted,
+        "queue_snapshot_ok": queue_snapshot_ok,
+        "final_refresh_attempted": final_refresh_attempted,
+        "final_refresh_ok": final_refresh_ok,
+    }
+    if queue_error is not None:
+        consistency["queue_error"] = queue_error
+    if refresh_error is not None:
+        consistency["refresh_error"] = refresh_error
+        assessment = {
+            "state": "snapshot_incomplete",
+            "confidence": "high",
+            "stall_suspected": False,
+            "reason": "final_job_refresh_failed",
+        }
+    else:
+        assessment = _health_assessment(final_job, queue_snapshot, runtime)  # type: ignore[arg-type]
+
+    return {
+        "health_schema_version": 1,
+        "endpoint": runtime.get("endpoint"),
+        "prompt_id": prompt_id,
+        "job": final_job,
+        "runtime": runtime,
+        "queue": queue_snapshot,
+        "consistency": consistency,
+        "assessment": assessment,
+        "single_snapshot_stall_rule": "never_infer_stall_without_longitudinal_evidence",
+    }
+
+
+def get_progress(
+    prompt_id: str,
+    *,
+    node_id: str | None = None,
+    observe_seconds: float = 2.0,
+    port: int = COMFYUI_PORT,
+) -> dict[str, Any]:
+    """Observe bounded, read-only Director progress for one exact running prompt.
+
+    Binding is established from ComfyUI's current queue tuple: prompt_id -> prompt ->
+    Director node + the prompt's unique client_id. The websocket is then attached to
+    that exact client_id for a short observation window. No queue, prompt, history,
+    model, or runtime state is mutated. If no Director event is seen, the result is
+    explicit unavailable rather than an invented percentage.
+    """
+    prompt_id = _validate_prompt_id(prompt_id)
+    if node_id is not None:
+        if not isinstance(node_id, str) or not node_id or len(node_id) > MAX_PROGRESS_NODE_CHARS or "\x00" in node_id:
+            raise ExtensionError("INVALID_ARGUMENT", f"node_id must be a non-empty string up to {MAX_PROGRESS_NODE_CHARS} characters.")
+    if not isinstance(observe_seconds, (int, float)) or isinstance(observe_seconds, bool):
+        raise ExtensionError("INVALID_ARGUMENT", "observe_seconds must be numeric.")
+    observe_seconds = float(observe_seconds)
+    if not 0.1 <= observe_seconds <= MAX_PROGRESS_OBSERVE_SECONDS:
+        raise ExtensionError(
+            "INVALID_ARGUMENT",
+            f"observe_seconds must be between 0.1 and {MAX_PROGRESS_OBSERVE_SECONDS:g} seconds.",
+        )
+
+    endpoint = f"http://{COMFYUI_HOST}:{port}"
+    try:
+        raw_job = _json_request("GET", f"/api/jobs/{quote(prompt_id, safe='')}", port=port, timeout=5)
+    except ExtensionError as exc:
+        if exc.code == "COMFYUI_HTTP_ERROR" and exc.details.get("status") == 404:
+            return {
+                "endpoint": endpoint,
+                "prompt_id": prompt_id,
+                "node_id": node_id,
+                "status": "unknown",
+                "available": False,
+                "reason": "unknown_prompt",
+            }
+        raise
+    if not isinstance(raw_job, dict) or raw_job.get("id") != prompt_id:
+        raise ExtensionError("COMFYUI_INVALID_RESPONSE", "ComfyUI job status response is invalid.", prompt_id=prompt_id)
+    status = raw_job.get("status")
+    if status != "in_progress":
+        return {
+            "endpoint": endpoint,
+            "prompt_id": prompt_id,
+            "node_id": node_id,
+            "status": status,
+            "available": False,
+            "reason": "prompt_not_in_progress",
+        }
+
+    queue = _json_request("GET", "/queue", port=port, timeout=5)
+    running = queue.get("queue_running") if isinstance(queue, dict) else None
+    if not isinstance(running, list):
+        raise ExtensionError("COMFYUI_INVALID_RESPONSE", "ComfyUI queue response is invalid.")
+    bound_item = None
+    for item in running:
+        if isinstance(item, list) and len(item) >= 5 and item[1] == prompt_id:
+            bound_item = item
+            break
+    if bound_item is None:
+        return {
+            "endpoint": endpoint,
+            "prompt_id": prompt_id,
+            "node_id": node_id,
+            "status": status,
+            "available": False,
+            "reason": "running_prompt_binding_unavailable",
+        }
+
+    prompt = bound_item[2]
+    extra_data = bound_item[3]
+    if not isinstance(prompt, dict) or not isinstance(extra_data, dict):
+        raise ExtensionError("COMFYUI_INVALID_RESPONSE", "Running ComfyUI queue item has an invalid binding shape.")
+    client_id = extra_data.get("client_id")
+    if not isinstance(client_id, str) or not client_id or len(client_id) > 256 or "\x00" in client_id:
+        return {
+            "endpoint": endpoint,
+            "prompt_id": prompt_id,
+            "node_id": node_id,
+            "status": status,
+            "available": False,
+            "reason": "prompt_client_binding_unavailable",
+        }
+    # Reusing a WebUI-owned clientId would replace that client's active socket in
+    # ComfyUI. FolderBridge workflow submissions intentionally mint a private
+    # `folderbridge-*` clientId and never open a websocket for it, so observation
+    # of those prompts is side-effect free. Everything else fails closed.
+    if not client_id.startswith("folderbridge-"):
+        return {
+            "endpoint": endpoint,
+            "prompt_id": prompt_id,
+            "node_id": node_id,
+            "status": status,
+            "available": False,
+            "reason": "non_folderbridge_client_session_not_observed",
+        }
+
+    director_nodes = [
+        str(candidate_id)
+        for candidate_id, candidate in prompt.items()
+        if isinstance(candidate, dict) and candidate.get("class_type") in DIRECTOR_CLASS_NAMES
+    ]
+    if node_id is not None:
+        if node_id not in director_nodes:
+            return {
+                "endpoint": endpoint,
+                "prompt_id": prompt_id,
+                "node_id": node_id,
+                "status": status,
+                "available": False,
+                "reason": "node_not_bound_to_prompt_director",
+                "director_node_count": len(director_nodes),
+            }
+        selected_node = node_id
+    elif len(director_nodes) == 1:
+        selected_node = director_nodes[0]
+    elif not director_nodes:
+        return {
+            "endpoint": endpoint,
+            "prompt_id": prompt_id,
+            "node_id": None,
+            "status": status,
+            "available": False,
+            "reason": "no_director_node",
+        }
+    else:
+        return {
+            "endpoint": endpoint,
+            "prompt_id": prompt_id,
+            "node_id": None,
+            "status": status,
+            "available": False,
+            "reason": "multiple_director_nodes_require_node_id",
+            "director_node_count": len(director_nodes),
+        }
+
+    observation_started_at = time.time()
+    events = _observe_progress_events(
+        client_id,
+        prompt_id=prompt_id,
+        node_id=selected_node,
+        observe_seconds=observe_seconds,
+        port=port,
+    )
+    observation_finished_at = time.time()
+
+    director_events = events["director_progress"]
+    preview_events = events["director_preview"]
+    node_events = events["node_progress"]
+    executing_events = events["executing"]
+    latest_director = director_events[-1] if director_events else None
+    latest_preview = preview_events[-1] if preview_events else None
+    latest_node = node_events[-1] if node_events else None
+    latest_any = None
+    for candidate in (latest_director, latest_preview, latest_node):
+        if candidate is not None and (latest_any is None or candidate["observed_at"] > latest_any["observed_at"]):
+            latest_any = candidate
+
+    result: dict[str, Any] = {
+        "endpoint": endpoint,
+        "prompt_id": prompt_id,
+        "node_id": selected_node,
+        "status": status,
+        "available": latest_director is not None,
+        "reason": None if latest_director is not None else "director_phase_event_not_observed",
+        "binding": "exact_running_prompt_client_and_director_node",
+        "observation_seconds": round(observation_finished_at - observation_started_at, 3),
+        "observation_started_at": observation_started_at,
+        "observation_finished_at": observation_finished_at,
+        "director_updates_observed": len(director_events),
+        "preview_updates_observed": len(preview_events),
+        "node_updates_observed": len(node_events),
+        "executing_updates_observed": len(executing_events),
+        "executing_node": executing_events[-1]["data"].get("node") if executing_events else None,
+        "progress_changed_during_observation": _progress_changed(director_events, preview_events, node_events),
+    }
+    if latest_director is not None:
+        payload = latest_director["data"]
+        for key in (
+            "phase", "phase_label", "phase_value", "phase_max", "overall_value", "overall_max",
+            "segment", "segment_total", "timeline_segment", "timeline_segment_total", "frames_label", "task_key",
+        ):
+            if key in payload:
+                result[key] = payload[key]
+    if latest_preview is not None:
+        preview = latest_preview["data"]
+        if preview.get("live") is True and isinstance(preview.get("step"), int) and isinstance(preview.get("total_steps"), int):
+            result["step"] = preview["step"]
+            result["total_steps"] = preview["total_steps"]
+    if latest_node is not None:
+        node_payload = latest_node["data"]
+        result["node_state"] = node_payload.get("state")
+        result["node_value"] = node_payload.get("value")
+        result["node_max"] = node_payload.get("max")
+    if latest_any is not None:
+        result["last_update"] = latest_any["observed_at"]
+        result["age_seconds"] = max(0.0, observation_finished_at - latest_any["observed_at"])
+    else:
+        result["last_update"] = None
+        result["age_seconds"] = None
+    return result
+
+
+def _progress_changed(
+    director_events: list[dict[str, Any]],
+    preview_events: list[dict[str, Any]],
+    node_events: list[dict[str, Any]],
+) -> bool:
+    def signatures(events: list[dict[str, Any]], keys: tuple[str, ...]) -> set[tuple[Any, ...]]:
+        return {tuple(event["data"].get(key) for key in keys) for event in events}
+
+    if len(signatures(director_events, ("phase", "phase_value", "overall_value"))) > 1:
+        return True
+    if len(signatures(preview_events, ("step", "total_steps"))) > 1:
+        return True
+    if len(signatures(node_events, ("state", "value", "max"))) > 1:
+        return True
+    return False
+
+
+def _observe_progress_events(
+    client_id: str,
+    *,
+    prompt_id: str,
+    node_id: str,
+    observe_seconds: float,
+    port: int,
+) -> dict[str, list[dict[str, Any]]]:
+    result: dict[str, list[dict[str, Any]]] = {
+        "director_progress": [],
+        "director_preview": [],
+        "node_progress": [],
+        "executing": [],
+    }
+    key = base64.b64encode(os.urandom(16)).decode("ascii")
+    expected_accept = base64.b64encode(hashlib.sha1((key + WS_GUID).encode("ascii")).digest()).decode("ascii")
+    path = f"/ws?clientId={quote(client_id, safe='')}"
+    deadline = time.monotonic() + observe_seconds
+    try:
+        sock = socket.create_connection((COMFYUI_HOST, port), timeout=min(3.0, observe_seconds))
+    except OSError as exc:
+        raise ExtensionError("COMFYUI_OFFLINE", f"Cannot reach local ComfyUI websocket at {COMFYUI_HOST}:{port}: {exc}") from exc
+    try:
+        sock.settimeout(min(1.0, observe_seconds))
+        request = (
+            f"GET {path} HTTP/1.1\r\n"
+            f"Host: {COMFYUI_HOST}:{port}\r\n"
+            "Upgrade: websocket\r\n"
+            "Connection: Upgrade\r\n"
+            f"Sec-WebSocket-Key: {key}\r\n"
+            "Sec-WebSocket-Version: 13\r\n\r\n"
+        ).encode("ascii")
+        sock.sendall(request)
+        response = _recv_until(sock, b"\r\n\r\n", 16 * 1024, deadline)
+        header_blob, _, leftover = response.partition(b"\r\n\r\n")
+        header_lines = header_blob.decode("latin-1").split("\r\n")
+        if not header_lines or " 101 " not in f" {header_lines[0]} ":
+            raise ExtensionError("COMFYUI_INVALID_RESPONSE", "ComfyUI websocket upgrade was rejected.")
+        headers: dict[str, str] = {}
+        for line in header_lines[1:]:
+            if ":" in line:
+                name, value = line.split(":", 1)
+                headers[name.strip().lower()] = value.strip()
+        if headers.get("sec-websocket-accept") != expected_accept:
+            raise ExtensionError("COMFYUI_INVALID_RESPONSE", "ComfyUI websocket handshake validation failed.")
+
+        buffer = bytearray(leftover)
+        while time.monotonic() < deadline:
+            try:
+                opcode, payload = _ws_read_frame(sock, buffer, deadline)
+            except TimeoutError:
+                continue
+            if opcode == 8:
+                break
+            if opcode != 1:
+                continue
+            try:
+                message = json.loads(payload.decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                continue
+            if not isinstance(message, dict):
+                continue
+            event_type = message.get("type")
+            data = message.get("data")
+            if not isinstance(data, dict):
+                continue
+            observed_at = time.time()
+            if event_type == "executing" and str(data.get("node")) == node_id:
+                result["executing"].append({"observed_at": observed_at, "data": data})
+            elif event_type == "minimax_director_progress" and str(data.get("node_id")) == node_id:
+                result["director_progress"].append({"observed_at": observed_at, "data": data})
+            elif event_type == "minimax_director_preview" and str(data.get("node_id")) == node_id:
+                result["director_preview"].append({"observed_at": observed_at, "data": data})
+            elif event_type == "progress_state" and data.get("prompt_id") == prompt_id:
+                nodes = data.get("nodes")
+                current = nodes.get(node_id) if isinstance(nodes, dict) else None
+                if isinstance(current, dict):
+                    result["node_progress"].append({"observed_at": observed_at, "data": current})
+    finally:
+        try:
+            sock.close()
+        except OSError:
+            pass
+    return result
+
+
+def _recv_until(sock: socket.socket, marker: bytes, limit: int, deadline: float) -> bytes:
+    data = bytearray()
+    while marker not in data:
+        if time.monotonic() >= deadline:
+            raise TimeoutError
+        try:
+            chunk = sock.recv(min(4096, limit - len(data)))
+        except socket.timeout as exc:
+            raise TimeoutError from exc
+        if not chunk:
+            raise ExtensionError("COMFYUI_INVALID_RESPONSE", "ComfyUI websocket closed during handshake.")
+        data.extend(chunk)
+        if len(data) >= limit and marker not in data:
+            raise ExtensionError("COMFYUI_RESPONSE_TOO_LARGE", "ComfyUI websocket handshake exceeded the bounded limit.")
+    return bytes(data)
+
+
+def _ws_read_frame(sock: socket.socket, buffer: bytearray, deadline: float) -> tuple[int, bytes]:
+    header = _ws_read_exact(sock, buffer, 2, deadline)
+    first, second = header[0], header[1]
+    if not (first & 0x80):
+        raise ExtensionError("COMFYUI_INVALID_RESPONSE", "Fragmented ComfyUI websocket frames are unsupported.")
+    opcode = first & 0x0F
+    masked = bool(second & 0x80)
+    length = second & 0x7F
+    if length == 126:
+        length = struct.unpack("!H", _ws_read_exact(sock, buffer, 2, deadline))[0]
+    elif length == 127:
+        length = struct.unpack("!Q", _ws_read_exact(sock, buffer, 8, deadline))[0]
+    if length > MAX_WS_MESSAGE_BYTES:
+        raise ExtensionError("COMFYUI_RESPONSE_TOO_LARGE", f"ComfyUI websocket message exceeds {MAX_WS_MESSAGE_BYTES} bytes.")
+    mask = _ws_read_exact(sock, buffer, 4, deadline) if masked else None
+    payload = _ws_read_exact(sock, buffer, length, deadline)
+    if mask is not None:
+        payload = bytes(value ^ mask[index % 4] for index, value in enumerate(payload))
+    return opcode, payload
+
+
+def _ws_read_exact(sock: socket.socket, buffer: bytearray, size: int, deadline: float) -> bytes:
+    while len(buffer) < size:
+        if time.monotonic() >= deadline:
+            raise TimeoutError
+        remaining = max(0.01, min(1.0, deadline - time.monotonic()))
+        sock.settimeout(remaining)
+        try:
+            chunk = sock.recv(max(1, min(65536, size - len(buffer))))
+        except socket.timeout as exc:
+            raise TimeoutError from exc
+        if not chunk:
+            raise ExtensionError("COMFYUI_INVALID_RESPONSE", "ComfyUI websocket closed unexpectedly.")
+        buffer.extend(chunk)
+    value = bytes(buffer[:size])
+    del buffer[:size]
+    return value
 
 
 def cancel_prompt(prompt_id: str, *, port: int = COMFYUI_PORT) -> dict[str, Any]:
