@@ -89,7 +89,7 @@ jobs:
           }
           $zips = @($assets | Where-Object { $_.Name -like '*.zip' })
           $checksums = @($assets | Where-Object { $_.Name -like '*.zip.sha256' })
-          if ($zips.Count -ne 9 -or $checksums.Count -ne 9) {
+          if ($zips.Count -ne 8 -or $checksums.Count -ne 8) {
             throw "External Extension Release asset shape is incomplete."
           }
           foreach ($zip in $zips) {

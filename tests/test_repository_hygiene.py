@@ -113,6 +113,7 @@ class RepositoryHygieneTests(unittest.TestCase):
         self.assertIn("Compress-Archive", build)
         self.assertIn("FolderBridge-extension-$extensionId-$version.zip", build)
         self.assertIn("if ($assets.Count -ne 16)", workflow)
+        self.assertIn("if ($zips.Count -ne 8 -or $checksums.Count -ne 8)", workflow)
         self.assertIn("Expected 16 external Extension Release files (8 ZIP + 8 SHA256)", workflow)
         self.assertIn("release/external-extensions", workflow)
         self.assertIn("Private Debate Judge adapter must never be published", workflow)
