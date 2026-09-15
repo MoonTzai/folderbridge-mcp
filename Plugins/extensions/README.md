@@ -29,7 +29,6 @@ Any later change to a hash-covered Extension file makes the old approval stale a
 | --- | --- | --- |
 | `blender-toolkit` | 0.1.2 | Live Blender 5.x production bridge with bounded declarative scene/RNA actions, safe GUI bootstrap, render/export support, and no caller-supplied arbitrary Python/shell surface. |
 | `download-toolkit` | 0.1.0 | Public HTTPS file download and safe GitHub source snapshots with streamed size/SHA verification, SSRF/redirect defenses, no-clobber atomic publish, and no repository-code execution. |
-| `file-ops-toolkit` | 0.1.0 | Same-workspace regular-file copy/move with exact source+destination mutation claims, streamed hashing, no-clobber defaults, SHA-guarded overwrite, atomic publish/replace, and link/reparse denial. |
 | `comfyui` | 1.6.0 | Hot-load bridge to local ComfyUI with host-owned workflow Jobs, reusable fail-closed production preflight profiles, cross-project WebSocket-free health snapshots, targeted prompt cancellation, bounded real-job/model/node inspection, explicit MiniMax Director progress diagnostics, explicit memory release, transient history retry, and optional scoped workspace output. |
 | `gpt-sovits-local` | 0.1.2 | Workspace adapter for the fixed `GPT-SoVITS-Bridge/runner.ps1` workflow. |
 | `ffmpeg-toolkit` | 0.1.2 | Workspace-confined FFmpeg/FFprobe probe, capability discovery, and long-running media jobs. |

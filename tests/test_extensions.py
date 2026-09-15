@@ -329,6 +329,13 @@ class ExtensionTests(unittest.TestCase):
         self.assertTrue(selected["bundled"])
         self.assertEqual(description["errors"], [])
 
+    def test_existing_external_file_ops_installation_remains_discoverable_for_staged_retirement(self) -> None:
+        self.make_extension("file-ops-toolkit")
+        description = self.registry.describe()
+        self.assertIn("file-ops-toolkit", {item["id"] for item in description["extensions"]})
+        self.assertEqual(description["errors"], [])
+        self.assertEqual(self.registry.get("file-ops-toolkit").manifest.extension_id, "file-ops-toolkit")
+
     def test_oversized_trust_store_is_rejected_before_reading_contents(self) -> None:
         root = self.make_extension()
         record = load_extension(root, bundled=False)

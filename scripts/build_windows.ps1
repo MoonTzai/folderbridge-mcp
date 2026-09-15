@@ -28,7 +28,6 @@ $publicExternalExtensions = @(
     "comfyui",
     "download-toolkit",
     "ffmpeg-toolkit",
-    "file-ops-toolkit",
     "ftp-toolkit",
     "godot-ai",
     "gpt-sovits-local",

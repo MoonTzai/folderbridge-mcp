@@ -2,6 +2,14 @@
 
 All notable changes to FolderBridge MCP are documented here.
 
+## 0.8.34 — 2026-09-16
+
+- Promoted file copy/move into the FolderBridge Core as the built-in **`file_ops`** tool. It supports regular-file copy/move within one configured workspace or between two explicitly selected workspaces while resolving and confining both endpoints in the host. Cross-workspace operations acquire both workspace mutation leases in deterministic workspace-ID order; no-clobber remains the default; overwrite requires the current destination SHA-256; `create_parents` expands the destination lease truthfully; and cross-workspace move uses verified copy → destination size/SHA verification → source stability recheck → source removal.
+- Retired the external **File Ops Toolkit** from the public plugin/release surface, but existing local installations are intentionally left discoverable and untouched for staged migration. Operators disable the old plugin manually only after parallel users are clear, validate Core `file_ops`, and remove the local plugin directory only after the full same-/cross-workspace acceptance is GREEN. Core `file_ops` is the new authoritative implementation; no automatic user-plugin deletion or forced disable occurs during upgrade.
+- Added a non-blocking **GitHub Releases update check** to the Windows Launcher. Startup checks run in a daemon thread, manual checking remains available from the header, only a strictly newer semantic version prompts the user, and the prompt exposes/opens `https://github.com/MoonTzai/folderbridge-mcp/releases/latest`. Network or GitHub failures are non-fatal and never block local startup/MCP operation.
+- Fixed packaged CLI JSON encoding for `extensions --json` by using the same explicit UTF-8 byte writer already used by other machine-readable commands, keeping the Windows bundle verifier strict instead of weakening its UTF-8 contract.
+- Final source regression: **709 tests GREEN, 3 skipped**. Windows 0.8.34 package build and bundle verification are GREEN; the public external-Extension Release set is now 8 extensions (16 ZIP/SHA files) and no longer contains File Ops Toolkit.
+
 ## 0.8.33 — 2026-09-11
 
 - Upgraded the external **Local ComfyUI Extension to 1.6.0** with a reusable read-only `preflight` action and a fail-closed `minimax_h3_v2v_16gb_1344x768` production profile. `run` applies the same validation immediately before `/prompt`, so an earlier preflight cannot become stale authority after the workflow or live Runtime changes.

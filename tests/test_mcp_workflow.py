@@ -79,7 +79,7 @@ class McpWorkflowTests(unittest.TestCase):
         tools = self.call(2, "tools/list", {})
         self.assertEqual(
             [tool["name"] for tool in tools["result"]["tools"]],
-            ["server_info", "flight_recorder", "workspace", "file_info", "pptx_inspect", "image_open", "extension", "edit_file", "write_file"],
+            ["server_info", "flight_recorder", "workspace", "file_info", "pptx_inspect", "image_open", "extension", "edit_file", "write_file", "file_ops"],
         )
         flight = self.call(20, "tools/call", {"name": "flight_recorder", "arguments": {"action": "status"}})
         self.assertTrue(flight["result"]["structuredContent"]["enabled"])
@@ -448,6 +448,7 @@ class McpWorkflowTests(unittest.TestCase):
         names = [tool["name"] for tool in runtime.list_tools()]
         self.assertNotIn("edit_file", names)
         self.assertNotIn("write_file", names)
+        self.assertNotIn("file_ops", names)
 
     def test_modern_discovery_and_catalog(self) -> None:
         meta = {

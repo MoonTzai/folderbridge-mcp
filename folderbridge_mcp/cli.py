@@ -150,7 +150,7 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         description = registry.describe()
         if args.json:
-            print(json.dumps(description, ensure_ascii=False, sort_keys=True))
+            _write_json_utf8(description)
         else:
             for item in description["extensions"]:
                 state = "loaded" if item["loaded"] else "enabled" if item["enabled"] else "approved" if item["trusted"] else "not-approved"

@@ -17,13 +17,17 @@ FolderBridge MCP 是一个零第三方依赖的 Python MCP 服务器和桌面启
 > [!IMPORTANT]
 > 项目目前处于早期公开测试阶段。它可以缩小攻击面，但不是操作系统级沙箱。只应开放你信任的文件夹和代码仓库。
 
+## 0.8.34 重点更新
+
+- **Core 跨 workspace 文件操作：** 新增内置 `file_ops`，可在同一 workspace 内或两个已显式配置的 workspace 之间复制／移动普通文件。源和目标分别执行 workspace confinement；默认禁止覆盖，覆盖必须绑定当前目标 SHA-256；跨 workspace move 使用“复制 → 目标 size/SHA 校验 → 源稳定性复检 → 最后删除源”。外源 File Ops Toolkit 不再面向新安装发布；已有本地安装不会自动停用或删除，按“人工停用 → Core 同/跨 workspace 验收 → 全绿后最终删除”的流程迁移。
+- **检查更新：** Windows Launcher 启动后会异步检查 GitHub Releases，也提供手动“检查更新”按钮。只有检测到更高语义版本时才提示，并显示／可直接打开 `https://github.com/MoonTzai/folderbridge-mcp/releases/latest`；网络异常不会阻塞本地启动或 MCP 工作。
+
 ## 0.8.26 重点更新
 
 - **更大的有界 MCP 帧上限：** production stdio 与 Phase-0 私有入口统一到 32 MiB request ceiling；transactional write chunk 提高到 4 MiB，exact edit 仍为 128 MiB，整文件 transactional write / literal search 的更大独立上限不受影响。
 - **超大请求隔离失败：** oversized request 会返回可关联的受限错误并完成 bounded drain/reframe，不再让单个超限请求演变成 shared-stdio 全局 Runtime 掉线。
 - **Runtime API Key 粘贴自动清理：** 输入框内首尾空格、Tab、CR/LF 等边缘空白会立即从内存字段中删除；连接、应用配置、诊断前仍再次归一化，继承的 `CONTROL_PLANE_API_KEY` 也使用同样规则；凭据仍不持久化、不写日志。
 - **外源 Blender Toolkit 0.1.1：** 仓库现包含 exact-hash approved 的 Blender bridge 源码/安装器，并完成 Blender 5.x compositor 迁移兼容；支持本地节点、数据、渲染、动画等受限操作，可用于 deterministic video-control workflow。
-- **外源 File Ops Toolkit 0.1.0：** 提供受限 copy/move 能力，不重新开放 arbitrary shell。
 - **Video Storyboard Production Skill Pack 1.0.0：** 可选本地方法论包覆盖旁白转分镜、连续性清单、镜头规格、MiniMax H3 workflow 与 generated-video review。
 
 ## 0.7.0 重点更新

@@ -38,6 +38,7 @@ from .extensions import (
     ExtensionRegistry,
 )
 from .flight_recorder import FlightRecorder
+from .file_ops import MAX_FILE_BYTES as MAX_FILE_OP_BYTES, copy_file, move_file
 from .security import MAX_EDIT_TEXT_BYTES, MAX_SEARCH_TEXT_BYTES, ToolError, Workspace
 from .process_control import TRANSPORT_RESPONSE_BUDGET_SECONDS
 from .operation_registry import OperationReceipt, OperationRegistry, OperationRegistryError, ReconciliationCapsule
@@ -552,6 +553,7 @@ class ToolRuntime:
             f"This server exposes {len(self._targets)} explicitly selected local {mode} workspace(s). {selection_note}"
             f"Use workspace(read) before edit_file for small files; for files above 1 MiB use file_info to obtain the full SHA-256. "
             f"Use write_file begin/append/status/commit/abort for large whole-file creates or replacements without enlarging MCP messages. "
+            f"Use file_ops for bounded file copy/move, including cross-workspace transfers. "
             f"Credential-like files, links, dependencies, and VCS internals are hidden. Exact replacements and committed transactional writes are atomic; "
             f"arbitrary shell commands are unavailable; {task_note}; {capability_note}. "
             "For software architecture, module/interface design, debugging, test-first implementation, or code-review work, "
@@ -567,7 +569,7 @@ class ToolRuntime:
     def list_tools(self) -> list[dict[str, Any]]:
         tools = [SERVER_INFO_TOOL, FLIGHT_RECORDER_TOOL, WORKSPACE_TOOL, FILE_INFO_TOOL, PPTX_INSPECT_TOOL, IMAGE_OPEN_TOOL, EXTENSION_TOOL]
         if not self.read_only:
-            tools.extend((EDIT_FILE_TOOL, WRITE_FILE_TOOL))
+            tools.extend((EDIT_FILE_TOOL, WRITE_FILE_TOOL, FILE_OPS_TOOL))
         if self.execution_capabilities:
             tools.append(RUN_CAPABILITY_TOOL)
         if self.allow_tasks:
@@ -581,6 +583,11 @@ class ToolRuntime:
                 if tool["name"] in {"workspace", "file_info", "pptx_inspect", "image_open", "edit_file", "write_file", "run_capability", "run_task"}:
                     tool["inputSchema"]["required"] = [
                         "workspace_id",
+                        *tool["inputSchema"].get("required", []),
+                    ]
+                elif tool["name"] == "file_ops":
+                    tool["inputSchema"]["required"] = [
+                        "source_workspace_id",
                         *tool["inputSchema"].get("required", []),
                     ]
         return rendered
@@ -598,6 +605,7 @@ class ToolRuntime:
         if not self.read_only:
             handlers["edit_file"] = self._edit_file
             handlers["write_file"] = self._write_file
+            handlers["file_ops"] = self._file_ops
         if self.execution_capabilities:
             handlers["run_capability"] = self._run_capability
         if self.allow_tasks:
@@ -635,7 +643,7 @@ class ToolRuntime:
             "global_capabilities_enabled": list(self.capabilities),
             "builtin_tools": [
                 "flight_recorder", "workspace", "file_info", "pptx_inspect", "image_open", "extension",
-                *([] if self.read_only else ["edit_file", "write_file"]),
+                *([] if self.read_only else ["edit_file", "write_file", "file_ops"]),
             ],
             "extensions": self._extension_summary(None),
             "skill_engine": self._skill_summary(),
@@ -701,6 +709,8 @@ class ToolRuntime:
                 "sensitive_names_denied": True,
                 "edit_requires_sha256": True,
                 "exact_edit_max_bytes": MAX_EDIT_TEXT_BYTES,
+                "file_ops_max_bytes": MAX_FILE_OP_BYTES,
+                "file_ops_cross_workspace": True,
                 "literal_search_max_file_bytes": MAX_SEARCH_TEXT_BYTES,
                 "literal_search_streaming": True,
                 "mcp_message_max_bytes": MAX_MCP_MESSAGE_BYTES,
@@ -894,6 +904,89 @@ class ToolRuntime:
         if not isinstance(path, str) or not path:
             raise ToolError("INVALID_ARGUMENT", "path is required")
         return self._scope_result(file_info(target.workspace, path), target)
+
+    def _file_ops(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        _require_only(
+            arguments,
+            {
+                "action", "source_workspace_id", "source_path", "destination_workspace_id", "destination_path",
+                "expected_source_sha256", "overwrite", "expected_destination_sha256", "create_parents", "max_bytes",
+            },
+        )
+        action = arguments.get("action")
+        if action not in {"copy", "move"}:
+            raise ToolError("INVALID_ARGUMENT", "action must be copy or move")
+        source_path = arguments.get("source_path")
+        destination_path = arguments.get("destination_path")
+        if not isinstance(source_path, str) or not source_path:
+            raise ToolError("INVALID_ARGUMENT", "source_path is required")
+        if not isinstance(destination_path, str) or not destination_path:
+            raise ToolError("INVALID_ARGUMENT", "destination_path is required")
+        source_target = self._select_target(arguments.get("source_workspace_id"))
+        raw_destination_workspace_id = arguments.get("destination_workspace_id")
+        destination_target = (
+            source_target
+            if raw_destination_workspace_id is None
+            else self._select_target(raw_destination_workspace_id)
+        )
+
+        source_resolved = source_target.workspace.resolve(source_path, for_write=action == "move")
+        destination_resolved = destination_target.workspace.resolve(destination_path, for_write=True)
+        create_parents = bool(arguments.get("create_parents", False))
+        if source_target.workspace_id == destination_target.workspace_id:
+            if create_parents:
+                mutation_targets = [(source_target, MutationScope.workspace())]
+            else:
+                mutation_targets = [
+                    (
+                        source_target,
+                        MutationScope.paths(
+                            MutationClaim.exact(source_resolved),
+                            MutationClaim.exact(destination_resolved),
+                        ),
+                    )
+                ]
+        else:
+            destination_scope = MutationScope.workspace() if create_parents else MutationScope.paths(MutationClaim.exact(destination_resolved))
+            mutation_targets = [
+                (source_target, MutationScope.paths(MutationClaim.exact(source_resolved))),
+                (destination_target, destination_scope),
+            ]
+        mutation_targets.sort(key=lambda item: item[0].workspace_id)
+        owner = {"action": f"file_ops/{action}"}
+        leases = []
+        try:
+            for current_target, scope in mutation_targets:
+                leases.append(
+                    self._workspace_mutations.acquire(
+                        current_target.workspace_id,
+                        scope,
+                        timeout_seconds=WORKSPACE_MUTATION_WAIT_SECONDS,
+                        owner=owner,
+                    )
+                )
+            operation = copy_file if action == "copy" else move_file
+            result = operation(
+                source_target.workspace,
+                destination_target.workspace,
+                source_path=source_path,
+                destination_path=destination_path,
+                expected_source_sha256=arguments.get("expected_source_sha256"),
+                overwrite=bool(arguments.get("overwrite", False)),
+                expected_destination_sha256=arguments.get("expected_destination_sha256"),
+                create_parents=create_parents,
+                max_bytes=arguments.get("max_bytes"),
+            )
+        finally:
+            for lease in reversed(leases):
+                lease.release()
+        return {
+            **result,
+            "source_workspace_id": source_target.workspace_id,
+            "source_workspace": source_target.root.name,
+            "destination_workspace_id": destination_target.workspace_id,
+            "destination_workspace": destination_target.root.name,
+        }
 
     def _pptx_inspect(self, arguments: dict[str, Any]) -> dict[str, Any]:
         _require_only(arguments, {"workspace_id", "path", "page_start", "page_end"})
@@ -1598,6 +1691,51 @@ EXTENSION_TOOL = {
     },
     "annotations": {"readOnlyHint": False, "destructiveHint": True, "idempotentHint": False, "openWorldHint": False},
 }
+
+FILE_OPS_TOOL = {
+    "name": "file_ops",
+    "title": "Copy or move one file within or across workspaces",
+    "description": (
+        "Core FolderBridge regular-file copy/move with workspace confinement on both ends. "
+        "Use source_workspace_id when multiple workspaces are configured; destination_workspace_id is optional and defaults to the source workspace. "
+        "Paths remain workspace-relative, links/reparse points, credentials, dependencies and protected control config writes are denied. "
+        "No-clobber is the default; overwrite requires the current destination SHA-256. Cross-volume move falls back to verified copy then source removal."
+    ),
+    "inputSchema": {
+        "type": "object",
+        "properties": {
+            "action": {"type": "string", "enum": ["copy", "move"]},
+            "source_workspace_id": {"type": "string", "description": "Required when more than one workspace is configured."},
+            "source_path": {"type": "string", "minLength": 1, "maxLength": 1024},
+            "destination_workspace_id": {"type": "string", "description": "Optional; defaults to source_workspace_id."},
+            "destination_path": {"type": "string", "minLength": 1, "maxLength": 1024},
+            "expected_source_sha256": {
+                "type": "string",
+                "minLength": 64,
+                "maxLength": 64,
+                "description": "Optional source-byte guard; also enables safe already-completed retry recognition.",
+            },
+            "overwrite": {"type": "boolean", "default": False},
+            "expected_destination_sha256": {
+                "type": "string",
+                "minLength": 64,
+                "maxLength": 64,
+                "description": "Required when overwrite=true; must match the current destination bytes.",
+            },
+            "create_parents": {"type": "boolean", "default": False},
+            "max_bytes": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": MAX_FILE_OP_BYTES,
+                "default": 8 * 1024 * 1024 * 1024,
+            },
+        },
+        "required": ["action", "source_path", "destination_path"],
+        "additionalProperties": False,
+    },
+    "annotations": {"readOnlyHint": False, "destructiveHint": True, "idempotentHint": False, "openWorldHint": False},
+}
+
 
 EDIT_FILE_TOOL = {
     "name": "edit_file",

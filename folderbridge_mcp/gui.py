@@ -10,6 +10,7 @@ import tkinter as tk
 import tkinter.font as tkfont
 from tkinter import filedialog, messagebox, scrolledtext, ttk
 
+from . import __version__
 from .capabilities import CAPABILITY_LABELS, CAPABILITY_NAMES
 from .config import MAX_WORKSPACES, canonical_workspaces, workspace_id
 from .extensions import ExtensionRegistry, extension_root_path
@@ -44,6 +45,7 @@ from .i18n import contains_cjk, normalize_language, translate_text
 from .managed_services import ManagedServiceError, default_managed_service_manager
 from .security import ToolError
 from .skills import SkillEngine, skill_pack_root_path
+from .update_check import LATEST_RELEASES_URL, UpdateCheckResult, check_for_updates
 from .setup_guide import (
     CHATGPT_INVOCATION_EXAMPLE,
     WINDOWS_X64_ASSET_PATTERN,
@@ -199,6 +201,8 @@ class FolderBridgeLauncher:
         self._dpi = 96
         self._ui_scale = 1.0
         self._dpi_refresh_id: str | None = None
+        self._update_check_inflight = False
+        self._known_update_version: str | None = None
 
         self._create_variables()
         self._configure_window()
@@ -216,6 +220,7 @@ class FolderBridgeLauncher:
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
         self.root.bind("<Configure>", self._schedule_dpi_refresh, add="+")
         self.root.after(120, self._drain_events)
+        self.root.after(900, lambda: self._check_for_updates(automatic=True))
         self.root.after(300, lambda: self._initialize_managed_services(final_pass=False))
         self.root.after(1800, lambda: self._initialize_managed_services(final_pass=True))
         self.root.after(400, self._poll_dpi)
@@ -542,16 +547,18 @@ class FolderBridgeLauncher:
         ).grid(row=1, column=0, sticky="w", pady=(2, 0))
         self.language_button = ttk.Button(header, text="中文 / EN", command=self._toggle_language)
         self.language_button.grid(row=0, column=1, rowspan=2, sticky="e")
+        self.update_button = ttk.Button(header, text="检查更新", command=lambda: self._check_for_updates(automatic=False))
+        self.update_button.grid(row=0, column=2, rowspan=2, sticky="e", padx=(8, 0))
         self.guide_button = ttk.Button(header, text="连接设置向导", command=self._open_web_setup)
-        self.guide_button.grid(row=0, column=2, rowspan=2, sticky="e", padx=(8, 0))
+        self.guide_button.grid(row=0, column=3, rowspan=2, sticky="e", padx=(8, 0))
         self.sections_toggle_button = ttk.Button(
             header,
             text="全部折叠",
             command=self._toggle_all_sections,
         )
-        self.sections_toggle_button.grid(row=0, column=3, rowspan=2, sticky="e", padx=(8, 0))
+        self.sections_toggle_button.grid(row=0, column=4, rowspan=2, sticky="e", padx=(8, 0))
         self.extension_toggle_button = ttk.Button(header, text="扩展与 Skills ▸", command=self._toggle_extension_sidebar)
-        self.extension_toggle_button.grid(row=0, column=4, rowspan=2, sticky="e", padx=(8, 0))
+        self.extension_toggle_button.grid(row=0, column=5, rowspan=2, sticky="e", padx=(8, 0))
 
         self._build_overview(page).grid(row=1, column=0, sticky="ew", pady=(0, 12))
 
@@ -2587,6 +2594,55 @@ class FolderBridgeLauncher:
         webbrowser.open(CHATGPT_PLUGINS_URL)
         self._log("已打开 OpenAI Tunnel 设置、Runtime API Keys、官方客户端下载页（如需要）和 ChatGPT Plugins。")
 
+    def _check_for_updates(self, *, automatic: bool) -> None:
+        if self._closing or self._update_check_inflight:
+            return
+        self._update_check_inflight = True
+        if hasattr(self, "update_button"):
+            self.update_button.configure(state="disabled")
+            self._set_widget_text(self.update_button, "检查中…")
+
+        def worker() -> None:
+            result = check_for_updates(__version__)
+            self._queue_event("update-check", (result, bool(automatic)))
+
+        threading.Thread(target=worker, name="folderbridge-update-check", daemon=True).start()
+
+    def _handle_update_check_result(self, result: UpdateCheckResult, *, automatic: bool) -> None:
+        self._update_check_inflight = False
+        if result.update_available and result.latest_version:
+            self._known_update_version = result.latest_version
+            if hasattr(self, "update_button"):
+                self.update_button.configure(state="normal")
+                self._set_widget_text(self.update_button, f"有更新 v{result.latest_version}")
+            self._log(
+                f"发现 FolderBridge 新版本 {result.latest_version}（当前 {result.current_version}）。Latest Release：{result.releases_url}"
+            )
+            if self._ask_yesno(
+                "FolderBridge 有更新",
+                f"发现新版本 {result.latest_version}，当前版本 {result.current_version}。\n\n"
+                f"Latest Release：\n{result.releases_url}\n\n是否现在打开发布页？",
+            ):
+                webbrowser.open(result.releases_url)
+            return
+
+        self._known_update_version = None
+        if hasattr(self, "update_button"):
+            self.update_button.configure(state="normal")
+            self._set_widget_text(self.update_button, "检查更新")
+        if result.status == "current":
+            if not automatic:
+                self._show_info(
+                    "FolderBridge 更新检查",
+                    f"当前已是最新版本 {result.current_version}。\n\nLatest Release：\n{result.releases_url}",
+                )
+            return
+        if not automatic:
+            self._show_info(
+                "FolderBridge 更新检查",
+                f"暂时无法检查更新。你仍可直接查看 Latest Release：\n{LATEST_RELEASES_URL}",
+            )
+
     def _queue_tunnel_output(self, text: str) -> None:
         safe = redact_text(str(text), (self._active_secret,))
         severity = classify_tunnel_output(safe)
@@ -2640,6 +2696,10 @@ class FolderBridgeLauncher:
                 self._show_info("FolderBridge MCP", str(payload))
             elif kind == "busy":
                 self._set_busy(bool(payload))
+            elif kind == "update-check":
+                result, automatic = payload  # type: ignore[misc]
+                if isinstance(result, UpdateCheckResult):
+                    self._handle_update_check_result(result, automatic=bool(automatic))
             elif kind == "managed-service-state":
                 extension_id, service_action, raw_state = payload  # type: ignore[misc]
                 extension_id = str(extension_id)

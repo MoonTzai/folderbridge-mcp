@@ -81,8 +81,8 @@ jobs:
         shell: pwsh
         run: |
           $assets = @(Get-ChildItem "release/external-extensions" -File | Sort-Object Name)
-          if ($assets.Count -ne 18) {
-            throw "Expected 18 external Extension Release files (9 ZIP + 9 SHA256); found $($assets.Count)."
+          if ($assets.Count -ne 16) {
+            throw "Expected 16 external Extension Release files (8 ZIP + 8 SHA256); found $($assets.Count)."
           }
           if ($assets.Name -match 'debate-judge-adapter') {
             throw "Private Debate Judge adapter must never be published as a Release asset."

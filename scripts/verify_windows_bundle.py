@@ -137,7 +137,7 @@ def verify(executable: Path) -> dict[str, Any]:
         raise RuntimeError(f"version smoke mismatch: expected {expected_version!r}, got {version!r}")
 
     mcp_tools = _mcp_tool_catalog(executable)
-    required_tools = {"flight_recorder", "extension", "run_task", "run_capability"}
+    required_tools = {"flight_recorder", "extension", "file_ops", "run_task", "run_capability"}
     missing_tools = sorted(required_tools.difference(mcp_tools))
     if missing_tools:
         raise RuntimeError(f"packaged MCP catalog is missing required tools: {missing_tools}")

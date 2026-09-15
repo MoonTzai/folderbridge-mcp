@@ -90,8 +90,10 @@ class GuideGuiTests(unittest.TestCase):
         header = gui.split("self.language_button =", 1)[1].split("self._build_overview(page)", 1)[0]
         self.assertIn('text="中文 / EN"', header)
         self.assertIn("self.language_button.grid(row=0, column=1", header)
-        self.assertIn("self.guide_button.grid(row=0, column=2", header)
-        self.assertLess(header.index("self.language_button.grid"), header.index("self.guide_button.grid"))
+        self.assertIn("self.update_button.grid(row=0, column=2", header)
+        self.assertIn("self.guide_button.grid(row=0, column=3", header)
+        self.assertLess(header.index("self.language_button.grid"), header.index("self.update_button.grid"))
+        self.assertLess(header.index("self.update_button.grid"), header.index("self.guide_button.grid"))
         self.assertIn('self.settings.language = "en" if self._language == "zh" else "zh"', gui)
         self.assertIn("self._set_connection_state(self._connection_state, self._connection_pid)", gui)
         self.assertNotIn('self.connection_text.get() == "运行中"', gui)

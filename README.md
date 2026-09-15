@@ -17,13 +17,17 @@ FolderBridge MCP is a zero-dependency Python MCP server plus a desktop launcher.
 > [!IMPORTANT]
 > This project is in an early public beta. It reduces the attack surface; it is not an operating-system sandbox. Only expose folders and repositories you trust.
 
+## 0.8.34 highlights
+
+- **Core cross-workspace file operations:** `file_ops` is now a built-in FolderBridge tool for bounded regular-file copy/move within one selected workspace or between two explicitly selected workspaces. Both endpoints stay workspace-confined; no-clobber is the default; overwrite is SHA-guarded; cross-workspace move uses verified copy → destination hash/size verification → source stability recheck → source removal. The former external File Ops Toolkit is no longer published for new installs, while existing local installations remain untouched for staged disable → Core acceptance → final removal.
+- **Update checking:** the Windows launcher checks GitHub Releases asynchronously after startup and also exposes a manual **Check for updates** button. Only a newer semantic version triggers an update prompt, which shows and can open `https://github.com/MoonTzai/folderbridge-mcp/releases/latest`; network failures never block local startup or MCP operation.
+
 ## 0.8.26 highlights
 
 - **Much larger bounded MCP framing:** production stdio and the private Phase-0 ingress now share a 32 MiB request ceiling, transactional writes use 4 MiB chunks, exact edits remain 128 MiB, and whole-file transactional writes/literal search retain their larger independent limits.
 - **Oversized requests fail in isolation:** request-correlated oversize handling and bounded drain/reframe logic prevent one over-ceiling request from turning into the previous shared-stdio global-runtime drop pattern.
 - **Runtime API Key paste cleanup:** leading/trailing spaces, tabs and CR/LF are removed immediately from the in-memory launcher field and normalized again before connect/apply/diagnose; inherited `CONTROL_PLANE_API_KEY` values follow the same rule and credentials are still never persisted.
 - **External Blender Toolkit 0.1.1:** the repository now ships the exact-hash-approved Blender bridge source/installer, including Blender 5.x compositor migration compatibility and live node/data/render/animation operations used by deterministic video-control workflows.
-- **External File Ops Toolkit 0.1.0:** bounded copy/move operations are available as an external exact-hash-approved extension without exposing arbitrary shell execution.
 - **Video Storyboard Production Skill Pack 1.0.0:** optional local methodology skills cover narration-to-storyboard planning, continuity inventory, shot specification, MiniMax H3 workflow design, and generated-video review.
 
 ## 0.7.0 highlights

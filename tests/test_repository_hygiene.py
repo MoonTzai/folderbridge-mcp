@@ -74,7 +74,6 @@ class RepositoryHygieneTests(unittest.TestCase):
             "comfyui": ("1.6.0", "test_external_comfyui.py"),
             "download-toolkit": ("0.1.0", "test_external_download_toolkit.py"),
             "ffmpeg-toolkit": ("0.1.2", "test_external_ffmpeg_toolkit.py"),
-            "file-ops-toolkit": ("0.1.0", "test_external_file_ops_toolkit.py"),
             "ftp-toolkit": ("0.2.1", "test_external_ftp_toolkit.py"),
             "godot-ai": ("0.1.0", "test_external_godot_ai.py"),
             "gpt-sovits-local": ("0.1.2", "test_external_gpt_sovits.py"),
@@ -101,7 +100,6 @@ class RepositoryHygieneTests(unittest.TestCase):
             "comfyui",
             "download-toolkit",
             "ffmpeg-toolkit",
-            "file-ops-toolkit",
             "ftp-toolkit",
             "godot-ai",
             "gpt-sovits-local",
@@ -110,10 +108,12 @@ class RepositoryHygieneTests(unittest.TestCase):
         for extension_id in expected:
             self.assertIn(f'"{extension_id}"', allowlist)
         self.assertNotIn('"debate-judge-adapter"', allowlist)
+        self.assertNotIn('"file-ops-toolkit"', allowlist)
         self.assertIn("release\\external-extensions", build)
         self.assertIn("Compress-Archive", build)
         self.assertIn("FolderBridge-extension-$extensionId-$version.zip", build)
-        self.assertIn("Expected 18 external Extension Release files (9 ZIP + 9 SHA256)", workflow)
+        self.assertIn("if ($assets.Count -ne 16)", workflow)
+        self.assertIn("Expected 16 external Extension Release files (8 ZIP + 8 SHA256)", workflow)
         self.assertIn("release/external-extensions", workflow)
         self.assertIn("Private Debate Judge adapter must never be published", workflow)
 
