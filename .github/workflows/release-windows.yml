@@ -77,22 +77,28 @@ jobs:
       - name: Verify packaged executable again
         run: python scripts/verify_windows_bundle.py release/windows-x64/FolderBridge.exe
 
-      - name: Verify public external Extension release assets
+      - name: Verify public external Extension build artifacts
         shell: pwsh
         run: |
           $assets = @(Get-ChildItem "release/external-extensions" -File | Sort-Object Name)
           if ($assets.Count -ne 16) {
-            throw "Expected 16 external Extension Release files (8 ZIP + 8 SHA256); found $($assets.Count)."
+            throw "Expected 16 internal external Extension build artifacts (8 ZIP + 8 SHA256); found $($assets.Count)."
           }
           if ($assets.Name -match 'debate-judge-adapter') {
             throw "Private Debate Judge adapter must never be published as a Release asset."
           }
+          if ($assets.Name -match 'file-ops-toolkit') {
+            throw "Retired File Ops Toolkit must never return to the public Release surface."
+          }
           $zips = @($assets | Where-Object { $_.Name -like '*.zip' })
           $checksums = @($assets | Where-Object { $_.Name -like '*.zip.sha256' })
           if ($zips.Count -ne 8 -or $checksums.Count -ne 8) {
-            throw "External Extension Release asset shape is incomplete."
+            throw "External Extension build artifact shape is incomplete."
           }
           foreach ($zip in $zips) {
+            if ($zip.Name -notmatch '^FolderBridge-Plugin-[A-Za-z0-9.-]+-v\d+\.\d+\.\d+(?:[-+][A-Za-z0-9.-]+)?\.zip$') {
+              throw "External Extension Release filename is not normalized: $($zip.Name)"
+            }
             $checksumPath = "$($zip.FullName).sha256"
             $expected = ((Get-Content -LiteralPath $checksumPath -Raw -Encoding ascii) -split '\s+', 2)[0].Trim().ToLowerInvariant()
             $actual = (Get-FileHash -Algorithm SHA256 -LiteralPath $zip.FullName).Hash.ToLowerInvariant()
@@ -100,6 +106,64 @@ jobs:
               throw "External Extension Release checksum mismatch: $($zip.Name)"
             }
           }
+          Write-Host "SHA sidecars verified for CI/build integrity; they are intentionally excluded from GitHub Release assets."
+
+      - name: Prepare curated GitHub Release assets
+        shell: pwsh
+        run: |
+          $publishDir = "release/github-assets"
+          if (Test-Path -LiteralPath $publishDir) {
+            Remove-Item -LiteralPath $publishDir -Recurse -Force
+          }
+          New-Item -ItemType Directory -Path $publishDir -Force | Out-Null
+          Copy-Item -LiteralPath "release/windows-x64/FolderBridge.exe" -Destination (Join-Path $publishDir "FolderBridge-Windows-x64.exe") -Force
+          Get-ChildItem "release/external-extensions" -File -Filter '*.zip' | Sort-Object Name | ForEach-Object {
+            Copy-Item -LiteralPath $_.FullName -Destination (Join-Path $publishDir $_.Name) -Force
+          }
+          $published = @(Get-ChildItem $publishDir -File | Sort-Object Name)
+          if ($published.Count -ne 9) {
+            throw "Expected 9 curated GitHub Release assets (1 main program + 8 plugins); found $($published.Count)."
+          }
+          if ($published.Name -match '\.sha256$') {
+            throw "SHA sidecars must not enter GitHub Release assets."
+          }
+          if ($published.Name -match 'file-ops-toolkit') {
+            throw "Retired File Ops plugin leaked into curated GitHub Release assets."
+          }
+
+      - name: Clean retired and checksum assets from existing GitHub Releases
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $releaseListJson = (& gh release list --limit 100 --json tagName --repo $env:GITHUB_REPOSITORY | Out-String).Trim()
+          if ($LASTEXITCODE -ne 0) {
+            throw "Could not enumerate existing GitHub Releases."
+          }
+          $releases = if ($releaseListJson) { @($releaseListJson | ConvertFrom-Json) } else { @() }
+          $deleted = 0
+          foreach ($release in $releases) {
+            $tag = [string]$release.tagName
+            if (-not $tag) { continue }
+            $viewJson = (& gh release view $tag --json assets --repo $env:GITHUB_REPOSITORY | Out-String).Trim()
+            if ($LASTEXITCODE -ne 0) {
+              throw "Could not inspect GitHub Release assets for $tag."
+            }
+            $view = $viewJson | ConvertFrom-Json
+            foreach ($asset in @($view.assets)) {
+              $name = [string]$asset.name
+              $lower = $name.ToLowerInvariant()
+              $retire = $lower.EndsWith('.sha256') -or $lower.Contains('file-ops-toolkit')
+              if (-not $retire) { continue }
+              & gh release delete-asset $tag $name --yes --repo $env:GITHUB_REPOSITORY
+              if ($LASTEXITCODE -ne 0) {
+                throw "Failed to remove obsolete Release asset '$name' from $tag."
+              }
+              Write-Host "Removed obsolete Release asset: $tag / $name"
+              $deleted += 1
+            }
+          }
+          Write-Host "Historical Release cleanup removed $deleted obsolete checksum/retired assets."
 
       - name: Create and push release tag
         if: env.FOLDERBRIDGE_TAG_EXISTS == '0'
@@ -115,21 +179,69 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          $assets = @(
-            "release/windows-x64/FolderBridge.exe",
-            "release/windows-x64/FolderBridge.exe.sha256"
-          ) + @(Get-ChildItem "release/external-extensions" -File | Sort-Object Name | ForEach-Object { $_.FullName })
+          $publishDir = (Resolve-Path "release/github-assets").Path
+          $plugins = @(
+            @{ Id = 'blender-toolkit'; Name = 'Blender Toolkit'; Description = 'Local Blender scene and render control bridge.' },
+            @{ Id = 'comfyui'; Name = 'Local ComfyUI'; Description = 'Local ComfyUI workflow, health, progress, and job bridge.' },
+            @{ Id = 'download-toolkit'; Name = 'Download Toolkit'; Description = 'Bounded public HTTPS and GitHub snapshot downloader.' },
+            @{ Id = 'ffmpeg-toolkit'; Name = 'FFmpeg Toolkit'; Description = 'Workspace-confined FFmpeg and FFprobe media operations.' },
+            @{ Id = 'ftp-toolkit'; Name = 'FTP Toolkit'; Description = 'Workspace-confined FTP and FTPS transfer bridge.' },
+            @{ Id = 'godot-ai'; Name = 'Godot AI Local Bridge'; Description = 'Local Godot editor and runtime bridge.' },
+            @{ Id = 'gpt-sovits-local'; Name = 'Local GPT-SoVITS'; Description = 'Local GPT-SoVITS training and inference bridge.' },
+            @{ Id = 'pdf-toolkit'; Name = 'PDF Toolkit'; Description = 'Bounded PDF inspection, search, and page rendering.' }
+          )
+          $assetSpecs = @()
+          $mainPath = Join-Path $publishDir 'FolderBridge-Windows-x64.exe'
+          $assetSpecs += "$mainPath#Main Program · Windows x64 — single-file FolderBridge launcher and MCP runtime"
+          $notes = [System.Collections.Generic.List[string]]::new()
+          $notes.Add('## Downloads')
+          $notes.Add('')
+          $notes.Add('### Main program')
+          $notes.Add('- `FolderBridge-Windows-x64.exe` — Windows x64 single-file FolderBridge launcher and MCP runtime.')
+          $notes.Add('')
+          $notes.Add('### Optional plugins')
+          foreach ($plugin in $plugins) {
+            $matches = @(Get-ChildItem $publishDir -File | Where-Object { $_.Name -like "FolderBridge-Plugin-$($plugin.Id)-v*.zip" })
+            if ($matches.Count -ne 1) {
+              throw "Expected exactly one curated Release asset for plugin '$($plugin.Id)'; found $($matches.Count)."
+            }
+            $asset = $matches[0]
+            $assetSpecs += "$($asset.FullName)#Plugin · $($plugin.Name) — $($plugin.Description)"
+            $notes.Add("- ``$($asset.Name)`` — $($plugin.Description)")
+          }
+          if ($assetSpecs.Count -ne 9) {
+            throw "Expected 9 labeled GitHub Release assets; found $($assetSpecs.Count)."
+          }
+          $notes.Add('')
+          $notes.Add('SHA-256 sidecars are verified during build/CI but are intentionally not published as Release assets.')
+          $notes.Add('The legacy File Ops Toolkit is retired; file copy/move is provided by FolderBridge Core `file_ops`.')
+          $releaseNotes = $notes -join "`n"
+
           gh release view $env:FOLDERBRIDGE_TAG --repo $env:GITHUB_REPOSITORY *> $null
           if ($LASTEXITCODE -eq 0) {
-            & gh release upload $env:FOLDERBRIDGE_TAG @assets --clobber --repo $env:GITHUB_REPOSITORY
+            & gh release upload $env:FOLDERBRIDGE_TAG @assetSpecs --clobber --repo $env:GITHUB_REPOSITORY
+            if ($LASTEXITCODE -ne 0) { throw "GitHub Release asset upload failed." }
             gh release edit $env:FOLDERBRIDGE_TAG `
               --title "FolderBridge $env:FOLDERBRIDGE_VERSION" `
+              --notes $releaseNotes `
               --latest --repo $env:GITHUB_REPOSITORY
           } else {
-            & gh release create $env:FOLDERBRIDGE_TAG @assets `
+            & gh release create $env:FOLDERBRIDGE_TAG @assetSpecs `
               --verify-tag `
-              --generate-notes `
+              --notes $releaseNotes `
               --title "FolderBridge $env:FOLDERBRIDGE_VERSION" `
               --latest `
               --repo $env:GITHUB_REPOSITORY
+          }
+          if ($LASTEXITCODE -ne 0) { throw "GitHub Release create/edit failed." }
+
+          $verifyJson = (& gh release view $env:FOLDERBRIDGE_TAG --json assets --repo $env:GITHUB_REPOSITORY | Out-String).Trim()
+          if ($LASTEXITCODE -ne 0) { throw "Could not verify final GitHub Release assets." }
+          $verify = $verifyJson | ConvertFrom-Json
+          $remoteNames = @($verify.assets | ForEach-Object { [string]$_.name })
+          if ($remoteNames.Count -ne 9) {
+            throw "Final GitHub Release must contain exactly 9 explicit assets; found $($remoteNames.Count)."
+          }
+          if ($remoteNames -match '\.sha256$|file-ops-toolkit') {
+            throw "Final GitHub Release still contains checksum or retired File Ops assets."
           }

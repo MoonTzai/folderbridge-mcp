@@ -7,8 +7,8 @@
 ![Transport: stdio](https://img.shields.io/badge/MCP-stdio-6B5CE7)
 
 > [!TIP]
-> **FolderBridge Windows 版就是单文件应用：[直接下载 `FolderBridge.exe`](https://github.com/MoonTzai/folderbridge-mcp/releases/latest/download/FolderBridge.exe) 后双击即可；无需另外安装 Python 或 Node.js。**
-> 文件位于 GitHub **Releases → 最新版本 → Assets**，不会出现在仓库的源码文件列表中。若连接 ChatGPT 网页版，仍需按向导另外选择 OpenAI 官方独立发布的 `tunnel-client.exe`。也可打开[完整发布页面](https://github.com/MoonTzai/folderbridge-mcp/releases/latest)下载 EXE 和可选的 SHA-256 校验文件。
+> **FolderBridge Windows 版就是单文件应用：[直接下载 `FolderBridge-Windows-x64.exe`](https://github.com/MoonTzai/folderbridge-mcp/releases/latest/download/FolderBridge-Windows-x64.exe) 后双击即可；无需另外安装 Python 或 Node.js。**
+> 文件位于 GitHub **Releases → 最新版本 → Assets**，不会出现在仓库的源码文件列表中。若连接 ChatGPT 网页版，仍需按向导另外选择 OpenAI 官方独立发布的 `tunnel-client.exe`。[完整发布页面](https://github.com/MoonTzai/folderbridge-mcp/releases/latest)会明确区分 Windows 主程序与可选 Plugin ZIP，并为每项资产附上简要用途说明；SHA sidecar 只在构建／CI 内部校验，不再作为 Release 资产发布。
 
 **在 AI 客户端与一组由你明确选择的本地文件夹之间，建立更安全的本地优先桥梁。**
 
@@ -16,6 +16,43 @@ FolderBridge MCP 是一个零第三方依赖的 Python MCP 服务器和桌面启
 
 > [!IMPORTANT]
 > 项目目前处于早期公开测试阶段。它可以缩小攻击面，但不是操作系统级沙箱。只应开放你信任的文件夹和代码仓库。
+
+## 不重打包主程序，也能自由扩展
+
+FolderBridge 的设计目标之一，是在保持 **MCP tool catalog 稳定** 的同时，让本地能力可以持续自由扩展。外源 Extension 可以作为独立插件目录安装到用户目录，由 Launcher 热扫描；用户确认 exact hash 与声明权限后，就能通过稳定的 `extension` 网关调用它的 actions，而无需重新构建 `FolderBridge.exe`，也无需给 MCP 再注册一批新的 tool 名称。Extension 的 hash-covered 文件一旦变化，旧批准会自动变 stale，不会让可执行行为在用户不知情时悄悄变化。
+
+Skill Pack 是另一条扩展轴，主要承载**方法论、领域知识、审计规则、工作流和生产规范**，而不是执行本地代码。它们通过内置只读 `skill-engine` 被发现、匹配并按需加载；外源 Pack 同样采用 exact-hash 批准，而且新增 Pack 不会扩张 MCP schema。换句话说，FolderBridge 可以同时扩展“**能做什么**”和“**AI 应该怎样做**”。
+
+### 当前公开外源插件
+
+| 插件 | 版本 | 主要能力 |
+| --- | ---: | --- |
+| **Blender Toolkit** (`blender-toolkit`) | 0.1.2 | Blender 5.x 的受限场景、对象、节点、动画、渲染、导入导出与 GUI 控制桥。 |
+| **Local ComfyUI** (`comfyui`) | 1.6.0 | 本地 ComfyUI workflow Jobs、健康／进度观测、模型与节点发现、定向取消、显存释放与生产 preflight。 |
+| **Download Toolkit** (`download-toolkit`) | 0.1.0 | 公共 HTTPS 下载与安全 GitHub source snapshot，带流式 size/hash 校验和 SSRF／redirect 防护。 |
+| **FFmpeg Toolkit** (`ffmpeg-toolkit`) | 0.1.2 | workspace 受限的 FFmpeg/FFprobe 探测、能力发现与长媒体任务。 |
+| **FTP Toolkit** (`ftp-toolkit`) | 0.2.1 | workspace 受限的 FTP/FTPS profile、list/stat、上传下载、递归上传、rename、mkdir 与精确文件删除。 |
+| **Godot AI Local Bridge** (`godot-ai`) | 0.1.0 | 本地 Godot editor、scene、run、log、截图和运行时输入的受限桥接。 |
+| **Local GPT-SoVITS** (`gpt-sovits-local`) | 0.1.2 | 固定本地 GPT-SoVITS 数据准备、ASR、训练、推理与状态工作流桥。 |
+| **PDF Toolkit** (`pdf-toolkit`) | 0.6.0 | 有界 PDF 结构检查、文本搜索、outline 读取与独立页面渲染。 |
+
+公开源码与安装结构位于 [`Plugins/extensions/`](Plugins/extensions/)。Extension 本质上就是带 manifest 和声明入口的本地插件目录，因此用户也可以依照公开的 [Extension ABI](docs/extensions.md) 自己开发集成，而不必等 FolderBridge Core 把每一种工具都内置进去。
+
+### 当前公开外源 Skill Packs
+
+| Skill Pack | 版本 | 主要能力 |
+| --- | ---: | --- |
+| **FolderBridge Project Discipline** (`folderbridge-discipline`) | 1.0.0 | 4 个可复用方法：本地项目执行纪律、大文件工作流、source-of-truth 控制、runtime verification。 |
+| **Video Storyboard Production** (`video-storyboard-production`) | 1.0.0 | 6 个旁白驱动 AI 视频方法：连续性、分镜、镜头规格、MiniMax H3/ComfyUI 规划、生产编排与成片审查。 |
+
+公开 Pack 源码位于 [`Plugins/skill-packs/`](Plugins/skill-packs/)。如果只是希望加入项目方法、领域规则或工作规范，可以使用 Skill Pack 而不给它任何可执行权限；只有确实需要本地动作、进程或 API 集成时，才使用 Extension。
+
+## 0.8.35 重点更新
+
+- **GitHub Releases 整理：** 最新 Release 固定只发布 1 个清晰命名的 Windows 主程序 `FolderBridge-Windows-x64.exe`，以及 8 个采用 `FolderBridge-Plugin-…-v….zip` 命名的公开可选插件。GitHub display label 会明确标注“主程序／插件”，并附一句用途说明。SHA-256 sidecar 继续用于构建／CI 完整性校验，但不再发布到 Releases 页面。
+- **发布面清理：** Release workflow 会清理历史 `.sha256` 资产和已退役 `file-ops-toolkit` 资产。公开插件白名单仍为 8 个，File Ops 外源实现保持退出公开源码与 Release 面。
+- **扩展能力展示：** README 将可热加载的外源 Extensions 与 exact-hash Skill Packs 作为一级能力展示，并列出当前公开插件／Skill Pack 清单及其用途。
+- **Core File Ops 真实文件验收：** 用一个实际 Test 文件完成 `folderbridge-mcp` 内 copy/move，以及 `folderbridge-mcp → Tools` 跨 workspace copy/move；所有目标 SHA-256 完全一致，同区 move 使用 `atomic-move`，跨区 move 使用 `verified-copy-delete`。
 
 ## 0.8.34 重点更新
 
@@ -52,7 +89,7 @@ FolderBridge MCP 是一个零第三方依赖的 Python MCP 服务器和桌面启
 - **统一的深层进程所有权模块：** Extension worker/Job、Tunnel 命令、FolderBridge 托管的 ComfyUI、获批自定义任务以及受限 Git 检查现在共用同一套 Windows/POSIX 进程组实现。前台超时、Job 超时、显式取消和 FolderBridge 退出都会终止完整的 FolderBridge-owned 进程树，避免不同模块各自维护 `taskkill` / process-group 细节。
 - **窗口按真实内容自适应并支持折叠：** Tk 完成布局后，启动器会按页面实际请求尺寸扩大窗口，最多占显示器 94%；“本地工作区与权限”“OpenAI Secure MCP Tunnel”“运行日志”三个区域都可单独展开/收起，顶部还提供“全部展开 / 全部折叠”。内容全部放得下时主滚动条自动隐藏，只有可见内容超出可用高度才显示；DPI 改变、区域折叠或打开/关闭 Extensions 侧栏都会重新计算。
 - **托管服务状态实时刷新：** Extensions 侧栏打开时，每 2 秒重新检测一次 ComfyUI 托管状态；在线显示绿色，离线/未配置显示红色，检测中/启动中使用中性色。状态未变化时只更新原有状态标签，不再每 2 秒重建整个侧栏。
-- **Judge 类 API 配置文件默认隐藏：** `.api-config.json` / `api-config.json` 已归入凭据类路径，普通 MCP 文件工具不会把它们当项目文本暴露出来。
+- **API 配置文件默认隐藏：** `.api-config.json` / `api-config.json` 已归入凭据类路径，普通 MCP 文件工具不会把它们当项目文本暴露出来。
 - **新增浏览器授权的 GitHub 发布链：** bundled `git-publisher` Extension 可通过 Git Credential Manager 打开 GitHub 官方网页授权，OAuth 凭据保留在 Windows Credential Manager；插件只提交显式文件白名单、只把当前分支推到既有 GitHub HTTPS origin，并可把显式工作区文件按受限 tag/title/文件名发布为 GitHub Release assets。通用 Release 的长时间上传使用宿主托管 Job。模型侧不暴露 token/PAT/password 输入字段。
 - **Git 发布仍保持强边界：** 拒绝已有 staged 内容、密钥/凭据类文件、会变换内容的 Git attributes 和危险的仓库本地 Git 设置；绝不执行 `git add .`，不接受任意 remote/ref，受控 commit 禁用 hooks/签名，push 永不 force。
 - **补齐 Microsoft Office 原生视觉链：** bundled `office` Extension 可对 `.pptx`、`.docx`、`.xlsx` 调用本机已安装的 Microsoft Office 做原生渲染。PowerPoint 直接逐页导出 PNG；Word/Excel 先走各自原生固定版式引擎，再由 Windows 原生 PDF renderer 转成逐页 PNG。
@@ -87,7 +124,7 @@ FolderBridge MCP 是一个零第三方依赖的 Python MCP 服务器和桌面启
 
 ### Windows EXE（推荐）
 
-从 [GitHub 最新版本的 Assets](https://github.com/MoonTzai/folderbridge-mcp/releases/latest)下载单个 `FolderBridge.exe`，或[直接下载 EXE](https://github.com/MoonTzai/folderbridge-mcp/releases/latest/download/FolderBridge.exe)。它不会出现在仓库的源码文件列表中。`FolderBridge.exe` 本身就是完整的 FolderBridge 应用，并已经包含 Python runtime，因此普通 EXE 用户不需要安装 Python 或 Node.js。旁边的 `FolderBridge.exe.sha256` 只是用于完整性校验的可选文件，不影响运行。
+从 [GitHub 最新版本的 Assets](https://github.com/MoonTzai/folderbridge-mcp/releases/latest)下载单个 `FolderBridge-Windows-x64.exe`，或[直接下载 EXE](https://github.com/MoonTzai/folderbridge-mcp/releases/latest/download/FolderBridge-Windows-x64.exe)。它不会出现在仓库的源码文件列表中。`FolderBridge-Windows-x64.exe` 本身就是完整的 FolderBridge 应用，并已经包含 Python runtime，因此普通 EXE 用户不需要安装 Python 或 Node.js。SHA-256 仍会在构建／CI 内部生成并校验，但 checksum sidecar 不再作为 GitHub Release 资产发布。
 
 单文件 EXE 有意**不会**重新捆绑 OpenAI 独立发布的 `tunnel-client`。只有连接 ChatGPT 网页版时，才需要从 OpenAI 官方 Release 单独下载并在 Launcher 中选择准确的 `tunnel-client.exe`。
 

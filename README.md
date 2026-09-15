@@ -7,8 +7,8 @@
 ![Transport: stdio](https://img.shields.io/badge/MCP-stdio-6B5CE7)
 
 > [!TIP]
-> **FolderBridge itself is a single-file Windows app: [download `FolderBridge.exe` directly](https://github.com/MoonTzai/folderbridge-mcp/releases/latest/download/FolderBridge.exe) and double-click it. No Python or Node.js installation is required.**
-> The binary is under GitHub **Releases → latest release → Assets**; it does not appear in the repository's source-file list. For ChatGPT on the web, FolderBridge still uses OpenAI's separately distributed official `tunnel-client.exe`; the launcher guides you through selecting it. You can also open the [full release page](https://github.com/MoonTzai/folderbridge-mcp/releases/latest) for the EXE and its optional SHA-256 checksum file.
+> **FolderBridge itself is a single-file Windows app: [download `FolderBridge-Windows-x64.exe` directly](https://github.com/MoonTzai/folderbridge-mcp/releases/latest/download/FolderBridge-Windows-x64.exe) and double-click it. No Python or Node.js installation is required.**
+> The binary is under GitHub **Releases → latest release → Assets**; it does not appear in the repository's source-file list. For ChatGPT on the web, FolderBridge still uses OpenAI's separately distributed official `tunnel-client.exe`; the launcher guides you through selecting it. The [full release page](https://github.com/MoonTzai/folderbridge-mcp/releases/latest) clearly separates the main Windows program from optional Plugin ZIPs and includes a short description for each asset; SHA sidecars are verified during build/CI but are not published as Release assets.
 
 **A safer, local-first bridge between AI clients and a small set of folders you explicitly choose.**
 
@@ -16,6 +16,43 @@ FolderBridge MCP is a zero-dependency Python MCP server plus a desktop launcher.
 
 > [!IMPORTANT]
 > This project is in an early public beta. It reduces the attack surface; it is not an operating-system sandbox. Only expose folders and repositories you trust.
+
+## Extend FolderBridge without rebuilding it
+
+FolderBridge is designed to keep a **stable MCP tool catalog** while still allowing local capabilities to grow freely. You can add or update an external Extension, rescan it, approve its exact hash and declared permissions, and use its actions through the stable `extension` gateway without rebuilding `FolderBridge.exe` or registering a new MCP tool name. External Extensions are hot-scanned and executed out of process; changing their hash-covered files makes the previous approval stale instead of silently changing executable behavior.
+
+Skill Packs provide a second extension axis for **methods, domain knowledge, review rubrics, and production workflows** rather than executable integrations. They are discovered and routed through the bundled read-only `skill-engine`; external packs are exact-hash approved, their text is loaded on demand, and adding a Pack does not expand the MCP schema. This makes it possible to customize both what FolderBridge can *do* and how an AI agent should *approach the work*.
+
+### Current public external plugins
+
+| Plugin | Version | What it adds |
+| --- | ---: | --- |
+| **Blender Toolkit** (`blender-toolkit`) | 0.1.2 | Bounded Blender 5.x scene, object, node, animation, render, import/export, and GUI-control bridge. |
+| **Local ComfyUI** (`comfyui`) | 1.6.0 | Local ComfyUI workflow Jobs, health/progress, model/node discovery, targeted cancellation, memory release, and production preflight profiles. |
+| **Download Toolkit** (`download-toolkit`) | 0.1.0 | Public HTTPS downloads and safe GitHub source snapshots with streamed size/hash verification and SSRF/redirect defenses. |
+| **FFmpeg Toolkit** (`ffmpeg-toolkit`) | 0.1.2 | Workspace-confined FFmpeg/FFprobe probing, capability discovery, and long-running media jobs. |
+| **FTP Toolkit** (`ftp-toolkit`) | 0.2.1 | Workspace-confined FTP/FTPS profiles, listing/stat, upload/download, recursive upload, rename, mkdir, and exact-file delete. |
+| **Godot AI Local Bridge** (`godot-ai`) | 0.1.0 | Bounded local Godot editor, scene, run, log, screenshot, and runtime-input actions. |
+| **Local GPT-SoVITS** (`gpt-sovits-local`) | 0.1.2 | Fixed local GPT-SoVITS dataset, ASR, training, inference, and status workflow bridge. |
+| **PDF Toolkit** (`pdf-toolkit`) | 0.6.0 | Bounded PDF inspection, text search, outline reading, and parser-independent page rendering. |
+
+The public source and installation layout is under [`Plugins/extensions/`](Plugins/extensions/). Extensions are ordinary local plugin directories with a manifest and declared entrypoint, so users can build their own integrations against the documented [Extension ABI](docs/extensions.md) instead of waiting for FolderBridge Core to add every tool.
+
+### Current public external Skill Packs
+
+| Skill Pack | Version | What it adds |
+| --- | ---: | --- |
+| **FolderBridge Project Discipline** (`folderbridge-discipline`) | 1.0.0 | Four reusable methods for local-project execution discipline, large-file workflows, source-of-truth control, and runtime verification. |
+| **Video Storyboard Production** (`video-storyboard-production`) | 1.0.0 | Six narration-first AI-video methods covering continuity, storyboard design, shot specification, MiniMax H3/ComfyUI planning, orchestration, and generated-video review. |
+
+Public Pack source lives under [`Plugins/skill-packs/`](Plugins/skill-packs/). A custom Pack can add project-specific methodology without receiving executable permissions, while an Extension is the right mechanism when the integration needs bounded local actions or external-process/API access.
+
+## 0.8.35 highlights
+
+- **Curated GitHub Releases:** the latest Release now exposes one clearly named main program (`FolderBridge-Windows-x64.exe`) plus eight optional public Plugin ZIPs using the `FolderBridge-Plugin-…-v….zip` convention. GitHub display labels identify each asset as the main program or a plugin and add a one-line purpose description. SHA-256 sidecars remain an internal build/CI integrity check and are no longer published as Release assets.
+- **Release hygiene:** the release workflow removes historical `.sha256` assets and retired `file-ops-toolkit` assets. The public plugin allowlist remains eight extensions, and the retired File Ops implementation stays out of the public tree and Release surface.
+- **Extensibility showcase:** the README now treats hot-loadable external Extensions and exact-hash Skill Packs as first-class capabilities, with the current public plugin/Skill catalog and their roles documented up front.
+- **Core File Ops live acceptance:** one real Test file was copied and moved both within `folderbridge-mcp` and across `folderbridge-mcp → Tools`; every destination preserved the exact SHA-256, same-workspace move used `atomic-move`, and cross-workspace move used `verified-copy-delete`.
 
 ## 0.8.34 highlights
 
@@ -52,7 +89,7 @@ FolderBridge MCP is a zero-dependency Python MCP server plus a desktop launcher.
 - **One deep process-ownership module:** Extension workers/jobs, Tunnel commands, managed ComfyUI, approved tasks, and bounded Git inspection share one Windows/POSIX process-group implementation. Timeout, cancel, and shutdown terminate the complete FolderBridge-owned process tree, including child runtimes such as Node.js.
 - **Content-sized, collapsible launcher:** after Tk layout, the launcher grows to the actual requested page height/width up to 94% of the screen. Local Workspace/Permissions, Tunnel settings, and Runtime Log can each collapse independently, with a global Expand all / Collapse all control. The page scrollbar is hidden when everything fits and appears only as a fallback when visible content is taller than the available viewport; DPI changes, section toggles, and the Extension sidebar trigger a recalculation.
 - **Live managed-service status:** while the Extensions sidebar is open, managed ComfyUI status is refreshed every 2 seconds. Online states are green, offline/unconfigured states red, and detection/startup states neutral. Stable probes update the existing status label instead of rebuilding the whole sidebar.
-- **Judge-style API config files stay hidden:** `.api-config.json` / `api-config.json` are now treated as credential-like workspace files and are not exposed through normal MCP file tools.
+- **API config files stay hidden:** `.api-config.json` / `api-config.json` are treated as credential-like workspace files and are not exposed through normal MCP file tools.
 - **Browser-authorized GitHub publishing:** the bundled `git-publisher` extension can open GitHub authorization through Git Credential Manager, keep OAuth credentials in Windows Credential Manager, commit only an explicit file allowlist, push only the current branch to the existing GitHub HTTPS origin, and publish explicit workspace files as GitHub Release assets with bounded tag/title/filename inputs. Long generic Release uploads run as host-owned Jobs. No token/PAT/password field is exposed to the model.
 - **Git publication remains constrained:** Publisher rejects pre-existing staged changes, credential/key-like files, content-transforming Git attributes and unsafe repository-local Git settings; it never runs `git add .`, never accepts an arbitrary remote/ref, disables hooks/signing for its bounded commit, and never force-pushes.
 - **Native Microsoft Office visual pipeline:** the bundled `office` extension can render `.pptx`, `.docx`, and `.xlsx` with locally installed Microsoft Office. PowerPoint exports slides directly to PNG; Word/Excel use their native fixed-format layout engines and the Windows PDF renderer to produce page PNGs.
@@ -87,7 +124,7 @@ Requirements depend on how you use FolderBridge:
 
 ### Windows executable — recommended
 
-Download the single `FolderBridge.exe` from the [latest GitHub release Assets](https://github.com/MoonTzai/folderbridge-mcp/releases/latest), or [download the EXE directly](https://github.com/MoonTzai/folderbridge-mcp/releases/latest/download/FolderBridge.exe). The binary does not appear in the repository's source-file list. `FolderBridge.exe` is the complete FolderBridge application and already contains its Python runtime, so normal EXE users do not install Python or Node.js. The adjacent `FolderBridge.exe.sha256` file is optional and exists only for integrity verification.
+Download the single `FolderBridge-Windows-x64.exe` from the [latest GitHub release Assets](https://github.com/MoonTzai/folderbridge-mcp/releases/latest), or [download the EXE directly](https://github.com/MoonTzai/folderbridge-mcp/releases/latest/download/FolderBridge-Windows-x64.exe). The binary does not appear in the repository's source-file list. `FolderBridge-Windows-x64.exe` is the complete FolderBridge application and already contains its Python runtime, so normal EXE users do not install Python or Node.js. SHA-256 is still generated and verified during build/CI, but checksum sidecars are intentionally not published as GitHub Release assets.
 
 The one-file executable deliberately does **not** rebundle OpenAI's independently released `tunnel-client`; download the official client separately from OpenAI's release and select `tunnel-client.exe` in the launcher only when using ChatGPT on the web.
 

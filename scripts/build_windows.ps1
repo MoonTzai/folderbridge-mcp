@@ -34,6 +34,24 @@ $publicExternalExtensions = @(
     "pdf-toolkit"
 )
 $externalReleaseDir = Join-Path $projectRoot "release\external-extensions"
+$retiredFileOpsDir = Join-Path $projectRoot "Plugins\extensions\file-ops-toolkit"
+
+# File Ops moved into FolderBridge Core in 0.8.34. A developer checkout can still
+# retain an ignored __pycache__ after the tracked plugin source is removed. Clean
+# only that exact retired directory, and fail closed if any source/publishable file
+# has reappeared instead of silently deleting it.
+if (Test-Path -LiteralPath $retiredFileOpsDir -PathType Container) {
+    $residualFiles = @(Get-ChildItem -LiteralPath $retiredFileOpsDir -Force -Recurse -File)
+    $unexpectedResiduals = @($residualFiles | Where-Object {
+        $_.FullName -notmatch '[\\/]__pycache__[\\/]plugin\.cpython-\d+\.pyc$'
+    })
+    if ($unexpectedResiduals.Count -ne 0) {
+        $unexpectedNames = ($unexpectedResiduals | ForEach-Object { $_.FullName }) -join '; '
+        throw "Retired File Ops directory contains unexpected files; refusing cleanup: $unexpectedNames"
+    }
+    Remove-Item -LiteralPath $retiredFileOpsDir -Recurse -Force
+    Write-Host "Removed retired File Ops local cache residue: $retiredFileOpsDir"
+}
 
 Push-Location $projectRoot
 try {
@@ -110,7 +128,7 @@ try {
         if ($version -notmatch '^\d+\.\d+\.\d+(?:[-+][A-Za-z0-9.-]+)?$') {
             throw "External Extension '$extensionId' has an unsupported Release version '$version'."
         }
-        $assetName = "FolderBridge-extension-$extensionId-$version.zip"
+        $assetName = "FolderBridge-Plugin-$extensionId-v$version.zip"
         $assetPath = Join-Path $externalReleaseDir $assetName
         Compress-Archive -Path (Join-Path $source "*") -DestinationPath $assetPath -CompressionLevel Optimal -Force
         $assetHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $assetPath).Hash.ToLowerInvariant()

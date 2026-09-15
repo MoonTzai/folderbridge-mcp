@@ -111,12 +111,22 @@ class RepositoryHygieneTests(unittest.TestCase):
         self.assertNotIn('"file-ops-toolkit"', allowlist)
         self.assertIn("release\\external-extensions", build)
         self.assertIn("Compress-Archive", build)
-        self.assertIn("FolderBridge-extension-$extensionId-$version.zip", build)
+        self.assertIn("FolderBridge-Plugin-$extensionId-v$version.zip", build)
+        legacy_file_ops = ROOT / "Plugins" / "extensions" / "file-ops-toolkit"
+        self.assertFalse((legacy_file_ops / "folderbridge-extension.json").exists())
+        if legacy_file_ops.exists():
+            self.assertEqual([path for path in legacy_file_ops.rglob("*") if path.is_file()], [])
         self.assertIn("if ($assets.Count -ne 16)", workflow)
         self.assertIn("if ($zips.Count -ne 8 -or $checksums.Count -ne 8)", workflow)
-        self.assertIn("Expected 16 external Extension Release files (8 ZIP + 8 SHA256)", workflow)
+        self.assertIn("Expected 16 internal external Extension build artifacts (8 ZIP + 8 SHA256)", workflow)
+        self.assertIn("FolderBridge-Windows-x64.exe", workflow)
+        self.assertIn("FolderBridge-Plugin-", workflow)
+        self.assertIn("SHA sidecars must not enter GitHub Release assets", workflow)
+        self.assertIn("gh release delete-asset", workflow)
+        self.assertIn("file-ops-toolkit", workflow)
         self.assertIn("release/external-extensions", workflow)
         self.assertIn("Private Debate Judge adapter must never be published", workflow)
+        self.assertNotIn('"release/windows-x64/FolderBridge.exe.sha256"', workflow)
 
     def test_extension_authoring_guide_uses_only_public_python_abi(self) -> None:
         spec = (ROOT / "folderbridge_mcp" / "extension_spec.py").read_text(encoding="utf-8")

@@ -28,7 +28,12 @@ class ReleaseWorkflowTests(unittest.TestCase):
         self.assertIn("--verify-tag", text)
         self.assertIn("--latest", text)
         self.assertIn("release/windows-x64/FolderBridge.exe", text)
-        self.assertIn("release/windows-x64/FolderBridge.exe.sha256", text)
+        self.assertIn("FolderBridge-Windows-x64.exe", text)
+        self.assertIn("FolderBridge-Plugin-", text)
+        self.assertIn("gh release delete-asset", text)
+        self.assertIn("SHA sidecars must not enter GitHub Release assets", text)
+        self.assertIn("file-ops-toolkit", text)
+        self.assertNotIn('"release/windows-x64/FolderBridge.exe.sha256"', text)
         self.assertNotIn("git-publisher", text.lower())
 
     def test_release_workflow_has_no_manual_or_tag_input_surface(self) -> None:

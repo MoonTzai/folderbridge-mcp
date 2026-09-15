@@ -2,6 +2,14 @@
 
 All notable changes to FolderBridge MCP are documented here.
 
+## 0.8.35 — 2026-09-16
+
+- Curated the GitHub Release surface: the public Release now contains exactly one clearly named Windows main program (`FolderBridge-Windows-x64.exe`) plus eight optional public Plugin ZIPs using the `FolderBridge-Plugin-…-v….zip` convention. Release display labels identify the category and give each asset a short purpose description.
+- Stopped publishing `.sha256` sidecars as GitHub Release assets while preserving SHA-256 generation and verification inside the local build and CI pipeline. The release workflow also removes historical checksum assets and retired `file-ops-toolkit` assets.
+- Preserved the public plugin allowlist at eight external extensions. The retired File Ops Toolkit remains absent from `Plugins/extensions` and from the Release set; file copy/move authority remains FolderBridge Core `file_ops`.
+- Promoted FolderBridge's extensibility story to a first-class public capability: the README now documents hot-loadable, exact-hash-approved external Extensions alongside exact-hash Skill Packs, including the current public plugin and Skill Pack catalogs and their roles.
+- Re-ran live Core File Ops acceptance with one actual Test file: same-workspace copy/move and `folderbridge-mcp → Tools` cross-workspace copy/move all preserved the exact SHA-256; same-workspace move used `atomic-move`, while cross-workspace move used `verified-copy-delete`.
+
 ## 0.8.34 — 2026-09-16
 
 - Promoted file copy/move into the FolderBridge Core as the built-in **`file_ops`** tool. It supports regular-file copy/move within one configured workspace or between two explicitly selected workspaces while resolving and confining both endpoints in the host. Cross-workspace operations acquire both workspace mutation leases in deterministic workspace-ID order; no-clobber remains the default; overwrite requires the current destination SHA-256; `create_parents` expands the destination lease truthfully; and cross-workspace move uses verified copy → destination size/SHA verification → source stability recheck → source removal.
