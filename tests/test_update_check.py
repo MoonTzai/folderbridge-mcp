@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import unittest
 from contextlib import contextmanager
+from pathlib import Path
 
 from folderbridge_mcp.update_check import (
     LATEST_RELEASES_URL,
@@ -69,6 +70,19 @@ class UpdateCheckTests(unittest.TestCase):
         result = check_for_updates("dev", opener=opener)
         self.assertEqual(result.status, "unavailable")
         self.assertFalse(called)
+
+
+class GuiUpdateDialogSourceTests(unittest.TestCase):
+    def test_update_dialog_exposes_open_and_copyable_release_link(self) -> None:
+        gui = (Path(__file__).resolve().parents[1] / "folderbridge_mcp" / "gui.py").read_text(encoding="utf-8")
+        dialog = gui.split("def _show_release_link_dialog", 1)[1].split("def _handle_update_check_result", 1)[0]
+        self.assertIn('state="readonly"', dialog)
+        self.assertIn('webbrowser.open(url)', dialog)
+        self.assertIn('self._copy_text(url', dialog)
+        self.assertIn('"<Double-Button-1>"', dialog)
+        handler = gui.split("def _handle_update_check_result", 1)[1].split("def _queue_tunnel_output", 1)[0]
+        self.assertGreaterEqual(handler.count("_show_release_link_dialog("), 3)
+        self.assertNotIn("_ask_yesno(", handler)
 
 
 if __name__ == "__main__":

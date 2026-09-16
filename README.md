@@ -47,6 +47,11 @@ The public source and installation layout is under [`Plugins/extensions/`](Plugi
 
 Public Pack source lives under [`Plugins/skill-packs/`](Plugins/skill-packs/). A custom Pack can add project-specific methodology without receiving executable permissions, while an Extension is the right mechanism when the integration needs bounded local actions or external-process/API access.
 
+## 0.8.36 highlights
+
+- **Truthful green health state:** the launcher no longer stays yellow after a genuinely successful ChatGPT/Tunnel call. Each Tunnel generation injects a fresh nonce into its private stdio MCP child, and only a successful `tools/call` carrying that exact generation nonce can promote the status to **End-to-end healthy**. Process-alive and local child probes still cannot create a false green state, and stale evidence from another generation is rejected.
+- **Interactive update links:** update-check results now show the Latest Release URL in a selectable field with Ctrl+C support, double-click/Enter open behavior, plus explicit **Open release page** and **Copy link** buttons.
+
 ## 0.8.35 highlights
 
 - **Curated GitHub Releases:** the latest Release now exposes one clearly named main program (`FolderBridge-Windows-x64.exe`) plus eight optional public Plugin ZIPs using the `FolderBridge-Plugin-…-v….zip` convention. GitHub display labels identify each asset as the main program or a plugin and add a one-line purpose description. SHA-256 sidecars remain an internal build/CI integrity check and are no longer published as Release assets.

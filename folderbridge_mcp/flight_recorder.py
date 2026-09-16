@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 import threading
@@ -19,6 +20,8 @@ FLIGHT_CLEANUP_INTERVAL_SECONDS = 30
 FLIGHT_BUCKET_GRACE_SECONDS = 75
 FLIGHT_MAX_FILES = 512
 
+TUNNEL_GENERATION_NONCE_ENV = "FOLDERBRIDGE_TUNNEL_GENERATION_NONCE"
+_TUNNEL_GENERATION_NONCE_RE = re.compile(r"^[a-f0-9]{32}$")
 _ROLE_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,31}$")
 _EVENT_RE = re.compile(r"^[a-z0-9][a-z0-9_.-]{0,63}$")
 _SECRET_KEY_RE = re.compile(r"(?i)(?:api.?key|token|password|passwd|secret|authorization|credential)")
@@ -146,6 +149,10 @@ class FlightRecorder:
         self.max_total_bytes = int(max_total_bytes)
         self._clock = clock or time.time
         self._pid = os.getpid()
+        raw_nonce = os.environ.get(TUNNEL_GENERATION_NONCE_ENV, "").strip().lower()
+        self._tunnel_generation_nonce = (
+            raw_nonce if self.role == "mcp" and _TUNNEL_GENERATION_NONCE_RE.fullmatch(raw_nonce) else None
+        )
         self._state_lock = threading.Lock()
         self._write_lock = threading.Lock()
         self._cleanup_running = False
@@ -172,6 +179,8 @@ class FlightRecorder:
                 "event": event,
                 "severity": level,
             }
+            if self._tunnel_generation_nonce is not None:
+                payload["tunnel_generation_nonce"] = self._tunnel_generation_nonce
             if text is not None:
                 payload["text"] = redact_flight_text(text)
             for raw_key, value in fields.items():
@@ -244,6 +253,55 @@ class FlightRecorder:
             "events": selected,
             "storage": stats,
         }
+
+    def successful_mcp_tool_call_seen(self, *, generation_nonce: str, since_unix: float) -> bool:
+        """Return whether one successful tools/call completed in the exact Tunnel generation.
+
+        The nonce is injected by the launcher into the tunnel-client process and
+        inherited by that generation's private stdio MCP child.  A matching
+        successful ``mcp.complete`` therefore cannot be borrowed from an older
+        generation or an unrelated local FolderBridge process.
+        """
+        nonce = str(generation_nonce or "").strip().lower()
+        if not _TUNNEL_GENERATION_NONCE_RE.fullmatch(nonce):
+            return False
+        if isinstance(since_unix, bool) or not isinstance(since_unix, (int, float)):
+            return False
+        since = float(since_unix)
+        if not math.isfinite(since):
+            return False
+        self.cleanup()
+        now = float(self._clock())
+        cutoff = max(now - self.window_seconds, since)
+        for path in self._candidate_files(cutoff):
+            if not path.name.startswith("mcp-"):
+                continue
+            try:
+                with path.open("rb") as handle:
+                    for raw in handle:
+                        if len(raw) > FLIGHT_MAX_TEXT_BYTES + 8 * 1024:
+                            continue
+                        try:
+                            item = json.loads(raw)
+                        except (UnicodeDecodeError, json.JSONDecodeError, ValueError):
+                            continue
+                        if not isinstance(item, dict):
+                            continue
+                        ts = item.get("ts_unix")
+                        if isinstance(ts, bool) or not isinstance(ts, (int, float)) or float(ts) < cutoff:
+                            continue
+                        if item.get("role") != "mcp" or item.get("event") != "mcp.complete":
+                            continue
+                        if item.get("tunnel_generation_nonce") != nonce:
+                            continue
+                        if item.get("method") != "tools/call" or item.get("rpc_error_code") is not None:
+                            continue
+                        response_bytes = item.get("response_bytes")
+                        if isinstance(response_bytes, int) and not isinstance(response_bytes, bool) and response_bytes > 0:
+                            return True
+            except OSError:
+                continue
+        return False
 
     def export_recent_jsonl(self, *, minutes: int = 15) -> dict[str, Any]:
         """Return the complete recent window as bounded, re-sanitized JSONL for local GUI export."""

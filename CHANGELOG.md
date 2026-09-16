@@ -2,6 +2,11 @@
 
 All notable changes to FolderBridge MCP are documented here.
 
+## 0.8.36 — 2026-09-16
+
+- Wired the launcher status indicator to generation-bound end-to-end MCP evidence instead of leaving a healthy live Tunnel permanently yellow. Each Tunnel generation now injects a fresh random nonce into its private stdio MCP child; only a successful `tools/call` completion carrying that exact nonce can promote the launcher from ready/yellow to end-to-end healthy/green. Process-alive and child probe evidence alone still cannot produce green, and stale/other-process evidence is rejected.
+- Reworked update-check results into an interactive Release-link dialog. The Latest Release URL is selectable/copyable, supports Ctrl+C, opens on double-click or Enter, and also has explicit **Open release page** and **Copy link** buttons. Manual current/unavailable checks use the same interaction instead of a dead-text message box.
+
 ## 0.8.35 — 2026-09-16
 
 - Curated the GitHub Release surface: the public Release now contains exactly one clearly named Windows main program (`FolderBridge-Windows-x64.exe`) plus eight optional public Plugin ZIPs using the `FolderBridge-Plugin-…-v….zip` convention. Release display labels identify the category and give each asset a short purpose description.

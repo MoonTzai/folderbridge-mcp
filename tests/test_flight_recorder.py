@@ -2,11 +2,17 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import unittest
+from unittest import mock
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from folderbridge_mcp.flight_recorder import FlightRecorder, classify_tunnel_output
+from folderbridge_mcp.flight_recorder import (
+    FlightRecorder,
+    TUNNEL_GENERATION_NONCE_ENV,
+    classify_tunnel_output,
+)
 from folderbridge_mcp.mcp import McpServer
 
 
@@ -125,6 +131,26 @@ class FlightRecorderTests(unittest.TestCase):
             self.assertEqual(exported["event_count"], 1)
             event = json.loads(exported["data"].splitlines()[0])
             self.assertEqual(event["pid"], "not-a-number")
+
+    def test_generation_bound_successful_tools_call_is_detected_without_borrowing_old_evidence(self) -> None:
+        with TemporaryDirectory() as temporary:
+            now = [1_000.0]
+            root = Path(temporary)
+            nonce = "a" * 32
+            with mock.patch.dict(os.environ, {TUNNEL_GENERATION_NONCE_ENV: nonce}, clear=False):
+                mcp = FlightRecorder("mcp", root=root, clock=lambda: now[0])
+            launcher = FlightRecorder("launcher", root=root, clock=lambda: now[0])
+
+            mcp.record(
+                "mcp.complete",
+                method="tools/call",
+                tool="server_info",
+                response_bytes=128,
+                rpc_error_code=None,
+            )
+            self.assertTrue(launcher.successful_mcp_tool_call_seen(generation_nonce=nonce, since_unix=999.0))
+            self.assertFalse(launcher.successful_mcp_tool_call_seen(generation_nonce="b" * 32, since_unix=999.0))
+            self.assertFalse(launcher.successful_mcp_tool_call_seen(generation_nonce=nonce, since_unix=1001.0))
 
     def test_record_failure_is_best_effort_and_never_raises(self) -> None:
         with TemporaryDirectory() as temporary:

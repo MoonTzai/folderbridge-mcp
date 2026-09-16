@@ -47,6 +47,11 @@ Skill Pack 是另一条扩展轴，主要承载**方法论、领域知识、审�
 
 公开 Pack 源码位于 [`Plugins/skill-packs/`](Plugins/skill-packs/)。如果只是希望加入项目方法、领域规则或工作规范，可以使用 Skill Pack 而不给它任何可执行权限；只有确实需要本地动作、进程或 API 集成时，才使用 Extension。
 
+## 0.8.36 重点更新
+
+- **真实端到端绿灯：** Launcher 不再在 ChatGPT/Tunnel 已实际成功调用后仍长期停留黄灯。每个 Tunnel 代际都会向其私有 stdio MCP child 注入新的随机 nonce；只有携带当前代际 nonce 的真实 `tools/call` 成功完成后，左上角状态才会提升为**端到端健康**。单纯进程存活、本地 child probe 仍不能制造假绿灯，旧代际或其它进程的证据也不能借用。
+- **可交互更新链接：** 检查更新结果会把 Latest Release URL 显示在可选中的链接框中，支持 Ctrl+C，双击或 Enter 可直接打开，同时提供明确的“打开发布页”和“复制链接”按钮。
+
 ## 0.8.35 重点更新
 
 - **GitHub Releases 整理：** 最新 Release 固定只发布 1 个清晰命名的 Windows 主程序 `FolderBridge-Windows-x64.exe`，以及 8 个采用 `FolderBridge-Plugin-…-v….zip` 命名的公开可选插件。GitHub display label 会明确标注“主程序／插件”，并附一句用途说明。SHA-256 sidecar 继续用于构建／CI 完整性校验，但不再发布到 Releases 页面。

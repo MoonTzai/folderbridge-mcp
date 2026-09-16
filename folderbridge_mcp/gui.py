@@ -2608,6 +2608,62 @@ class FolderBridgeLauncher:
 
         threading.Thread(target=worker, name="folderbridge-update-check", daemon=True).start()
 
+    def _show_release_link_dialog(self, title: str, message: str, url: str) -> None:
+        dialog = tk.Toplevel(self.root)
+        dialog.title(self._t(title))
+        dialog.transient(self.root)
+        dialog.resizable(False, False)
+        body = ttk.Frame(dialog, padding=(18, 16, 18, 16), style="Card.TFrame")
+        body.pack(fill="both", expand=True)
+        ttk.Label(
+            body,
+            text=self._t(message),
+            style="Body.TLabel",
+            justify="left",
+            wraplength=self._px(560),
+        ).pack(anchor="w")
+        link_var = tk.StringVar(value=url)
+        link_entry = tk.Entry(
+            body,
+            textvariable=link_var,
+            state="readonly",
+            readonlybackground="#ffffff",
+            foreground="#2563eb",
+            selectbackground="#c7d7fe",
+            selectforeground="#172033",
+            relief="flat",
+            borderwidth=0,
+            highlightthickness=self._px(1),
+            highlightbackground="#c5cbd6",
+            cursor="hand2",
+            font=self._font("body"),
+        )
+        link_entry.pack(fill="x", pady=(10, 4), ipady=self._px(5))
+        link_entry.bind("<Double-Button-1>", lambda _event: (webbrowser.open(url), "break")[1])
+        link_entry.bind("<Return>", lambda _event: (webbrowser.open(url), "break")[1])
+        ttk.Label(
+            body,
+            text=self._t("链接可选中并 Ctrl+C 复制；双击或按 Enter 可直接打开。"),
+            style="Muted.TLabel",
+        ).pack(anchor="w")
+        buttons = ttk.Frame(body, style="Card.TFrame")
+        buttons.pack(fill="x", pady=(12, 0))
+        ttk.Button(buttons, text=self._t("打开发布页"), command=lambda: webbrowser.open(url)).pack(side="left")
+        ttk.Button(
+            buttons,
+            text=self._t("复制链接"),
+            command=lambda: self._copy_text(url, "Release 链接已复制。"),
+        ).pack(side="left", padx=(8, 0))
+        ttk.Button(buttons, text=self._t("关闭"), command=dialog.destroy).pack(side="right")
+        dialog.update_idletasks()
+        width = max(self._px(620), dialog.winfo_reqwidth())
+        height = max(self._px(180), dialog.winfo_reqheight())
+        x = self.root.winfo_rootx() + max(0, (self.root.winfo_width() - width) // 2)
+        y = self.root.winfo_rooty() + max(0, (self.root.winfo_height() - height) // 2)
+        dialog.geometry(f"{width}x{height}+{x}+{y}")
+        dialog.grab_set()
+        link_entry.focus_set()
+
     def _handle_update_check_result(self, result: UpdateCheckResult, *, automatic: bool) -> None:
         self._update_check_inflight = False
         if result.update_available and result.latest_version:
@@ -2618,12 +2674,11 @@ class FolderBridgeLauncher:
             self._log(
                 f"发现 FolderBridge 新版本 {result.latest_version}（当前 {result.current_version}）。Latest Release：{result.releases_url}"
             )
-            if self._ask_yesno(
+            self._show_release_link_dialog(
                 "FolderBridge 有更新",
-                f"发现新版本 {result.latest_version}，当前版本 {result.current_version}。\n\n"
-                f"Latest Release：\n{result.releases_url}\n\n是否现在打开发布页？",
-            ):
-                webbrowser.open(result.releases_url)
+                f"发现新版本 {result.latest_version}，当前版本 {result.current_version}。",
+                result.releases_url,
+            )
             return
 
         self._known_update_version = None
@@ -2632,15 +2687,17 @@ class FolderBridgeLauncher:
             self._set_widget_text(self.update_button, "检查更新")
         if result.status == "current":
             if not automatic:
-                self._show_info(
+                self._show_release_link_dialog(
                     "FolderBridge 更新检查",
-                    f"当前已是最新版本 {result.current_version}。\n\nLatest Release：\n{result.releases_url}",
+                    f"当前已是最新版本 {result.current_version}。",
+                    result.releases_url,
                 )
             return
         if not automatic:
-            self._show_info(
+            self._show_release_link_dialog(
                 "FolderBridge 更新检查",
-                f"暂时无法检查更新。你仍可直接查看 Latest Release：\n{LATEST_RELEASES_URL}",
+                "暂时无法检查更新。你仍可直接查看 Latest Release。",
+                LATEST_RELEASES_URL,
             )
 
     def _queue_tunnel_output(self, text: str) -> None:

@@ -19,7 +19,7 @@ from typing import BinaryIO, Callable, Iterable
 from . import __version__
 from .capabilities import CAPABILITY_NAMES, normalize_capability_names
 from .config import ConfigError, MAX_WORKSPACES, canonical_workspaces, config_is_trusted, load_config
-from .flight_recorder import FlightRecorder
+from .flight_recorder import FlightRecorder, TUNNEL_GENERATION_NONCE_ENV
 from .process_control import (
     ProcessGenerationQuiescence,
     owned_process_group_kwargs,
@@ -732,6 +732,8 @@ class TunnelSupervisor:
         self._admin_health_snapshot: TunnelAdminSnapshot | None = None
         self._admin_monitor: TunnelAdminHealthMonitor | None = None
         self._end_to_end_health_state = "unknown"
+        self._generation_health_nonce: str | None = None
+        self._generation_started_unix: float | None = None
 
     @property
     def process(self) -> subprocess.Popen[bytes] | None:
@@ -838,7 +840,55 @@ class TunnelSupervisor:
         with self._lock:
             self._end_to_end_health_state = state
 
+    def _refresh_end_to_end_health_from_flight(self) -> bool:
+        recorder = self._flight_recorder
+        if recorder is None:
+            return False
+        with self._lock:
+            process = self._process
+            generation_id = self._generation_id
+            generation_nonce = self._generation_health_nonce
+            generation_started_unix = self._generation_started_unix
+            if (
+                self._end_to_end_health_state != "unknown"
+                or not self._desired_running
+                or process is None
+                or process.poll() is not None
+                or generation_id is None
+                or generation_nonce is None
+                or generation_started_unix is None
+            ):
+                return False
+        try:
+            proven = recorder.successful_mcp_tool_call_seen(
+                generation_nonce=generation_nonce,
+                since_unix=generation_started_unix,
+            )
+        except Exception:
+            proven = False
+        if not proven:
+            return False
+        with self._lock:
+            if (
+                process is not self._process
+                or generation_id != self._generation_id
+                or generation_nonce != self._generation_health_nonce
+                or generation_started_unix != self._generation_started_unix
+                or not self._desired_running
+                or process.poll() is not None
+                or self._end_to_end_health_state != "unknown"
+            ):
+                return False
+            self._end_to_end_health_state = "healthy"
+        self._record(
+            "tunnel.end_to_end_verified",
+            generation_id=generation_id,
+            proof="generation-bound-successful-tools-call",
+        )
+        return True
+
     def health_snapshot(self) -> TunnelHealthSnapshot:
+        self._refresh_end_to_end_health_from_flight()
         with self._lock:
             process = self._process
             admin = self._admin_health_snapshot
@@ -1111,9 +1161,12 @@ class TunnelSupervisor:
     def _spawn_locked(self, *, recovery: bool) -> int:
         if self._launch_argv is None or self._launch_env is None:
             raise OSError("Tunnel launch specification is unavailable")
+        generation_nonce = secrets.token_hex(16)
+        spawn_env = dict(self._launch_env)
+        spawn_env[TUNNEL_GENERATION_NONCE_ENV] = generation_nonce
         process = subprocess.Popen(
             list(self._launch_argv),
-            env=dict(self._launch_env),
+            env=spawn_env,
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
@@ -1126,6 +1179,8 @@ class TunnelSupervisor:
         # process's admin/E2E evidence make a replacement generation green.
         self._admin_health_snapshot = None
         self._end_to_end_health_state = "unknown"
+        self._generation_health_nonce = generation_nonce
+        self._generation_started_unix = time.time()
         self._generation_counter += 1
         self._generation_id = self._generation_counter
         generation_id = self._generation_id
@@ -1149,6 +1204,8 @@ class TunnelSupervisor:
         self._process_started_at = None
         self._admin_health_snapshot = None
         self._end_to_end_health_state = "unknown"
+        self._generation_health_nonce = None
+        self._generation_started_unix = None
 
     def _exhaust_locked(
         self,

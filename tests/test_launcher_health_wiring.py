@@ -1,7 +1,12 @@
 from __future__ import annotations
 
+import os
 import unittest
+from pathlib import Path
+from tempfile import TemporaryDirectory
+from unittest import mock
 
+from folderbridge_mcp.flight_recorder import FlightRecorder, TUNNEL_GENERATION_NONCE_ENV
 from folderbridge_mcp.launcher_backend import TunnelSupervisor
 from folderbridge_mcp.tunnel_health import TunnelAdminSnapshot
 
@@ -70,6 +75,61 @@ class TunnelSupervisorHealthWiringTests(unittest.TestCase):
         supervisor.update_end_to_end_health("healthy")
 
         self.assertEqual(supervisor.health_snapshot().summary, "healthy")
+
+    def test_generation_bound_successful_remote_tool_call_promotes_to_healthy(self) -> None:
+        with TemporaryDirectory() as temporary:
+            now = [1_000.0]
+            root = Path(temporary)
+            nonce = "c" * 32
+            launcher_recorder = FlightRecorder("launcher", root=root, clock=lambda: now[0])
+            with mock.patch.dict(os.environ, {TUNNEL_GENERATION_NONCE_ENV: nonce}, clear=False):
+                mcp_recorder = FlightRecorder("mcp", root=root, clock=lambda: now[0])
+            supervisor = TunnelSupervisor(lambda _text: None, flight_recorder=launcher_recorder)
+            process = _FakeProcess()
+            supervisor._process = process  # type: ignore[assignment]
+            supervisor._desired_running = True
+            supervisor._generation_id = 1
+            supervisor._generation_health_nonce = nonce
+            supervisor._generation_started_unix = 999.0
+            supervisor.update_admin_health(good_admin())
+
+            self.assertEqual(supervisor.health_snapshot().summary, "ready_not_exercised")
+            mcp_recorder.record(
+                "mcp.complete",
+                method="tools/call",
+                tool="server_info",
+                response_bytes=512,
+                rpc_error_code=None,
+            )
+
+            health = supervisor.health_snapshot()
+            self.assertEqual(health.summary, "healthy")
+            self.assertEqual(health.end_to_end_data_plane_healthy, "healthy")
+            events = launcher_recorder.recent(minutes=15, limit=20)["events"]
+            self.assertTrue(any(event["event"] == "tunnel.end_to_end_verified" for event in events))
+
+    def test_wrong_generation_tool_call_does_not_promote_to_healthy(self) -> None:
+        with TemporaryDirectory() as temporary:
+            now = [1_000.0]
+            root = Path(temporary)
+            launcher_recorder = FlightRecorder("launcher", root=root, clock=lambda: now[0])
+            with mock.patch.dict(os.environ, {TUNNEL_GENERATION_NONCE_ENV: "d" * 32}, clear=False):
+                old_mcp = FlightRecorder("mcp", root=root, clock=lambda: now[0])
+            supervisor = TunnelSupervisor(lambda _text: None, flight_recorder=launcher_recorder)
+            supervisor._process = _FakeProcess()  # type: ignore[assignment]
+            supervisor._desired_running = True
+            supervisor._generation_id = 2
+            supervisor._generation_health_nonce = "e" * 32
+            supervisor._generation_started_unix = 999.0
+            supervisor.update_admin_health(good_admin())
+            old_mcp.record(
+                "mcp.complete",
+                method="tools/call",
+                response_bytes=256,
+                rpc_error_code=None,
+            )
+
+            self.assertEqual(supervisor.health_snapshot().summary, "ready_not_exercised")
 
     def test_process_death_invalidates_cached_e2e_success(self) -> None:
         supervisor = TunnelSupervisor(lambda _text: None)
