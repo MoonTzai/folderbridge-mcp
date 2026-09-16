@@ -104,7 +104,7 @@ Skill Pack 是另一条扩展轴，主要承载**方法论、领域知识、审�
 - **Office 自动化仍保持强边界：** 只接受工作区内相对路径和非链接文件；暂不接受带宏 Office 格式；打开前强制禁用 Automation 宏；原件只读打开；Excel 禁止链接更新；调用的是固定 bundled PowerShell 脚本，不接受任意命令/脚本/URL。
 - **0.4.x 的安全与界面改进全部保留：** 高 DPI 可滚动界面、ComfyUI 托管诊断、稳定 Extension 网关、有界全局 capability、单文件 Windows EXE 交付方式均不变。
 
-完整版本记录见 [CHANGELOG.md](CHANGELOG.md)；Managed Service 与插件边界见 [Extension ABI v1](docs/extensions.md)。
+完整版本记录见[版本记录](docs/CHANGELOG.md)；Managed Service 与插件边界见 [Extension ABI v1](docs/extensions.md)。
 
 ## 为什么选择 FolderBridge？
 
@@ -148,13 +148,13 @@ python .\folderbridge_launcher.py gui
 
 逐个添加需要的工作区，首次使用建议保持“只读”，然后按照状态面板完成设置。启动器偏好保存在仓库之外，Runtime API Key 永远不会落盘。旧版的单工作区配置会自动迁移为列表中的第一项。
 
-`folderbridge_gui.pyw` 仅作为源码环境的便利入口保留，要求 Windows 的 `.pyw` 文件关联指向带 Tkinter 的 Python。普通用户应双击独立的 `FolderBridge.exe`。
+源码环境可用 `python .\folderbridge_launcher.py gui` 启动界面；普通用户仍应直接双击独立的 `FolderBridge.exe`。
 
 ### 可选开发环境与项目工具链
 
 以下内容**不是**普通 `FolderBridge.exe` 用户的运行前置条件：
 
-- 从源码开发 FolderBridge 或重新封装 Windows EXE 时，推荐从 [Python 官方 Windows 下载页](https://www.python.org/downloads/windows/)安装 **Python 3.11 x64**，并确认 `python --version` 可用。打包流程使用独立的 `.build-venv` 与 `requirements-build.txt`。
+- 从源码开发 FolderBridge 或重新封装 Windows EXE 时，推荐从 [Python 官方 Windows 下载页](https://www.python.org/downloads/windows/)安装 **Python 3.11 x64**，并确认 `python --version` 可用。打包流程使用独立的 `.build-venv` 与 `packaging/requirements-build.txt`。
 - 只有当目标工作区本身是 Node/npm 项目，并且它自己的 test/build 命令需要 `node`/`npm` 时，才从 [Node.js 官方下载页](https://nodejs.org/en/download)安装 **Node.js LTS**，再用 `node --version` 与 `npm --version` 验证。
 - 其他项目可能需要自己的 runtime 或编译器。FolderBridge capability 提供的是授权、发现与有边界的执行入口，不负责安装依赖。
 
@@ -388,7 +388,7 @@ FolderBridge 把 MCP 请求、仓库文本和工具输出都视为不可信数�
 - Extension manifest 拒绝未知/过宽权限，批准绑定完整插件代码 hash 与 permissions，插件代码移出 MCP 主进程执行；
 - 不监听入站网络，不包含 FolderBridge 遥测。
 
-详细内容见[安全模型](docs/security-model.md)。报告安全漏洞请阅读 [SECURITY.md](SECURITY.md)。
+详细内容见[安全模型](docs/security-model.md)。报告安全漏洞请阅读[安全策略](.github/SECURITY.md)。
 
 ## 开发
 
@@ -398,7 +398,7 @@ FolderBridge 把 MCP 请求、仓库文本和工具输出都视为不可信数�
 python -m unittest discover -s tests -v
 ```
 
-提交 Pull Request 前请阅读 [CONTRIBUTING.md](CONTRIBUTING.md)。
+提交 Pull Request 前请阅读[贡献指南](.github/CONTRIBUTING.md)。
 
 ### 构建 Windows EXE
 
@@ -406,7 +406,7 @@ python -m unittest discover -s tests -v
 
 ```powershell
 python -m venv .build-venv
-.\.build-venv\Scripts\python.exe -m pip install -r requirements-build.txt
+.\.build-venv\Scripts\python.exe -m pip install -r packaging\requirements-build.txt
 .\scripts\build_windows.ps1 -Python .\.build-venv\Scripts\python.exe
 ```
 

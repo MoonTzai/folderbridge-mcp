@@ -2384,7 +2384,7 @@ class FolderBridgeLauncher:
             (
                 "1. 只使用 FolderBridge.exe：无需另外安装 Python 或 Node.js。FolderBridge Windows 版是单文件应用并自带 Python runtime；连接 ChatGPT 网页版时只需另外准备 OpenAI 官方 tunnel-client.exe。",
                 "2. 从源码运行、开发 FolderBridge 或重新封装 Windows EXE：推荐安装 Python 3.11 x64，并确保命令行可以执行 python --version。FolderBridge 当前 Windows Release 构建以 Python 3.11 为可复现基线。",
-                "3. 重新封装 EXE 时使用独立虚拟环境：python -m venv .build-venv，然后用 .build-venv\\Scripts\\python.exe -m pip install -r requirements-build.txt 安装构建依赖；普通 EXE 用户不需要这些步骤。",
+                "3. 重新封装 EXE 时使用独立虚拟环境：python -m venv .build-venv，然后用 .build-venv\\Scripts\\python.exe -m pip install -r packaging\\requirements-build.txt 安装构建依赖；普通 EXE 用户不需要这些步骤。",
                 "4. 只有当某个工作区本身是 Node/npm 项目，且你希望调用它的 test/build 能力时，才安装 Node.js LTS；安装后用 node --version 与 npm --version 验证。不要为单纯运行 FolderBridge 安装 Node。",
                 "5. FolderBridge 的 test/build/package capability 是授权和受限入口，不是包管理器：勾选 capability 不会自动安装 Python、Node、Gradle、编译器或项目依赖。缺少工具链时应按目标项目自己的文档安装。",
             ),

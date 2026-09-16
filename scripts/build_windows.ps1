@@ -57,7 +57,7 @@ Push-Location $projectRoot
 try {
     & $Python -c "import PyInstaller" 2>$null
     if ($LASTEXITCODE -ne 0) {
-        throw "PyInstaller is missing. Install requirements-build.txt in an isolated build environment first."
+        throw "PyInstaller is missing. Install packaging/requirements-build.txt in an isolated build environment first."
     }
 
     $pyInstallerArgs = @(

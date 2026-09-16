@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import unittest
 from pathlib import Path
 
@@ -24,7 +25,7 @@ class RepositoryHygieneTests(unittest.TestCase):
 
     def test_public_private_repository_boundaries_are_explicit(self) -> None:
         gitignore = (ROOT / ".gitignore").read_text(encoding="utf-8")
-        contributing = (ROOT / "CONTRIBUTING.md").read_text(encoding="utf-8")
+        contributing = (ROOT / ".github" / "CONTRIBUTING.md").read_text(encoding="utf-8")
         extension_readme = (ROOT / "Plugins" / "extensions" / "README.md").read_text(encoding="utf-8")
         skill_readme = (ROOT / "Plugins" / "skill-packs" / "README.md").read_text(encoding="utf-8")
 
@@ -37,6 +38,71 @@ class RepositoryHygieneTests(unittest.TestCase):
         self.assertIn("local-private/", extension_readme)
         self.assertIn("public, optional, non-bundled Skill Pack source", skill_readme)
         self.assertIn("local-private/skill-packs/", skill_readme)
+
+    def test_release_facing_public_source_has_no_machine_paths_or_live_secret_material(self) -> None:
+        text_suffixes = {".json", ".md", ".ps1", ".py", ".pyw", ".toml", ".txt", ".xml", ".yml", ".yaml"}
+        public_files = [
+            ROOT / "README.md",
+            ROOT / "README.zh-CN.md",
+            ROOT / "pyproject.toml",
+            ROOT / "folderbridge_launcher.py",
+            ROOT / "docs" / "CHANGELOG.md",
+            ROOT / "docs" / "client-compatibility-research.md",
+            ROOT / "docs" / "extensions.md",
+            ROOT / "docs" / "flight-recorder.md",
+            ROOT / "docs" / "security-model.md",
+        ]
+        public_roots = [
+            ROOT / ".github",
+            ROOT / "extensions",
+            ROOT / "folderbridge_mcp",
+            ROOT / "packaging",
+            ROOT / "scripts",
+            ROOT / "skill_packs" / "matt-pocock-engineering",
+        ]
+        public_plugin_ids = (
+            "blender-toolkit",
+            "comfyui",
+            "download-toolkit",
+            "ffmpeg-toolkit",
+            "ftp-toolkit",
+            "godot-ai",
+            "gpt-sovits-local",
+            "pdf-toolkit",
+        )
+        public_roots.extend(ROOT / "Plugins" / "extensions" / plugin_id for plugin_id in public_plugin_ids)
+        public_files.extend(
+            [
+                ROOT / "Plugins" / "skill-packs" / "README.md",
+                ROOT / "Plugins" / "skill-packs" / "install-video-storyboard-production.ps1",
+            ]
+        )
+        public_roots.append(ROOT / "Plugins" / "skill-packs" / "video-storyboard-production")
+        for root in public_roots:
+            if not root.exists():
+                continue
+            public_files.extend(
+                path
+                for path in root.rglob("*")
+                if path.is_file() and path.suffix.lower() in text_suffixes
+            )
+
+        machine_path_patterns = (
+            re.compile(r"(?i)\b[A-Z]:\\Users\\(?!<)[^\\\r\n]+"),
+            re.compile(r"(?i)\b[A-Z]:\\Claude\\Project(?:\\|$)"),
+            re.compile(r"(?i)\b[A-Z]:\\MiniMax(?:\\|$)"),
+        )
+        secret_patterns = (
+            re.compile(r"\bgh[pousr]_[A-Za-z0-9]{20,}\b"),
+            re.compile(r"\bgithub_pat_[A-Za-z0-9_]{20,}\b"),
+            re.compile(r"\bsk-(?:proj|svcacct)-[A-Za-z0-9_-]{20,}\b"),
+            re.compile(r"-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----"),
+        )
+        for path in public_files:
+            with self.subTest(path=str(path.relative_to(ROOT))):
+                text = path.read_text(encoding="utf-8")
+                for pattern in (*machine_path_patterns, *secret_patterns):
+                    self.assertIsNone(pattern.search(text), f"public source contains sensitive material: {path}")
 
     def test_public_external_plugins_use_the_public_folderbridge_python_helpers(self) -> None:
         public_plugins = (

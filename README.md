@@ -104,7 +104,7 @@ Public Pack source lives under [`Plugins/skill-packs/`](Plugins/skill-packs/). A
 - **Office automation is constrained:** only workspace-relative non-link paths are accepted; macro-enabled formats are excluded; Office automation macros are force-disabled; files open read-only; Excel link updates are disabled; the bundled PowerShell script is fixed and never accepts arbitrary commands.
 - **Existing 0.4.x safety/UI improvements remain:** high-DPI scrolling, ComfyUI managed-service diagnostics, stable extension gateway, bounded global capabilities, and single-file Windows delivery are unchanged.
 
-See [CHANGELOG.md](CHANGELOG.md) for the full release history and [Extension ABI v1](docs/extensions.md) for managed-service and plugin boundaries.
+See [the changelog](docs/CHANGELOG.md) for the full release history and [Extension ABI v1](docs/extensions.md) for managed-service and plugin boundaries.
 
 ## Why FolderBridge?
 
@@ -148,13 +148,13 @@ python .\folderbridge_launcher.py gui
 
 Add the workspaces you need, keep **Read only** selected for the first run, and use the status panel to finish setup. Launcher preferences are stored outside the repository; the Runtime API key is never saved. A legacy single-workspace setting is migrated into the first list entry automatically.
 
-`folderbridge_gui.pyw` is kept as a source-only convenience for Python installations whose `.pyw` association points to an interpreter with Tkinter. The standalone `FolderBridge.exe` is the supported double-click entry point.
+For source use, launch the GUI with `python .\folderbridge_launcher.py gui`; the standalone `FolderBridge.exe` remains the supported double-click entry point.
 
 ### Optional development and project toolchains
 
 These are **not** prerequisites for normal `FolderBridge.exe` use:
 
-- For source development or rebuilding the Windows EXE, install **Python 3.11 x64** from the official [Python Windows downloads](https://www.python.org/downloads/windows/) and verify `python --version`. The packaging flow uses an isolated `.build-venv` and `requirements-build.txt`.
+- For source development or rebuilding the Windows EXE, install **Python 3.11 x64** from the official [Python Windows downloads](https://www.python.org/downloads/windows/) and verify `python --version`. The packaging flow uses an isolated `.build-venv` and `packaging/requirements-build.txt`.
 - Install **Node.js LTS** from the official [Node.js downloads](https://nodejs.org/en/download) only when a target Node/npm workspace needs `node`/`npm` for its own test or build commands; verify with `node --version` and `npm --version`.
 - Other projects may require their own runtimes or compilers. FolderBridge capabilities provide authorization and bounded discovery/execution, not dependency installation.
 
@@ -387,7 +387,7 @@ FolderBridge treats MCP requests, repository text, and tool output as untrusted 
 - extension manifests reject unknown/overbroad permission names, extension approvals bind exact code hashes and permissions, and plugin execution is moved out of the MCP process;
 - no inbound network listener and no FolderBridge telemetry.
 
-Read [the complete security model](docs/security-model.md). To report a vulnerability, follow [SECURITY.md](SECURITY.md).
+Read [the complete security model](docs/security-model.md). To report a vulnerability, follow [the security policy](.github/SECURITY.md).
 
 ## Development
 
@@ -397,7 +397,7 @@ There are no third-party runtime dependencies.
 python -m unittest discover -s tests -v
 ```
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) before opening a pull request.
+See [the contributing guide](.github/CONTRIBUTING.md) before opening a pull request.
 
 ### Build the Windows executable
 
@@ -405,7 +405,7 @@ Builds use a pinned, build-time-only PyInstaller dependency. The released EXE us
 
 ```powershell
 python -m venv .build-venv
-.\.build-venv\Scripts\python.exe -m pip install -r requirements-build.txt
+.\.build-venv\Scripts\python.exe -m pip install -r packaging\requirements-build.txt
 .\scripts\build_windows.ps1 -Python .\.build-venv\Scripts\python.exe
 ```
 
