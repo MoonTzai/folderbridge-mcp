@@ -387,7 +387,7 @@ FolderBridge treats MCP requests, repository text, and tool output as untrusted 
 - extension manifests reject unknown/overbroad permission names, extension approvals bind exact code hashes and permissions, and plugin execution is moved out of the MCP process;
 - no inbound network listener and no FolderBridge telemetry.
 
-Read [the complete security model](docs/security-model.md) and [the upstream design research](docs/upstream-research.md). To report a vulnerability, follow [SECURITY.md](SECURITY.md).
+Read [the complete security model](docs/security-model.md). To report a vulnerability, follow [SECURITY.md](SECURITY.md).
 
 ## Development
 

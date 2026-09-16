@@ -388,7 +388,7 @@ FolderBridge 把 MCP 请求、仓库文本和工具输出都视为不可信数�
 - Extension manifest 拒绝未知/过宽权限，批准绑定完整插件代码 hash 与 permissions，插件代码移出 MCP 主进程执行；
 - 不监听入站网络，不包含 FolderBridge 遥测。
 
-详细内容见[安全模型](docs/security-model.md)和[上游设计研究](docs/upstream-research.md)。报告安全漏洞请阅读 [SECURITY.md](SECURITY.md)。
+详细内容见[安全模型](docs/security-model.md)。报告安全漏洞请阅读 [SECURITY.md](SECURITY.md)。
 
 ## 开发
 

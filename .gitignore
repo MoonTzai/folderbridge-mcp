@@ -24,3 +24,25 @@ build/
 .folderbridge.json
 .DS_Store
 Thumbs.db
+
+# Local-only handoffs, diagnostics, acceptance evidence, and smoke artifacts.
+# These may contain machine-specific paths or transient runtime identifiers and
+# must never be published as part of the public source tree.
+/HANDOFF-*.md
+/.v35-acceptance/
+/file-ops-core-smoke-*/
+/file-ops-smoke-*.txt
+/tests/*_temp.py
+/tests/test_v35_phase0_tunnel_v0014_slow_operation.py
+/tests/test_v35_phase0_tunnel_v0014_windows_candidate.py
+/docs/DESIGN-*.md
+/docs/REQ-*.md
+/docs/REQUIREMENT-*.md
+/docs/ENGINEER-HANDOFF-*.md
+/docs/handoff-*.md
+/docs/incident-*.md
+/docs/v35-phase0-*
+/docs/交接-*.md
+/docs/file-ops-core-*-20260916.md
+/docs/tunnel-stdio-lifecycle-hardening-*.md
+/docs/folderbridge-architecture-aggregation-design-*.md

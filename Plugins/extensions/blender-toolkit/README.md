@@ -115,7 +115,7 @@ Files/rendering:
 From PowerShell:
 
 ```powershell
-Set-Location C:\Claude\Project\folderbridge-mcp\Plugins\extensions\blender-toolkit
+Set-Location .\Plugins\extensions\blender-toolkit
 .\install.ps1
 ```
 

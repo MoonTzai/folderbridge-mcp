@@ -52,7 +52,7 @@ Run `fetch-upstreams.ps1` to create clean research checkouts under the ignored `
 From PowerShell:
 
 ```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File "C:\Claude\Project\folderbridge-mcp\Plugins\extensions\pdf-toolkit\install.ps1"
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File ".\Plugins\extensions\pdf-toolkit\install.ps1"
 ```
 
 That production installer:
