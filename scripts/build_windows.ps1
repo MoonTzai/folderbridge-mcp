@@ -207,10 +207,10 @@ try {
                 $members = @(
                     $archive.Entries |
                     Where-Object { -not $_.FullName.EndsWith('/') } |
-                    ForEach-Object { $_.FullName.Replace('\\', '/') } |
+                    ForEach-Object { $_.FullName.Replace('\', '/') } |
                     Sort-Object
                 )
-                $expectedMembers = @($releaseAllowlist | ForEach-Object { $_.Replace('\\', '/') } | Sort-Object)
+                $expectedMembers = @($releaseAllowlist | ForEach-Object { $_.Replace('\', '/') } | Sort-Object)
                 $diff = @(Compare-Object -ReferenceObject $expectedMembers -DifferenceObject $members)
                 if ($diff.Count -ne 0) {
                     $detail = ($diff | ForEach-Object { "$($_.SideIndicator) $($_.InputObject)" }) -join '; '
