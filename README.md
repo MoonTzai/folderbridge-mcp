@@ -28,6 +28,7 @@ Skill Packs provide a second extension axis for **methods, domain knowledge, rev
 | Plugin | Version | What it adds |
 | --- | ---: | --- |
 | **Blender Toolkit** (`blender-toolkit`) | 0.1.2 | Bounded Blender 5.x scene, object, node, animation, render, import/export, and GUI-control bridge. |
+| **ChatGPT Web LLM Adapter** (`chatgpt-web-llm-adapter`) | 0.3.2 | Test-only fresh-chat local LLM bridge with Launcher-owned lifecycle, strict JSON-object mode, per-run credentials, bounded concurrency, plus history-safe fresh-chat cadence/window throttling and cooldown. |
 | **Local ComfyUI** (`comfyui`) | 1.6.0 | Local ComfyUI workflow Jobs, health/progress, model/node discovery, targeted cancellation, memory release, and production preflight profiles. |
 | **Download Toolkit** (`download-toolkit`) | 0.1.0 | Public HTTPS downloads and safe GitHub source snapshots with streamed size/hash verification and SSRF/redirect defenses. |
 | **FFmpeg Toolkit** (`ffmpeg-toolkit`) | 0.1.2 | Workspace-confined FFmpeg/FFprobe probing, capability discovery, and long-running media jobs. |
@@ -35,6 +36,8 @@ Skill Packs provide a second extension axis for **methods, domain knowledge, rev
 | **Godot AI Local Bridge** (`godot-ai`) | 0.1.0 | Bounded local Godot editor, scene, run, log, screenshot, and runtime-input actions. |
 | **Local GPT-SoVITS** (`gpt-sovits-local`) | 0.1.2 | Fixed local GPT-SoVITS dataset, ASR, training, inference, and status workflow bridge. |
 | **PDF Toolkit** (`pdf-toolkit`) | 0.6.0 | Bounded PDF inspection, text search, outline reading, and parser-independent page rendering. |
+| **Storyboard ChatGPT Web** (`storyboard-chatgpt-web`) | 0.2.0 | ChatGPT Web native storyboard image generation/editing with GENERATE_ONLY or an independent native Visual Judge, exact image/provenance recovery, and PASS-only canonical acceptance. |
+| **Windows Capture Toolkit** (`windows-capture-toolkit`) | 0.1.3 | Bounded one-shot Windows screenshots plus exact-window left-click automation, without keyboard/macro or DRM-bypass surfaces. |
 
 The public source and installation layout is under [`Plugins/extensions/`](Plugins/extensions/). Extensions are ordinary local plugin directories with a manifest and declared entrypoint, so users can build their own integrations against the documented [Extension ABI](docs/extensions.md) instead of waiting for FolderBridge Core to add every tool.
 
@@ -46,6 +49,22 @@ The public source and installation layout is under [`Plugins/extensions/`](Plugi
 | **Video Storyboard Production** (`video-storyboard-production`) | 1.0.0 | Six narration-first AI-video methods covering continuity, storyboard design, shot specification, MiniMax H3/ComfyUI planning, orchestration, and generated-video review. |
 
 Public Pack source lives under [`Plugins/skill-packs/`](Plugins/skill-packs/). A custom Pack can add project-specific methodology without receiving executable permissions, while an Extension is the right mechanism when the integration needs bounded local actions or external-process/API access.
+
+## 0.8.38 highlights
+
+- **Public plugin source/Release alignment:** the public external Extension catalog is now 11 plugins. `storyboard-chatgpt-web 0.2.0` and `windows-capture-toolkit 0.1.3` join the repository/Release surface alongside the already-public ChatGPT Web LLM Adapter; curated Releases contain one Windows executable plus 11 Plugin ZIPs, while SHA sidecars remain CI-only and the private Debate Judge adapter remains excluded.
+- **No stale LLM Bridge credentials after Restart:** the Launcher now removes the previous Standalone `status.html` before starting a new owned generation, then refuses to open any status page whose embedded temporary API key does not match the current live connection record. This closes a live-observed race where the sidebar could already show the new one-run key while an older browser tab still displayed the previous key.
+- **Fresh status-page navigation:** status-page opening now uses a cache-busted `file://` URL in a new browser tab, preventing normal browser page reuse from preserving an old in-memory document after the Standalone has generated a new key. The host correction itself did not require plugin reapproval.
+- **Adapter 0.3.2 history-safe throttling:** fresh ChatGPT page creation is now separately paced (20-second minimum start interval, at most 8 starts per rolling 5 minutes), known conversation-history rate-limit warnings trigger 2/4/8/10-minute exponential cooldown, and login/verification reuses an existing ChatGPT page when possible. Temporary Chat is not silently claimed or enforced until the web control can be verified reliably.
+- **Adapter 0.3.1 strict-JSON wrapper hardening:** browser extraction now removes assistant-message UI controls before reading response text, and harmless `json` / `Copy code` display labels may be joined on one line without causing a false 502. Semantic prose, arrays, multiple objects and malformed JSON remain rejected.
+
+## 0.8.37 highlights
+
+- **One-click ChatGPT Web LLM Bridge control:** the Extensions & Skills sidebar can now manage the external `chatgpt-web-llm-adapter` as a Launcher-owned service with explicit `OFFLINE / STARTING / WAITING_LOGIN / READY / ERROR` state, Start/Restart/Stop, separate status/login-page controls, a real one-click JSON completion validation (`LIVE_PROBE_PASS`), Base URL / model / one-run API-key copy fields, active/max request visibility, and a bounded 1–4 concurrency slider (default 2). Normal use no longer needs the Standalone start/status/validation/stop CMD files.
+- **Ownership stays safe:** FolderBridge only stops the Standalone process tree it created and still holds by process handle. Busy 8769/8770 ports from unknown/external processes fail closed; the Launcher never discovers a PID by port and never kills an unfamiliar process to make the service start.
+- **Adapter 0.3.0 version truth:** the installed Extension version/hash, live Adapter version, and status page version are separate visible axes. `/health` and the one-run connection record carry the live adapter version; a mismatched old process is shown as `ERROR`, never as READY. The temporary bearer stays on the local human control plane and is no longer returned by Extension `status/connection` actions.
+- **Formal public package:** `chatgpt-web-llm-adapter` is now the ninth public external Extension. Its Release ZIP is built from an explicit seven-file allowlist, verified member-for-member after compression, and intentionally excludes local HANDOFF/CLOSURE material.
+- **No-CMD external plugin updates:** Extensions & Skills now has **Install/update plugin ZIP…**. The installer stages and validates an external Extension ZIP, rejects traversal/links/encryption/case collisions/oversized expansion and bundled-ID shadowing, safely stops only a Launcher-owned managed service before replacement, and never carries approval across a changed exact hash.
 
 ## 0.8.36 highlights
 

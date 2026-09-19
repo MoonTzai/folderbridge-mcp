@@ -28,6 +28,7 @@ Skill Pack 是另一条扩展轴，主要承载**方法论、领域知识、审�
 | 插件 | 版本 | 主要能力 |
 | --- | ---: | --- |
 | **Blender Toolkit** (`blender-toolkit`) | 0.1.2 | Blender 5.x 的受限场景、对象、节点、动画、渲染、导入导出与 GUI 控制桥。 |
+| **ChatGPT Web LLM Adapter** (`chatgpt-web-llm-adapter`) | 0.3.2 | 面向测试的 fresh-chat 本地 LLM 桥；除有界并发、严格 JSON object 与临时凭据外，新增历史安全的新会话间隔／滚动窗口节流与自动冷却。 |
 | **Local ComfyUI** (`comfyui`) | 1.6.0 | 本地 ComfyUI workflow Jobs、健康／进度观测、模型与节点发现、定向取消、显存释放与生产 preflight。 |
 | **Download Toolkit** (`download-toolkit`) | 0.1.0 | 公共 HTTPS 下载与安全 GitHub source snapshot，带流式 size/hash 校验和 SSRF／redirect 防护。 |
 | **FFmpeg Toolkit** (`ffmpeg-toolkit`) | 0.1.2 | workspace 受限的 FFmpeg/FFprobe 探测、能力发现与长媒体任务。 |
@@ -35,6 +36,8 @@ Skill Pack 是另一条扩展轴，主要承载**方法论、领域知识、审�
 | **Godot AI Local Bridge** (`godot-ai`) | 0.1.0 | 本地 Godot editor、scene、run、log、截图和运行时输入的受限桥接。 |
 | **Local GPT-SoVITS** (`gpt-sovits-local`) | 0.1.2 | 固定本地 GPT-SoVITS 数据准备、ASR、训练、推理与状态工作流桥。 |
 | **PDF Toolkit** (`pdf-toolkit`) | 0.6.0 | 有界 PDF 结构检查、文本搜索、outline 读取与独立页面渲染。 |
+| **Storyboard ChatGPT Web** (`storyboard-chatgpt-web`) | 0.2.0 | 基于 ChatGPT Web 原生生图／编辑的分镜执行器，可选 GENERATE_ONLY 或独立原生 Visual Judge，保留精确图片／provenance 恢复与 PASS-only canonical。 |
+| **Windows Capture Toolkit** (`windows-capture-toolkit`) | 0.1.3 | 有界的一次性 Windows 截图与精确窗口左键点击，不提供键盘／宏，也不绕过 DRM／HDCP。 |
 
 公开源码与安装结构位于 [`Plugins/extensions/`](Plugins/extensions/)。Extension 本质上就是带 manifest 和声明入口的本地插件目录，因此用户也可以依照公开的 [Extension ABI](docs/extensions.md) 自己开发集成，而不必等 FolderBridge Core 把每一种工具都内置进去。
 
@@ -46,6 +49,22 @@ Skill Pack 是另一条扩展轴，主要承载**方法论、领域知识、审�
 | **Video Storyboard Production** (`video-storyboard-production`) | 1.0.0 | 6 个旁白驱动 AI 视频方法：连续性、分镜、镜头规格、MiniMax H3/ComfyUI 规划、生产编排与成片审查。 |
 
 公开 Pack 源码位于 [`Plugins/skill-packs/`](Plugins/skill-packs/)。如果只是希望加入项目方法、领域规则或工作规范，可以使用 Skill Pack 而不给它任何可执行权限；只有确实需要本地动作、进程或 API 集成时，才使用 Extension。
+
+## 0.8.38 重点更新
+
+- **公开插件源码／Release 对齐：** 当前公开外源 Extension 目录扩展为 11 个；`storyboard-chatgpt-web 0.2.0` 与 `windows-capture-toolkit 0.1.3` 正式进入仓库和 Release 面，与已经公开的 ChatGPT Web LLM Adapter 一起按明确发行白名单打包。Release 固定为 1 个 Windows 主程序 + 11 个 Plugin ZIP；SHA sidecar 仍只用于 CI，私有 Debate Judge adapter 继续硬排除。
+- **LLM Bridge 重启后不再残留旧临时凭据：** Launcher 现在会在启动新的 Standalone 托管代际前先删除上一代 `status.html`，并在打开状态页前校验其中嵌入的临时 API Key 是否与当前 live connection record 完全一致；若不一致则明确拒绝打开陈旧页面。该修复针对本机实测发现的竞态：侧栏已经显示新的一次性 Key，而旧浏览器标签仍可能保留上一代 Key。
+- **状态页强制新鲜导航：** “打开状态页”改为使用带 cache-buster 的 `file://` URL 在新浏览器标签打开，避免浏览器复用旧内存文档；这一宿主修复本身不要求插件重新批准。
+- **Adapter 0.3.2 历史安全节流：** fresh ChatGPT 页面创建独立限速（最小 20 秒启动间隔、滚动 5 分钟最多 8 次）；检测到对话记录访问限流提示后按 2/4/8/10 分钟指数冷却；登录／验证优先复用已有 ChatGPT 页。Temporary Chat 在网页控件未可靠验证前不会被静默宣称或强制启用。
+- **Adapter 0.3.1 严格 JSON 显示包装加固：** 读取回复前先从 assistant 消息副本中移除网页按钮／控制件，并允许 `json` / `Copy code` 等无语义标签被页面布局拼到同一行而不误报 502；解释性正文、数组、多个对象和损坏 JSON 仍然拒绝。
+
+## 0.8.37 重点更新
+
+- **ChatGPT Web LLM Bridge 一键控制：** Extensions & Skills 侧栏现在可把外源 `chatgpt-web-llm-adapter` 作为 Launcher-owned 服务管理，明确显示 `OFFLINE / STARTING / WAITING_LOGIN / READY / ERROR`，并提供启动／重启／停止、打开状态页、登录／验证页、真实一键 JSON completion 验证（`LIVE_PROBE_PASS`）、Base URL／Model／本次临时 API Key 复制、active/max 请求数和 1–4 路并发滑块（默认 2）。日常使用不再需要 Standalone 的启动／状态／验证／停止 CMD。
+- **安全 ownership 不退化：** FolderBridge 只停止当前 Launcher 自己创建且仍持有 process handle 的 Standalone 进程树。若 8769／8770 被未知或外部进程占用，只 fail-closed 报错；绝不按端口查 PID 后强杀陌生进程。
+- **Adapter 0.3.0 版本真值分离：** 已安装 Extension 版本／hash、live Adapter 版本、status 页版本分别可见；`/health` 与本次 connection record 都携带 live adapter version，旧进程版本不一致时明确显示 `ERROR`，不会伪装 READY。临时 bearer 只留在人类本机控制面，不再通过 Extension `status/connection` 返回给 MCP。
+- **正式公开发行包：** `chatgpt-web-llm-adapter` 成为第 9 个公开外源 Extension。Release ZIP 使用明确的 7 文件白名单，并在压缩后逐成员校验；本机 HANDOFF／CLOSURE 材料不会进入公开包。
+- **外源插件更新不再依赖 CMD：** Extensions & Skills 新增“安装/更新插件 ZIP…”。安装器先 staged 校验外源 Extension ZIP，拒绝 traversal／链接／加密／大小写冲突／超限展开和冒充内置 ID；替换前只会安全停止 Launcher 自己拥有的托管服务，并且 exact hash 变化后绝不会自动继承旧批准。
 
 ## 0.8.36 重点更新
 

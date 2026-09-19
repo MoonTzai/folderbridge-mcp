@@ -1,0 +1,70 @@
+{
+  "schema_version": 2,
+  "runtime_abi": 1,
+  "id": "chatgpt-web-llm-adapter",
+  "name": "ChatGPT Web LLM Test Adapter",
+  "version": "0.3.2",
+  "description": "Generic test-only OpenAI-compatible provider backed by isolated fresh ChatGPT web conversations. FolderBridge Launcher can safely own the Standalone service for one-click local control; Extension actions remain optional. It is for semantic acceptance, not an official OpenAI API substitute.",
+  "entrypoint": "plugin.py",
+  "permissions": [
+    "extension.state",
+    "network.loopback:127.0.0.1:8767",
+    "network.loopback:127.0.0.1:8768",
+    "network.outbound:https",
+    "process.execute:chrome.exe",
+    "process.execute:msedge.exe",
+    "environment.inherit:LOCALAPPDATA",
+    "environment.inherit:SYSTEMDRIVE"
+  ],
+  "execution": {
+    "mode": "isolated-process",
+    "timeout_seconds": 90
+  },
+  "workspace_adapter": {
+    "mode": "none",
+    "state": "none"
+  },
+  "actions": {
+    "status": {
+      "read_only": true,
+      "requires_workspace": false,
+      "authorization": "global",
+      "mutation_scope": {"mode": "none"},
+      "input_schema": {"type": "object", "properties": {}, "additionalProperties": false},
+      "effect_contract": {"effect_semantics": "read_only", "lifetime": "foreground"}
+    },
+    "connection": {
+      "read_only": true,
+      "requires_workspace": false,
+      "authorization": "global",
+      "mutation_scope": {"mode": "none"},
+      "input_schema": {"type": "object", "properties": {}, "additionalProperties": false},
+      "effect_contract": {"effect_semantics": "read_only", "lifetime": "foreground"}
+    },
+    "serve": {
+      "read_only": false,
+      "requires_workspace": false,
+      "authorization": "global",
+      "run_mode": "job",
+      "timeout_seconds": 0,
+      "mutation_scope": {"mode": "none"},
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "max_parallel": {"type": "integer", "minimum": 1, "maximum": 4, "default": 2},
+          "response_timeout_seconds": {"type": "integer", "minimum": 30, "maximum": 1800, "default": 600}
+        },
+        "additionalProperties": false
+      },
+      "effect_contract": {"effect_semantics": "external_effect", "lifetime": "job_owned"}
+    },
+    "verification-plan": {
+      "read_only": true,
+      "requires_workspace": false,
+      "authorization": "global",
+      "mutation_scope": {"mode": "none"},
+      "input_schema": {"type": "object", "properties": {}, "additionalProperties": false},
+      "effect_contract": {"effect_semantics": "read_only", "lifetime": "foreground"}
+    }
+  }
+}

@@ -6,6 +6,7 @@ import json
 import math
 import os
 import re
+import shutil
 import stat
 import subprocess
 import sys
@@ -13,6 +14,7 @@ import tempfile
 import threading
 import time
 import uuid
+import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import Any, Callable, Iterable
@@ -701,6 +703,145 @@ def load_extension(path: Path, *, bundled: bool) -> ExtensionRecord:
     if not bundled and any(action.authorization == "none" for action in manifest.actions.values()):
         raise ValueError("external extensions may not declare authorization=none")
     return ExtensionRecord(root, manifest, digest, bundled)
+
+
+def install_external_extension_zip(
+    zip_path: str | os.PathLike[str],
+    *,
+    destination_root: Path | None = None,
+    before_replace: Callable[[ExtensionRecord], None] | None = None,
+) -> ExtensionRecord:
+    """Install or update one external Extension from a bounded, root-layout ZIP.
+
+    The archive is treated as untrusted input: traversal, links, encryption,
+    duplicate/case-colliding members, oversized expanded content, and nested
+    wrapper folders are rejected. The extracted tree must pass the same manifest
+    and exact-tree validation as a normal hot-loaded Extension. Installation is
+    staged and directory-swapped; trust/enable state is intentionally untouched,
+    so any changed exact hash becomes stale and still requires explicit user
+    approval in the Launcher.
+    """
+
+    source = Path(zip_path).expanduser()
+    if source.is_symlink() or (source.exists() and _is_reparse_point(source)):
+        raise ValueError("Extension ZIP may not be a link or reparse point")
+    source = source.resolve(strict=True)
+    if not source.is_file() or source.suffix.lower() != ".zip":
+        raise ValueError("Extension installer requires a regular .zip file")
+
+    root_path = destination_root or extension_root_path()
+    root_path.mkdir(parents=True, exist_ok=True)
+    if root_path.is_symlink() or _is_reparse_point(root_path):
+        raise ValueError("Extension destination root may not be a link or reparse point")
+    root = root_path.resolve(strict=True)
+    if not root.is_dir():
+        raise ValueError("Extension destination root must be a directory")
+
+    staging = Path(tempfile.mkdtemp(prefix=".extension-install-", dir=root))
+    backup: Path | None = None
+    target: Path | None = None
+    published = False
+    backup_created = False
+    try:
+        try:
+            archive = zipfile.ZipFile(source, "r")
+        except (OSError, zipfile.BadZipFile) as exc:
+            raise ValueError("Extension ZIP is unreadable or invalid") from exc
+        with archive:
+            entries = archive.infolist()
+            if not entries or len(entries) > MAX_EXTENSION_FILES * 2:
+                raise ValueError("Extension ZIP has an invalid or excessive member count")
+            seen: set[str] = set()
+            file_count = 0
+            expanded_bytes = 0
+            root_manifest_present = False
+            prepared: list[tuple[zipfile.ZipInfo, PurePosixPath]] = []
+            for entry in entries:
+                raw_name = entry.filename.replace("\\", "/")
+                if not raw_name or "\x00" in raw_name:
+                    raise ValueError("Extension ZIP contains an invalid member name")
+                relative = PurePosixPath(raw_name)
+                parts = relative.parts
+                if (
+                    relative.is_absolute()
+                    or not parts
+                    or any(part in {"", ".", ".."} or ":" in part for part in parts)
+                ):
+                    raise ValueError(f"Extension ZIP contains an unsafe member path: {raw_name}")
+                normalized = "/".join(parts).rstrip("/")
+                identity = normalized.casefold()
+                if not identity or identity in seen:
+                    raise ValueError(f"Extension ZIP contains duplicate/colliding member: {raw_name}")
+                seen.add(identity)
+                unix_mode = (entry.external_attr >> 16) & 0xFFFF
+                if unix_mode and stat.S_ISLNK(unix_mode):
+                    raise ValueError(f"Extension ZIP may not contain symbolic links: {raw_name}")
+                if entry.flag_bits & 0x1:
+                    raise ValueError("Encrypted Extension ZIP members are not supported")
+                if not entry.is_dir():
+                    file_count += 1
+                    if file_count > MAX_EXTENSION_FILES:
+                        raise ValueError(f"Extension exceeds {MAX_EXTENSION_FILES} files")
+                    if entry.file_size < 0 or entry.file_size > MAX_EXTENSION_BYTES - expanded_bytes:
+                        raise ValueError(f"Extension exceeds {MAX_EXTENSION_BYTES} expanded bytes")
+                    expanded_bytes += entry.file_size
+                    if normalized.casefold() == MANIFEST_NAME.casefold():
+                        root_manifest_present = True
+                prepared.append((entry, PurePosixPath(normalized)))
+            if not root_manifest_present:
+                raise ValueError(f"Extension ZIP must contain {MANIFEST_NAME} at its root")
+
+            for entry, relative in prepared:
+                destination = staging.joinpath(*relative.parts)
+                if entry.is_dir():
+                    destination.mkdir(parents=True, exist_ok=True)
+                    continue
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                written = 0
+                with archive.open(entry, "r") as source_stream, destination.open("xb") as target_stream:
+                    while True:
+                        chunk = source_stream.read(min(1024 * 1024, entry.file_size - written + 1))
+                        if not chunk:
+                            break
+                        written += len(chunk)
+                        if written > entry.file_size:
+                            raise ValueError(f"Extension ZIP member expanded beyond declared size: {entry.filename}")
+                        target_stream.write(chunk)
+                if written != entry.file_size:
+                    raise ValueError(f"Extension ZIP member size mismatch: {entry.filename}")
+
+        staged_record = load_extension(staging, bundled=False)
+        if staged_record.manifest.extension_id in DEFAULT_BUNDLED_EXTENSION_IDS:
+            raise ValueError("External ZIP may not replace a release-bundled Extension id")
+        if before_replace is not None:
+            before_replace(staged_record)
+        target = root / staged_record.manifest.extension_id
+        if target.is_symlink() or (target.exists() and _is_reparse_point(target)):
+            raise ValueError("Refusing to replace a linked/reparse-point Extension target")
+        if target.exists() and not target.is_dir():
+            raise ValueError("Extension target exists but is not a directory")
+        nonce = uuid.uuid4().hex
+        backup = root / f".{staged_record.manifest.extension_id}.backup-{nonce}"
+        if target.exists():
+            os.replace(target, backup)
+            backup_created = True
+        os.replace(staging, target)
+        published = True
+        installed = load_extension(target, bundled=False)
+        if backup_created and backup.exists():
+            shutil.rmtree(backup)
+            backup_created = False
+        return installed
+    except Exception:
+        if published and target is not None and target.exists():
+            shutil.rmtree(target, ignore_errors=True)
+        if backup_created and backup is not None and backup.exists() and target is not None and not target.exists():
+            os.replace(backup, target)
+            backup_created = False
+        raise
+    finally:
+        if staging.exists():
+            shutil.rmtree(staging, ignore_errors=True)
 
 
 def _parse_manifest(raw: Any, root: Path) -> ExtensionManifest:

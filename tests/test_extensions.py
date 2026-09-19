@@ -9,6 +9,7 @@ import tempfile
 import threading
 import time
 import unittest
+import zipfile
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from unittest import mock
@@ -21,6 +22,7 @@ from folderbridge_mcp.extensions import (
     MAX_RUNNING_EXTENSION_JOBS,
     ExtensionRegistry,
     ExtensionTrustStore,
+    install_external_extension_zip,
     load_extension,
 )
 from folderbridge_mcp.security import ToolError, Workspace
@@ -96,6 +98,108 @@ class ExtensionTests(unittest.TestCase):
             encoding="utf-8",
         )
         return root
+
+    def _write_extension_zip(self, path: Path, *, version: str, extension_id: str = "zip-example") -> None:
+        manifest = {
+            "schema_version": 1,
+            "id": extension_id,
+            "name": "ZIP Example",
+            "version": version,
+            "description": "zip install test",
+            "entrypoint": "plugin.py",
+            "permissions": [],
+            "execution": {"mode": "isolated-process", "timeout_seconds": 30},
+            "workspace_adapter": {"mode": "none", "state": "none"},
+            "actions": {
+                "status": {
+                    "read_only": True,
+                    "requires_workspace": False,
+                    "authorization": "global",
+                    "input_schema": {"type": "object", "properties": {}, "additionalProperties": False},
+                }
+            },
+        }
+        with zipfile.ZipFile(path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+            archive.writestr("folderbridge-extension.json", json.dumps(manifest))
+            archive.writestr("plugin.py", f"VERSION = {version!r}\ndef handle(action, params, context):\n    return {{'ok': True}}\n")
+
+    def test_external_zip_install_is_staged_and_changed_hash_requires_reapproval(self) -> None:
+        first_zip = self.base / "zip-example-1.0.0.zip"
+        self._write_extension_zip(first_zip, version="1.0.0")
+        first = install_external_extension_zip(first_zip, destination_root=self.user_root)
+        self.assertEqual(first.manifest.extension_id, "zip-example")
+        self.assertEqual(first.manifest.version, "1.0.0")
+        self.assertEqual(first.path, self.user_root / "zip-example")
+        self.trust.approve(first, enabled=True)
+        self.assertTrue(self.trust.status(first)["trusted"])
+
+        second_zip = self.base / "zip-example-1.1.0.zip"
+        self._write_extension_zip(second_zip, version="1.1.0")
+        second = install_external_extension_zip(second_zip, destination_root=self.user_root)
+        self.assertEqual(second.manifest.version, "1.1.0")
+        self.assertNotEqual(second.sha256, first.sha256)
+        status = self.trust.status(second)
+        self.assertFalse(status["trusted"])
+        self.assertTrue(status["approval_stale"])
+        self.assertTrue((self.user_root / "zip-example" / "plugin.py").is_file())
+        self.assertEqual(list(self.user_root.glob(".zip-example.backup-*")), [])
+
+    def test_external_zip_install_rejects_traversal_before_publishing(self) -> None:
+        archive_path = self.base / "unsafe.zip"
+        self._write_extension_zip(archive_path, version="1.0.0", extension_id="unsafe-zip")
+        with zipfile.ZipFile(archive_path, "a", compression=zipfile.ZIP_DEFLATED) as archive:
+            archive.writestr("../escape.txt", "no")
+        with self.assertRaisesRegex(ValueError, "unsafe member path"):
+            install_external_extension_zip(archive_path, destination_root=self.user_root)
+        self.assertFalse((self.user_root / "unsafe-zip").exists())
+        self.assertFalse((self.base / "escape.txt").exists())
+
+    def test_external_zip_install_requires_manifest_at_archive_root(self) -> None:
+        wrapped = self.base / "wrapped.zip"
+        manifest = {
+            "schema_version": 1,
+            "id": "wrapped",
+            "name": "Wrapped",
+            "version": "1.0.0",
+            "entrypoint": "plugin.py",
+            "permissions": [],
+            "actions": {"status": {"read_only": True, "requires_workspace": False, "authorization": "global", "input_schema": {"type": "object", "properties": {}, "additionalProperties": False}}},
+        }
+        with zipfile.ZipFile(wrapped, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+            archive.writestr("wrapped/folderbridge-extension.json", json.dumps(manifest))
+            archive.writestr("wrapped/plugin.py", "def handle(action, params, context): return {'ok': True}\n")
+        with self.assertRaisesRegex(ValueError, "must contain folderbridge-extension.json at its root"):
+            install_external_extension_zip(wrapped, destination_root=self.user_root)
+
+    def test_external_zip_install_pre_replace_callback_can_abort_without_touching_current_install(self) -> None:
+        first_zip = self.base / "callback-1.0.0.zip"
+        self._write_extension_zip(first_zip, version="1.0.0", extension_id="callback-example")
+        first = install_external_extension_zip(first_zip, destination_root=self.user_root)
+        second_zip = self.base / "callback-2.0.0.zip"
+        self._write_extension_zip(second_zip, version="2.0.0", extension_id="callback-example")
+        calls: list[str] = []
+
+        def reject(record) -> None:
+            calls.append(record.manifest.version)
+            raise RuntimeError("owned service stop failed")
+
+        with self.assertRaisesRegex(RuntimeError, "owned service stop failed"):
+            install_external_extension_zip(
+                second_zip,
+                destination_root=self.user_root,
+                before_replace=reject,
+            )
+        self.assertEqual(calls, ["2.0.0"])
+        current = load_extension(self.user_root / "callback-example", bundled=False)
+        self.assertEqual(current.manifest.version, "1.0.0")
+        self.assertEqual(current.sha256, first.sha256)
+
+    def test_external_zip_install_cannot_shadow_release_bundled_extension_id(self) -> None:
+        archive_path = self.base / "bundled-id.zip"
+        self._write_extension_zip(archive_path, version="99.0.0", extension_id="git-publisher")
+        with self.assertRaisesRegex(ValueError, "release-bundled Extension id"):
+            install_external_extension_zip(archive_path, destination_root=self.user_root)
+        self.assertFalse((self.user_root / "git-publisher").exists())
 
     def test_explicit_param_mutation_scope_is_resolved_before_worker_start(self) -> None:
         self.make_extension(

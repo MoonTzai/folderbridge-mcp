@@ -1,0 +1,347 @@
+{
+  "schema_version": 2,
+  "runtime_abi": 1,
+  "id": "storyboard-chatgpt-web",
+  "name": "Storyboard ChatGPT Web",
+  "version": "0.2.0",
+  "description": "Storyboard Forge execution controller using ChatGPT Web native image generation/editing plus an optional independent native eight-axis Visual Judge. Supports GENERATE_AND_JUDGE and GENERATE_ONLY without ComfyUI.",
+  "entrypoint": "plugin.py",
+  "permissions": [
+    "workspace.read",
+    "workspace.write",
+    "extension.state",
+    "process.execute:node.exe",
+    "network.loopback:127.0.0.1:8771",
+    "network.outbound:https",
+    "process.execute:chrome.exe",
+    "process.execute:msedge.exe",
+    "environment.inherit:LOCALAPPDATA",
+    "environment.inherit:SYSTEMDRIVE"
+  ],
+  "execution": {
+    "mode": "isolated-process",
+    "timeout_seconds": 90
+  },
+  "workspace_adapter": {
+    "mode": "none",
+    "state": "none"
+  },
+  "actions": {
+    "status": {
+      "read_only": true,
+      "requires_workspace": false,
+      "authorization": "global",
+      "mutation_scope": {"mode": "none"},
+      "input_schema": {"type": "object", "properties": {}, "additionalProperties": false},
+      "effect_contract": {"effect_semantics": "read_only", "lifetime": "foreground"}
+    },
+    "verification-plan": {
+      "read_only": true,
+      "requires_workspace": false,
+      "authorization": "global",
+      "mutation_scope": {"mode": "none"},
+      "input_schema": {"type": "object", "properties": {}, "additionalProperties": false},
+      "effect_contract": {"effect_semantics": "read_only", "lifetime": "foreground"}
+    },
+    "pack-inspect": {
+      "read_only": true,
+      "requires_workspace": true,
+      "authorization": "global",
+      "mutation_scope": {"mode": "none"},
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "prompt_pack_path": {"type": "string", "minLength": 1, "maxLength": 1024}
+        },
+        "required": ["prompt_pack_path"],
+        "additionalProperties": false
+      },
+      "effect_contract": {"effect_semantics": "read_only", "lifetime": "foreground"}
+    },
+    "task-inspect": {
+      "read_only": true,
+      "requires_workspace": true,
+      "authorization": "global",
+      "mutation_scope": {"mode": "none"},
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "prompt_pack_path": {"type": "string", "minLength": 1, "maxLength": 1024},
+          "frame_id": {"type": "string", "minLength": 1, "maxLength": 160}
+        },
+        "required": ["prompt_pack_path", "frame_id"],
+        "additionalProperties": false
+      },
+      "effect_contract": {"effect_semantics": "read_only", "lifetime": "foreground"}
+    },
+    "run-init": {
+      "read_only": false,
+      "requires_workspace": true,
+      "authorization": "global",
+      "mutation_scope": {"mode": "none"},
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "prompt_pack_path": {"type": "string", "minLength": 1, "maxLength": 1024},
+          "run_id": {"type": "string", "minLength": 1, "maxLength": 180},
+          "mode_requested": {"enum": ["AUTO", "HUMAN_CONFIRM"], "default": "AUTO"},
+          "execution_mode": {"enum": ["GENERATE_AND_JUDGE", "GENERATE_ONLY"], "default": "GENERATE_AND_JUDGE"},
+          "retry_budget_per_frame": {"type": "integer", "minimum": 0, "maximum": 10, "default": 2}
+        },
+        "required": ["prompt_pack_path"],
+        "additionalProperties": false
+      },
+      "effect_contract": {"effect_semantics": "external_effect", "lifetime": "foreground"}
+    },
+    "run-status": {
+      "read_only": true,
+      "requires_workspace": true,
+      "authorization": "global",
+      "mutation_scope": {"mode": "none"},
+      "input_schema": {
+        "type": "object",
+        "properties": {"run_id": {"type": "string", "minLength": 1, "maxLength": 180}},
+        "required": ["run_id"],
+        "additionalProperties": false
+      },
+      "effect_contract": {"effect_semantics": "read_only", "lifetime": "foreground"}
+    },
+    "run-mode-set": {
+      "read_only": false,
+      "requires_workspace": true,
+      "authorization": "global",
+      "mutation_scope": {"mode": "none"},
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "run_id": {"type": "string", "minLength": 1, "maxLength": 180},
+          "execution_mode": {"enum": ["GENERATE_AND_JUDGE", "GENERATE_ONLY"]}
+        },
+        "required": ["run_id", "execution_mode"],
+        "additionalProperties": false
+      },
+      "effect_contract": {"effect_semantics": "external_effect", "lifetime": "foreground"}
+    },
+    "run-current": {
+      "read_only": true,
+      "requires_workspace": true,
+      "authorization": "global",
+      "mutation_scope": {"mode": "none"},
+      "input_schema": {
+        "type": "object",
+        "properties": {"run_id": {"type": "string", "minLength": 1, "maxLength": 180}},
+        "required": ["run_id"],
+        "additionalProperties": false
+      },
+      "effect_contract": {"effect_semantics": "read_only", "lifetime": "foreground"}
+    },
+    "artifact-register": {
+      "read_only": false,
+      "requires_workspace": true,
+      "authorization": "global",
+      "mutation_scope": {"mode": "none"},
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "run_id": {"type": "string", "minLength": 1, "maxLength": 180},
+          "source_type": {"enum": ["frame", "anchor"]},
+          "source_id": {"type": "string", "minLength": 1, "maxLength": 160},
+          "artifact_path": {"type": "string", "minLength": 1, "maxLength": 1024},
+          "status": {"enum": ["accepted", "approved"]},
+          "artifact_id": {"type": "string", "minLength": 1, "maxLength": 200},
+          "expected_sha256": {"type": "string", "minLength": 64, "maxLength": 64}
+        },
+        "required": ["run_id", "source_type", "source_id", "artifact_path", "status", "artifact_id"],
+        "additionalProperties": false
+      },
+      "effect_contract": {"effect_semantics": "external_effect", "lifetime": "foreground"}
+    },
+    "reference-bind": {
+      "read_only": false,
+      "requires_workspace": true,
+      "authorization": "global",
+      "mutation_scope": {"mode": "none"},
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "run_id": {"type": "string", "minLength": 1, "maxLength": 180},
+          "frame_id": {"type": "string", "minLength": 1, "maxLength": 160}
+        },
+        "required": ["run_id"],
+        "additionalProperties": false
+      },
+      "effect_contract": {"effect_semantics": "external_effect", "lifetime": "foreground"}
+    },
+    "operation-preview": {
+      "read_only": true,
+      "requires_workspace": true,
+      "authorization": "global",
+      "mutation_scope": {"mode": "none"},
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "run_id": {"type": "string", "minLength": 1, "maxLength": 180},
+          "frame_id": {"type": "string", "minLength": 1, "maxLength": 160},
+          "attempt": {"type": "integer", "minimum": 1}
+        },
+        "required": ["run_id"],
+        "additionalProperties": false
+      },
+      "effect_contract": {"effect_semantics": "read_only", "lifetime": "foreground"}
+    },
+    "provider-status": {
+      "read_only": true,
+      "requires_workspace": true,
+      "authorization": "global",
+      "mutation_scope": {"mode": "none"},
+      "input_schema": {
+        "type": "object",
+        "properties": {"run_id": {"type": "string", "minLength": 1, "maxLength": 180}},
+        "additionalProperties": false
+      },
+      "effect_contract": {"effect_semantics": "read_only", "lifetime": "foreground"}
+    },
+    "generator-bind": {
+      "read_only": false,
+      "requires_workspace": true,
+      "authorization": "global",
+      "run_mode": "job",
+      "timeout_seconds": 0,
+      "mutation_scope": {"mode": "none"},
+      "input_schema": {
+        "type": "object",
+        "properties": {"run_id": {"type": "string", "minLength": 1, "maxLength": 180}},
+        "required": ["run_id"],
+        "additionalProperties": false
+      },
+      "effect_contract": {"effect_semantics": "external_effect", "lifetime": "job_owned"}
+    },
+    "generator-run": {
+      "read_only": false,
+      "requires_workspace": true,
+      "authorization": "global",
+      "run_mode": "job",
+      "timeout_seconds": 0,
+      "mutation_scope": {"mode": "paths", "claims": [{"kind": "tree", "param": "save_directory"}]},
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "run_id": {"type": "string", "minLength": 1, "maxLength": 180},
+          "frame_id": {"type": "string", "minLength": 1, "maxLength": 160},
+          "attempt": {"type": "integer", "minimum": 1},
+          "save_directory": {"type": "string", "minLength": 1, "maxLength": 1024},
+          "response_timeout_seconds": {"type": "integer", "minimum": 30, "maximum": 1800, "default": 900}
+        },
+        "required": ["run_id", "save_directory"],
+        "additionalProperties": false
+      },
+      "effect_contract": {"effect_semantics": "external_effect", "lifetime": "job_owned"}
+    },
+    "judge-preview": {
+      "read_only": true,
+      "requires_workspace": true,
+      "authorization": "global",
+      "mutation_scope": {"mode": "none"},
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "run_id": {"type": "string", "minLength": 1, "maxLength": 180},
+          "frame_id": {"type": "string", "minLength": 1, "maxLength": 160},
+          "attempt": {"type": "integer", "minimum": 1}
+        },
+        "required": ["run_id"],
+        "additionalProperties": false
+      },
+      "effect_contract": {"effect_semantics": "read_only", "lifetime": "foreground"}
+    },
+    "judge-bind": {
+      "read_only": false,
+      "requires_workspace": true,
+      "authorization": "global",
+      "run_mode": "job",
+      "timeout_seconds": 0,
+      "mutation_scope": {"mode": "none"},
+      "input_schema": {
+        "type": "object",
+        "properties": {"run_id": {"type": "string", "minLength": 1, "maxLength": 180}},
+        "required": ["run_id"],
+        "additionalProperties": false
+      },
+      "effect_contract": {"effect_semantics": "external_effect", "lifetime": "job_owned"}
+    },
+    "judge-run": {
+      "read_only": false,
+      "requires_workspace": true,
+      "authorization": "global",
+      "run_mode": "job",
+      "timeout_seconds": 0,
+      "mutation_scope": {"mode": "none"},
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "run_id": {"type": "string", "minLength": 1, "maxLength": 180},
+          "frame_id": {"type": "string", "minLength": 1, "maxLength": 160},
+          "attempt": {"type": "integer", "minimum": 1},
+          "response_timeout_seconds": {"type": "integer", "minimum": 30, "maximum": 1800, "default": 600}
+        },
+        "required": ["run_id"],
+        "additionalProperties": false
+      },
+      "effect_contract": {"effect_semantics": "external_effect", "lifetime": "job_owned"}
+    },
+    "candidate-accept": {
+      "read_only": false,
+      "requires_workspace": true,
+      "authorization": "global",
+      "mutation_scope": {"mode": "none"},
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "run_id": {"type": "string", "minLength": 1, "maxLength": 180},
+          "frame_id": {"type": "string", "minLength": 1, "maxLength": 160},
+          "attempt": {"type": "integer", "minimum": 1}
+        },
+        "required": ["run_id"],
+        "additionalProperties": false
+      },
+      "effect_contract": {"effect_semantics": "external_effect", "lifetime": "foreground"}
+    },
+    "repair-preview": {
+      "read_only": true,
+      "requires_workspace": true,
+      "authorization": "global",
+      "mutation_scope": {"mode": "none"},
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "run_id": {"type": "string", "minLength": 1, "maxLength": 180},
+          "frame_id": {"type": "string", "minLength": 1, "maxLength": 160},
+          "attempt": {"type": "integer", "minimum": 1}
+        },
+        "required": ["run_id"],
+        "additionalProperties": false
+      },
+      "effect_contract": {"effect_semantics": "read_only", "lifetime": "foreground"}
+    },
+    "auto-run": {
+      "read_only": false,
+      "requires_workspace": true,
+      "authorization": "global",
+      "run_mode": "job",
+      "timeout_seconds": 0,
+      "mutation_scope": {"mode": "paths", "claims": [{"kind": "tree", "param": "save_directory"}]},
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "run_id": {"type": "string", "minLength": 1, "maxLength": 180},
+          "save_directory": {"type": "string", "minLength": 1, "maxLength": 1024},
+          "response_timeout_seconds": {"type": "integer", "minimum": 30, "maximum": 1800, "default": 900},
+          "max_steps": {"type": "integer", "minimum": 1, "maximum": 500, "default": 100}
+        },
+        "required": ["run_id", "save_directory"],
+        "additionalProperties": false
+      },
+      "effect_contract": {"effect_semantics": "external_effect", "lifetime": "job_owned"}
+    }
+  }
+}

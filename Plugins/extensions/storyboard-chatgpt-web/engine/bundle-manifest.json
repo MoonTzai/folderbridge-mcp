@@ -1,0 +1,53 @@
+{
+  "schema_version": "storyboard-chatgpt-web-engine-bundle-1.0",
+  "files": [
+    {
+      "source": "compiler/storyboard-forge-core.js",
+      "target": "engine/compiler/storyboard-forge-core.js",
+      "sha256": "ca2f03d6abac967bcff7c26cde81c4e49256597d9e13d239743517a72e2ef801",
+      "size": 18203
+    },
+    {
+      "source": "runner/operation-identity.cjs",
+      "target": "engine/runner/operation-identity.cjs",
+      "sha256": "b89dd4494ca2de00d2675408416fed842377c72a1481524efca2777c5fcd036b",
+      "size": 4025
+    },
+    {
+      "source": "runner/compiled-task-adapter.cjs",
+      "target": "engine/runner/compiled-task-adapter.cjs",
+      "sha256": "d841b410e089bbac1ee086ce25e2ef90ced5b8a4d64556345077b4752eefb9a3",
+      "size": 1626
+    },
+    {
+      "source": "runner/reference-binder.cjs",
+      "target": "engine/runner/reference-binder.cjs",
+      "sha256": "c9c24b4cc9b2fb81dd2dfd8ed4225ab676f5aa3df8fd69276f51be346c161a2c",
+      "size": 3840
+    },
+    {
+      "source": "runner/repair-execution.cjs",
+      "target": "engine/runner/repair-execution.cjs",
+      "sha256": "9795fd6d0fb114088ddb7919dc7a6b867c9c83f2db9ba0456f7adcb988c9ce24",
+      "size": 2342
+    },
+    {
+      "source": "runner/judge-contract.cjs",
+      "target": "engine/runner/judge-contract.cjs",
+      "sha256": "4bc2f757fa4638e950e9e9bfb9de9b6c9e09ab9127bc90f6c8fa69840badbf4f",
+      "size": 5064
+    },
+    {
+      "source": "runner/state-machine.cjs",
+      "target": "engine/runner/state-machine.cjs",
+      "sha256": "2c0b5db38b9c637514806f63f9be839c90cb2d539c499a581220223835513ab7",
+      "size": 1158
+    },
+    {
+      "source": "runner/execution-handoff.cjs",
+      "target": "engine/runner/execution-handoff.cjs",
+      "sha256": "d826a711e2e09590cbb5677e088a69398b8e1956400344f998e4d0471ed2773c",
+      "size": 1335
+    }
+  ]
+}

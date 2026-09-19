@@ -13,7 +13,7 @@ from tkinter import filedialog, messagebox, scrolledtext, ttk
 from . import __version__
 from .capabilities import CAPABILITY_LABELS, CAPABILITY_NAMES
 from .config import MAX_WORKSPACES, canonical_workspaces, workspace_id
-from .extensions import ExtensionRegistry, extension_root_path
+from .extensions import ExtensionRegistry, extension_root_path, install_external_extension_zip
 from .extension_spec import EXTENSION_FORMAT_SUMMARY, EXTENSION_LLM_PROMPT
 from .dpi import (
     enable_windows_dpi_awareness,
@@ -176,7 +176,7 @@ class FolderBridgeLauncher:
         self.flight_recorder.record("launcher.start")
         self.extension_registry = ExtensionRegistry()
         self.skill_engine = SkillEngine()
-        self.managed_services = default_managed_service_manager()
+        self.managed_services = default_managed_service_manager(self.extension_registry)
         self._managed_service_states: dict[str, dict[str, object]] = {}
         self._managed_service_busy: set[str] = set()
         self._managed_service_prompted: set[str] = set()
@@ -186,6 +186,7 @@ class FolderBridgeLauncher:
         self.extension_vars: dict[str, tk.BooleanVar] = {}
         self.skill_vars: dict[str, tk.BooleanVar] = {}
         self.managed_service_auto_vars: dict[str, tk.BooleanVar] = {}
+        self.managed_service_parallel_vars: dict[str, tk.IntVar] = {}
         self.managed_service_status_labels: dict[str, ttk.Label] = {}
         self._managed_service_status_pending: set[str] = set()
         self._extension_wrapped_labels: list[ttk.Label] = []
@@ -787,25 +788,35 @@ class FolderBridgeLauncher:
         )
         frame.grid_propagate(False)
         frame.columnconfigure(0, weight=1)
-        frame.rowconfigure(2, weight=1)
+        frame.rowconfigure(3, weight=1)
 
         header = ttk.Frame(frame, style="Card.TFrame")
         header.grid(row=0, column=0, sticky="ew")
         header.columnconfigure(0, weight=1)
         ttk.Label(header, text="Extensions & Skills", style="CardTitle.TLabel").grid(row=0, column=0, sticky="w")
         ttk.Button(header, text="重新扫描", command=self._rescan_extensions).grid(row=0, column=1, padx=(6, 0))
-        ttk.Button(header, text="插件目录", command=self._open_extension_folder).grid(row=0, column=2, padx=(6, 0))
-        ttk.Button(header, text="Skill 目录", command=self._open_skill_folder).grid(row=0, column=3, padx=(6, 0))
+
+        extension_tools = ttk.Frame(frame, style="Card.TFrame")
+        extension_tools.grid(row=1, column=0, sticky="ew", pady=(self._px(5), 0))
+        self.extension_install_button = ttk.Button(
+            extension_tools,
+            text="安装/更新插件 ZIP…",
+            command=self._install_extension_zip,
+        )
+        self.extension_install_button.pack(side="left")
+        ttk.Button(extension_tools, text="插件目录", command=self._open_extension_folder).pack(side="left", padx=(6, 0))
+        ttk.Button(extension_tools, text="Skill 目录", command=self._open_skill_folder).pack(side="left", padx=(6, 0))
+
         self.extension_sidebar_hint = ttk.Label(
             frame,
             text="默认折叠 · 热扫描 · Extensions 与 Skill Packs 分开授权；新增 Skill 不会新增 MCP tool。",
             style="Muted.TLabel",
             wraplength=self._px(EXTENSION_SIDEBAR_WRAP_WIDTH),
         )
-        self.extension_sidebar_hint.grid(row=1, column=0, sticky="w", pady=(self._px(5), self._px(9)))
+        self.extension_sidebar_hint.grid(row=2, column=0, sticky="w", pady=(self._px(5), self._px(9)))
 
         container = ttk.Frame(frame, style="Card.TFrame")
-        container.grid(row=2, column=0, sticky="nsew")
+        container.grid(row=3, column=0, sticky="nsew")
         container.columnconfigure(0, weight=1)
         container.rowconfigure(0, weight=1)
         canvas = tk.Canvas(
@@ -850,6 +861,7 @@ class FolderBridgeLauncher:
         self.extension_vars = {}
         self.skill_vars = {}
         self.managed_service_auto_vars = {}
+        self.managed_service_parallel_vars = {}
         self.managed_service_status_labels = {}
         self._extension_wrapped_labels = []
         description = self.extension_registry.describe()
@@ -943,18 +955,22 @@ class FolderBridgeLauncher:
             if controller is not None:
                 cached = self._managed_service_states.get(extension_id)
                 config = controller.config()
+                ui_spec = controller.ui_spec() if hasattr(controller, "ui_spec") else {}
+                requires_install_root = bool(ui_spec.get("requires_install_root"))
+                install_root = str(getattr(config, "install_root", "") or "")
                 service_state = cached or {
                     "online": False,
                     "owned": False,
                     "external": False,
-                    "install_root": config.install_root,
-                    "auto_start": config.auto_start,
+                    "install_root": install_root,
+                    "auto_start": bool(getattr(config, "auto_start", False)),
                     "detail": "尚未检测",
                 }
                 online = bool(service_state.get("online"))
                 owned = bool(service_state.get("owned"))
+                external = bool(service_state.get("external"))
                 busy = extension_id in self._managed_service_busy
-                install_root = str(service_state.get("install_root") or config.install_root or "")
+                install_root = str(service_state.get("install_root") or install_root)
                 service_text, service_style = self._managed_service_status_presentation(
                     extension_id,
                     service_state,
@@ -970,32 +986,113 @@ class FolderBridgeLauncher:
                 self.managed_service_status_labels[extension_id] = service_label
                 service_label.pack(anchor="w", padx=(22, 0), pady=(4, 0))
                 self._extension_wrapped_labels.append(service_label)
+
+                if bool(ui_spec.get("select_directory")):
+                    path_text = f"{ui_spec.get('service_name', '服务')}：{install_root or '未选择（首次需配置）'}"
+                else:
+                    installed_version = str(service_state.get("installed_version") or item.get("version") or "unknown")
+                    live_version = str(service_state.get("live_version") or "offline")
+                    short_hash = str(service_state.get("installed_sha256") or item.get("sha256") or "")[:12]
+                    path_text = f"版本：installed {installed_version} · live {live_version} · SHA {short_hash or 'unknown'}"
                 path_label = ttk.Label(
                     card,
-                    text=f"ComfyUI：{install_root or '未选择（首次需配置）'}",
+                    text=path_text,
                     style="Muted.TLabel",
                     wraplength=self._px(EXTENSION_SIDEBAR_WRAP_WIDTH),
                 )
                 path_label.pack(anchor="w", padx=(22, 0), pady=(2, 0))
                 self._extension_wrapped_labels.append(path_label)
-                auto_var = tk.BooleanVar(value=bool(service_state.get("auto_start", config.auto_start)))
-                self.managed_service_auto_vars[extension_id] = auto_var
+
+                detail = str(service_state.get("detail") or "")
+                if detail:
+                    detail_label = ttk.Label(
+                        card,
+                        text=detail,
+                        style="Muted.TLabel",
+                        wraplength=self._px(EXTENSION_SIDEBAR_WRAP_WIDTH),
+                    )
+                    detail_label.pack(anchor="w", padx=(22, 0), pady=(2, 0))
+                    self._extension_wrapped_labels.append(detail_label)
+
                 service_controls = ttk.Frame(card, style="Card.TFrame")
                 service_controls.pack(fill="x", padx=(22, 0), pady=(4, 0))
                 service_options = ttk.Frame(service_controls, style="Card.TFrame")
                 service_options.pack(fill="x")
-                ttk.Checkbutton(
-                    service_options,
-                    text="自动启动",
-                    variable=auto_var,
-                    command=lambda eid=extension_id: self._toggle_managed_service_auto_start(eid),
-                ).pack(side="left")
-                choose_button = ttk.Button(
-                    service_options,
-                    text="选择目录…",
-                    command=lambda eid=extension_id: self._select_managed_service_directory(eid),
-                )
-                choose_button.pack(side="left", padx=(6, 0))
+                if bool(ui_spec.get("show_auto_start", True)):
+                    auto_var = tk.BooleanVar(value=bool(service_state.get("auto_start", getattr(config, "auto_start", False))))
+                    self.managed_service_auto_vars[extension_id] = auto_var
+                    ttk.Checkbutton(
+                        service_options,
+                        text="自动启动",
+                        variable=auto_var,
+                        command=lambda eid=extension_id: self._toggle_managed_service_auto_start(eid),
+                    ).pack(side="left")
+                if bool(ui_spec.get("select_directory")):
+                    choose_button = ttk.Button(
+                        service_options,
+                        text="选择目录…",
+                        command=lambda eid=extension_id: self._select_managed_service_directory(eid),
+                    )
+                    choose_button.pack(side="left", padx=(6, 0))
+
+                if bool(ui_spec.get("show_connection_fields")):
+                    fields = (
+                        ("Base URL", str(service_state.get("base_url") or ""), "Base URL 已复制。"),
+                        ("Model Name", str(service_state.get("model") or ""), "Model Name 已复制。"),
+                        ("本次临时 API Key", str(service_state.get("api_key") or ""), "本次临时 API Key 已复制。"),
+                    )
+                    for field_name, field_value, field_notice in fields:
+                        row = ttk.Frame(service_controls, style="Card.TFrame")
+                        row.pack(fill="x", pady=(4, 0))
+                        value_label = ttk.Label(
+                            row,
+                            text=f"{field_name}：{field_value or '—'}",
+                            style="Muted.TLabel",
+                            wraplength=self._px(255),
+                        )
+                        value_label.pack(side="left", fill="x", expand=True)
+                        ttk.Button(
+                            row,
+                            text="复制",
+                            command=lambda value=field_value, notice=field_notice: self._copy_text(value, notice) if value else None,
+                        ).pack(side="right", padx=(6, 0))
+                        self._extension_wrapped_labels.append(value_label)
+
+                if bool(ui_spec.get("show_parallel_control")):
+                    parallel_value = int(service_state.get("max_parallel") or getattr(config, "max_parallel", 2))
+                    parallel_var = tk.IntVar(value=max(1, min(4, parallel_value)))
+                    self.managed_service_parallel_vars[extension_id] = parallel_var
+                    parallel_row = ttk.Frame(service_controls, style="Card.TFrame")
+                    parallel_row.pack(fill="x", pady=(6, 0))
+                    ttk.Label(
+                        parallel_row,
+                        text=f"并发：{int(service_state.get('active_requests') or 0)} / {parallel_value} active",
+                        style="Muted.TLabel",
+                    ).pack(anchor="w")
+                    slider = tk.Scale(
+                        parallel_row,
+                        from_=1,
+                        to=4,
+                        resolution=1,
+                        orient="horizontal",
+                        showvalue=True,
+                        variable=parallel_var,
+                        highlightthickness=0,
+                        bd=0,
+                        length=self._px(250),
+                    )
+                    slider.pack(fill="x")
+                    slider.bind(
+                        "<ButtonRelease-1>",
+                        lambda _event, eid=extension_id: self._set_managed_service_parallel_from_ui(eid),
+                        add="+",
+                    )
+                    slider.bind(
+                        "<KeyRelease>",
+                        lambda _event, eid=extension_id: self._set_managed_service_parallel_from_ui(eid),
+                        add="+",
+                    )
+
                 service_primary_actions = ttk.Frame(service_controls, style="Card.TFrame")
                 service_primary_actions.pack(anchor="e", pady=(4, 0))
                 start_button = ttk.Button(
@@ -1004,17 +1101,63 @@ class FolderBridgeLauncher:
                     command=lambda eid=extension_id: self._start_managed_service(eid),
                 )
                 start_button.pack(side="left")
+                restart_button: ttk.Button | None = None
+                if bool(ui_spec.get("supports_restart")):
+                    restart_button = ttk.Button(
+                        service_primary_actions,
+                        text="重启",
+                        command=lambda eid=extension_id: self._restart_managed_service(eid),
+                    )
+                    restart_button.pack(side="left", padx=(6, 0))
                 stop_button = ttk.Button(
                     service_primary_actions,
                     text="停止",
                     command=lambda eid=extension_id: self._stop_managed_service(eid),
                 )
                 stop_button.pack(side="left", padx=(6, 0))
+                service_bridge_actions = ttk.Frame(service_controls, style="Card.TFrame")
+                service_bridge_actions.pack(anchor="e", pady=(4, 0))
+                if bool(ui_spec.get("supports_open_status")):
+                    open_status_button = ttk.Button(
+                        service_bridge_actions,
+                        text="打开状态页",
+                        command=lambda eid=extension_id: self._open_managed_service_status(eid),
+                    )
+                    open_status_button.pack(side="left")
+                    if busy or not online or not bool(service_state.get("version_match")):
+                        open_status_button.configure(state="disabled")
+                if bool(ui_spec.get("supports_open_login")):
+                    open_login_button = ttk.Button(
+                        service_bridge_actions,
+                        text="登录 / 验证页",
+                        command=lambda eid=extension_id: self._open_managed_service_login(eid),
+                    )
+                    open_login_button.pack(side="left", padx=(6, 0))
+                    if busy or not online or not bool(service_state.get("api_key")):
+                        open_login_button.configure(state="disabled")
+                if bool(ui_spec.get("supports_probe")):
+                    probe_button = ttk.Button(
+                        service_bridge_actions,
+                        text="验证调用",
+                        command=lambda eid=extension_id: self._probe_managed_service(eid),
+                    )
+                    probe_button.pack(side="left", padx=(6, 0))
+                    if (
+                        busy
+                        or not bool(service_state.get("ready"))
+                        or not bool(service_state.get("version_match"))
+                        or not bool(service_state.get("api_key"))
+                    ):
+                        probe_button.configure(state="disabled")
+
                 service_secondary_actions = ttk.Frame(service_controls, style="Card.TFrame")
                 service_secondary_actions.pack(anchor="e", pady=(4, 0))
                 extension_action_buttons = service_secondary_actions
-                if busy or online or owned or not config.install_root or not item.get("loaded"):
+                missing_required_root = requires_install_root and not install_root
+                if busy or online or owned or missing_required_root or not item.get("loaded"):
                     start_button.configure(state="disabled")
+                if restart_button is not None and (busy or external or not item.get("loaded")):
+                    restart_button.configure(state="disabled")
                 if busy or not owned:
                     stop_button.configure(state="disabled")
 
@@ -1247,6 +1390,19 @@ class FolderBridgeLauncher:
         busy = extension_id in self._managed_service_busy
         install_root = str(service_state.get("install_root") or getattr(config, "install_root", "") or "")
         auto_start = bool(service_state.get("auto_start", getattr(config, "auto_start", True)))
+        display_state = str(service_state.get("display_state") or "")
+        if display_state:
+            owner = " · FolderBridge 托管" if owned else " · 外部实例（不会被 FolderBridge 终止）" if external else ""
+            if display_state == "READY":
+                return f"服务：READY{owner}", "ServiceOnline.TLabel"
+            if display_state == "WAITING_LOGIN":
+                return f"服务：WAITING_LOGIN{owner}", "ServicePending.TLabel"
+            if display_state == "STARTING":
+                return "服务：STARTING · 正在启动 / 检测…", "ServicePending.TLabel"
+            if display_state == "ERROR":
+                return f"服务：ERROR{owner}", "ServiceOffline.TLabel"
+            if display_state == "OFFLINE":
+                return "服务：OFFLINE" + (" · 自动启动已关闭" if not auto_start else ""), "ServiceOffline.TLabel"
         if busy and not online:
             return "服务：正在启动 / 检测…", "ServicePending.TLabel"
         if not cached:
@@ -1355,6 +1511,55 @@ class FolderBridgeLauncher:
             f"{record.manifest.description}",
         )
 
+    def _install_extension_zip(self) -> None:
+        if getattr(self, "_extension_install_busy", False) or self._closing:
+            return
+        selected = filedialog.askopenfilename(
+            title=self._t("安装/更新外源 Extension ZIP"),
+            filetypes=((self._t("Extension ZIP"), "*.zip"), (self._t("所有文件"), "*.*")),
+            parent=self.root,
+        )
+        if not selected:
+            return
+        self._extension_install_busy = True
+        if hasattr(self, "extension_install_button"):
+            self.extension_install_button.configure(state="disabled")
+        self._log("正在校验并安装/更新外源 Extension ZIP…")
+
+        def before_replace(record: object) -> None:
+            manifest = getattr(record, "manifest", None)
+            extension_id = str(getattr(manifest, "extension_id", "") or "")
+            controller = self.managed_services.controller(extension_id) if extension_id else None
+            if controller is None:
+                return
+            state = controller.stop()
+            if state.get("online") and not state.get("stopped"):
+                self._queue_event(
+                    "log",
+                    f"{extension_id} 当前在线实例不是 FolderBridge 托管进程；安装文件会更新，但该外部实例不会被终止。",
+                )
+
+        def work() -> None:
+            try:
+                record = install_external_extension_zip(selected, before_replace=before_replace)
+                trust = self.extension_registry.trust_store.status(record)
+                self._queue_event(
+                    "extension-install-complete",
+                    (
+                        record.manifest.extension_id,
+                        record.manifest.name,
+                        record.manifest.version,
+                        record.sha256,
+                        dict(trust),
+                    ),
+                )
+            except (OSError, ValueError, ManagedServiceError) as exc:
+                self._queue_event("extension-install-error", str(exc))
+            except Exception as exc:
+                self._queue_event("extension-install-error", f"{type(exc).__name__}: {exc}")
+
+        threading.Thread(target=work, name="folderbridge-extension-zip-install", daemon=True).start()
+
     def _open_extension_folder(self) -> None:
         folder = extension_root_path()
         try:
@@ -1395,16 +1600,18 @@ class FolderBridgeLauncher:
                     )
                 continue
             config = controller.config()
+            ui_spec = controller.ui_spec() if hasattr(controller, "ui_spec") else {}
+            install_root = str(getattr(config, "install_root", "") or "")
+            requires_install_root = bool(ui_spec.get("requires_install_root"))
             if extension_id not in self._managed_service_startup_logged:
                 self._managed_service_startup_logged.add(extension_id)
-                if not config.install_root:
+                if requires_install_root and not install_root:
                     self._log(f"托管服务自动启动检查：{extension_id} 尚未配置安装目录。")
-                elif not config.auto_start:
+                elif not bool(getattr(config, "auto_start", False)):
                     self._log(f"托管服务自动启动检查：{extension_id} 自动启动已关闭。")
                 else:
-                    self._log(
-                        f"托管服务自动启动检查：{extension_id} · {config.install_root} · 正在检查/启动…"
-                    )
+                    resource = f" · {install_root}" if install_root else ""
+                    self._log(f"托管服务自动启动检查：{extension_id}{resource} · 正在检查/启动…")
             self._ensure_managed_service_async(extension_id)
 
     def _refresh_managed_service_statuses_async(self) -> None:
@@ -1428,8 +1635,20 @@ class FolderBridgeLauncher:
     def _start_managed_service(self, extension_id: str) -> None:
         self._run_managed_service_action(extension_id, "start")
 
+    def _restart_managed_service(self, extension_id: str) -> None:
+        self._run_managed_service_action(extension_id, "restart")
+
     def _stop_managed_service(self, extension_id: str) -> None:
         self._run_managed_service_action(extension_id, "stop")
+
+    def _open_managed_service_status(self, extension_id: str) -> None:
+        self._run_managed_service_action(extension_id, "open-status")
+
+    def _open_managed_service_login(self, extension_id: str) -> None:
+        self._run_managed_service_action(extension_id, "open-login")
+
+    def _probe_managed_service(self, extension_id: str) -> None:
+        self._run_managed_service_action(extension_id, "probe")
 
     def _run_managed_service_action(self, extension_id: str, action: str) -> None:
         controller = self.managed_services.controller(extension_id)
@@ -1454,8 +1673,16 @@ class FolderBridgeLauncher:
                     state = controller.status()
                 elif action == "start":
                     state = controller.start()
+                elif action == "restart":
+                    state = controller.restart()
                 elif action == "stop":
                     state = controller.stop()
+                elif action == "open-status":
+                    state = controller.open_status_page()
+                elif action == "open-login":
+                    state = controller.open_login_page()
+                elif action == "probe":
+                    state = controller.probe()
                 else:
                     raise ValueError(f"unknown managed service action: {action}")
                 self._queue_event("managed-service-state", (extension_id, action, state))
@@ -1476,9 +1703,13 @@ class FolderBridgeLauncher:
         controller = self.managed_services.controller(extension_id)
         if controller is None:
             return
-        current = controller.config().install_root
+        ui_spec = controller.ui_spec() if hasattr(controller, "ui_spec") else {}
+        if not bool(ui_spec.get("select_directory")) or not hasattr(controller, "configure_install"):
+            return
+        current = str(getattr(controller.config(), "install_root", "") or "")
+        service_name = str(ui_spec.get("service_name") or extension_id)
         selected = filedialog.askdirectory(
-            title=self._t("选择 ComfyUI 安装目录"),
+            title=self._t(f"选择 {service_name} 安装目录"),
             initialdir=current or str(Path.home()),
             parent=self.root,
         )
@@ -1514,15 +1745,44 @@ class FolderBridgeLauncher:
             return
         try:
             config = controller.set_auto_start(variable.get())
-        except OSError as exc:
+        except (ManagedServiceError, OSError, ValueError) as exc:
             self._show_error(f"无法保存自动启动设置：{exc}")
             return
         state = dict(self._managed_service_states.get(extension_id, {}))
-        state["install_root"] = config.install_root
-        state["auto_start"] = config.auto_start
+        state["install_root"] = str(getattr(config, "install_root", "") or "")
+        state["auto_start"] = bool(getattr(config, "auto_start", False))
         self._managed_service_states[extension_id] = state
-        self._log(f"ComfyUI 自动启动已{'开启' if config.auto_start else '关闭'}。")
+        ui_spec = controller.ui_spec() if hasattr(controller, "ui_spec") else {}
+        service_name = str(ui_spec.get("service_name") or extension_id)
+        self._log(f"{service_name} 自动启动已{'开启' if state['auto_start'] else '关闭'}。")
         self._refresh_extension_sidebar()
+
+    def _set_managed_service_parallel_from_ui(self, extension_id: str) -> None:
+        controller = self.managed_services.controller(extension_id)
+        variable = self.managed_service_parallel_vars.get(extension_id)
+        if controller is None or variable is None or not hasattr(controller, "set_max_parallel"):
+            return
+        if extension_id in self._managed_service_busy:
+            return
+        value = int(variable.get())
+        self._managed_service_busy.add(extension_id)
+        self._refresh_extension_sidebar()
+
+        def work() -> None:
+            try:
+                state = controller.set_max_parallel(value)
+                self._queue_event("managed-service-state", (extension_id, "set-parallel", state))
+                self._queue_event("log", f"{extension_id} 并发上限已更新为 {value}。")
+            except (ManagedServiceError, OSError, ValueError) as exc:
+                self._queue_event("managed-service-error", (extension_id, str(exc)))
+            finally:
+                self._queue_event("managed-service-idle", extension_id)
+
+        threading.Thread(
+            target=work,
+            name=f"folderbridge-service-{extension_id}-parallel",
+            daemon=True,
+        ).start()
 
     def _disable_or_revoke_extension_async(self, extension_id: str, *, revoke: bool) -> None:
         if extension_id in self._managed_service_busy:
@@ -2762,6 +3022,8 @@ class FolderBridgeLauncher:
                 extension_id = str(extension_id)
                 previous = self._managed_service_states.get(extension_id)
                 state = dict(raw_state)
+                if service_action == "probe" and previous is not None:
+                    state = {**previous, **state}
                 self._managed_service_states[extension_id] = state
                 warning = str(state.get("warning") or "")
                 if warning:
@@ -2770,7 +3032,29 @@ class FolderBridgeLauncher:
                     self._log(f"托管服务已启动：{extension_id}")
                 elif state.get("stopped"):
                     self._log(f"托管服务已停止：{extension_id}")
-                status_shape = ("online", "owned", "external", "install_root", "auto_start")
+                if service_action == "probe" and state.get("probe_passed"):
+                    self._log("LLM Bridge 真实 JSON completion 验证通过（LIVE_PROBE_PASS）。")
+                    self._show_info(
+                        "LLM Bridge 验证",
+                        "LIVE_PROBE_PASS\n\n真实 /v1/chat/completions JSON probe 已通过。",
+                    )
+                status_shape = (
+                    "online",
+                    "owned",
+                    "external",
+                    "install_root",
+                    "auto_start",
+                    "display_state",
+                    "ready",
+                    "active_requests",
+                    "max_parallel",
+                    "api_key",
+                    "installed_version",
+                    "live_version",
+                    "installed_sha256",
+                    "version_match",
+                    "detail",
+                )
                 state_changed = previous is None or any(previous.get(key) != state.get(key) for key in status_shape)
                 if service_action == "status" and not state_changed:
                     self._update_managed_service_status_label(extension_id)
@@ -2791,6 +3075,31 @@ class FolderBridgeLauncher:
                 extension_id, message = payload  # type: ignore[misc]
                 self._log(f"托管服务 {extension_id}：{message}（Tunnel 不受影响）")
                 self._refresh_extension_sidebar()
+            elif kind == "extension-install-complete":
+                extension_id, name, version, sha256, raw_trust = payload  # type: ignore[misc]
+                self._extension_install_busy = False
+                if hasattr(self, "extension_install_button"):
+                    self.extension_install_button.configure(state="normal")
+                extension_id = str(extension_id)
+                trust = dict(raw_trust)
+                self._managed_service_states.pop(extension_id, None)
+                self._refresh_extension_sidebar()
+                if trust.get("trusted"):
+                    approval = "当前 exact hash 与已有批准一致；原批准仍有效。"
+                elif trust.get("approval_stale"):
+                    approval = "文件已更新，旧批准已失效；请在右侧勾选该 Extension，核对新 exact hash 与权限后重新批准。"
+                else:
+                    approval = "该 Extension 尚未批准；请在右侧勾选并核对 exact hash 与权限后批准。"
+                self._log(f"外源 Extension ZIP 已安装/更新：{name} {version} · SHA-256 {sha256}")
+                self._show_info(
+                    "Extension 安装完成",
+                    f"{name} {version}\nID: {extension_id}\nSHA-256: {sha256}\n\n{approval}\n\n安装动作不会自动批准新代码，也不会按端口终止外部进程。",
+                )
+            elif kind == "extension-install-error":
+                self._extension_install_busy = False
+                if hasattr(self, "extension_install_button"):
+                    self.extension_install_button.configure(state="normal")
+                self._show_error(f"Extension ZIP 安装/更新失败：{payload}")
             elif kind == "extension-refresh":
                 self._refresh_extension_sidebar()
             elif kind == "shutdown-error":

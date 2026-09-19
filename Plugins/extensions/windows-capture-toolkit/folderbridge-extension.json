@@ -1,0 +1,205 @@
+{
+  "schema_version": 2,
+  "runtime_abi": 1,
+  "id": "windows-capture-toolkit",
+  "name": "Windows Capture Toolkit",
+  "version": "0.1.3",
+  "description": "Bounded Windows screenshot and exact-window left-click extension for top-level windows, monitors and regions, including ordinary browser/video/streaming playback surfaces when Windows permits capture. Mouse input is limited to one left click inside an exact enumerated window; it never bypasses DRM/HDCP and provides no keyboard, drag, absolute-desktop click or continuous recording.",
+  "entrypoint": "plugin.py",
+  "permissions": [
+    "workspace.write",
+    "process.execute:FolderBridge.exe"
+  ],
+  "execution": {
+    "mode": "isolated-process",
+    "timeout_seconds": 90
+  },
+  "workspace_adapter": {
+    "mode": "none",
+    "state": "none"
+  },
+  "actions": {
+    "status": {
+      "read_only": true,
+      "requires_workspace": false,
+      "authorization": "global",
+      "input_schema": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false
+      },
+      "effect_contract": {
+        "effect_semantics": "read_only",
+        "lifetime": "foreground"
+      }
+    },
+    "list-windows": {
+      "read_only": true,
+      "requires_workspace": false,
+      "authorization": "global",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "title_contains": {"type": "string", "maxLength": 256},
+          "process_name": {"type": "string", "maxLength": 128},
+          "include_untitled": {"type": "boolean", "default": false},
+          "max_results": {"type": "integer", "minimum": 1, "maximum": 200, "default": 100}
+        },
+        "additionalProperties": false
+      },
+      "effect_contract": {
+        "effect_semantics": "read_only",
+        "lifetime": "foreground"
+      }
+    },
+    "list-monitors": {
+      "read_only": true,
+      "requires_workspace": false,
+      "authorization": "global",
+      "input_schema": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false
+      },
+      "effect_contract": {
+        "effect_semantics": "read_only",
+        "lifetime": "foreground"
+      }
+    },
+    "capture-window": {
+      "read_only": false,
+      "requires_workspace": true,
+      "authorization": "global",
+      "mutation_scope": {"mode": "paths", "claims": [{"param": "output_path", "kind": "exact"}]},
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "window_handle": {"type": "string", "minLength": 3, "maxLength": 32},
+          "output_path": {"type": "string", "minLength": 5, "maxLength": 1024},
+          "client_area": {"type": "boolean", "default": false},
+          "capture_mode": {"type": "string", "enum": ["window_surface", "visible_pixels"], "default": "window_surface"},
+          "restore_minimized": {"type": "boolean", "default": true},
+          "delay_ms": {"type": "integer", "minimum": 0, "maximum": 30000, "default": 0},
+          "overwrite": {"type": "boolean", "default": false},
+          "expected_target_sha256": {"type": "string", "minLength": 64, "maxLength": 64}
+        },
+        "required": ["window_handle", "output_path"],
+        "additionalProperties": false
+      },
+      "effect_contract": {
+        "effect_semantics": "external_effect",
+        "lifetime": "foreground"
+      }
+    },
+    "capture-active-window": {
+      "read_only": false,
+      "requires_workspace": true,
+      "authorization": "global",
+      "mutation_scope": {"mode": "paths", "claims": [{"param": "output_path", "kind": "exact"}]},
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "output_path": {"type": "string", "minLength": 5, "maxLength": 1024},
+          "client_area": {"type": "boolean", "default": false},
+          "capture_mode": {"type": "string", "enum": ["window_surface", "visible_pixels"], "default": "window_surface"},
+          "restore_minimized": {"type": "boolean", "default": true},
+          "delay_ms": {"type": "integer", "minimum": 0, "maximum": 30000, "default": 0},
+          "overwrite": {"type": "boolean", "default": false},
+          "expected_target_sha256": {"type": "string", "minLength": 64, "maxLength": 64}
+        },
+        "required": ["output_path"],
+        "additionalProperties": false
+      },
+      "effect_contract": {
+        "effect_semantics": "external_effect",
+        "lifetime": "foreground"
+      }
+    },
+    "click-window": {
+      "read_only": false,
+      "requires_workspace": false,
+      "authorization": "global",
+      "mutation_scope": {"mode": "none"},
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "window_handle": {"type": "string", "minLength": 3, "maxLength": 32},
+          "x": {"type": "integer", "minimum": 0, "maximum": 16383},
+          "y": {"type": "integer", "minimum": 0, "maximum": 16383},
+          "restore_minimized": {"type": "boolean", "default": true},
+          "after_click_ms": {"type": "integer", "minimum": 0, "maximum": 5000, "default": 300}
+        },
+        "required": ["window_handle", "x", "y"],
+        "additionalProperties": false
+      },
+      "effect_contract": {
+        "effect_semantics": "external_effect",
+        "lifetime": "foreground"
+      }
+    },
+    "launch-demo-folderbridge": {
+      "read_only": false,
+      "requires_workspace": false,
+      "authorization": "global",
+      "run_mode": "job",
+      "timeout_seconds": 0,
+      "mutation_scope": {"mode": "none"},
+      "input_schema": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false
+      },
+      "effect_contract": {
+        "effect_semantics": "external_effect",
+        "lifetime": "job_owned"
+      }
+    },
+    "capture-monitor": {
+      "read_only": false,
+      "requires_workspace": true,
+      "authorization": "global",
+      "mutation_scope": {"mode": "paths", "claims": [{"param": "output_path", "kind": "exact"}]},
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "monitor_index": {"type": "integer", "minimum": 0, "maximum": 63},
+          "output_path": {"type": "string", "minLength": 5, "maxLength": 1024},
+          "delay_ms": {"type": "integer", "minimum": 0, "maximum": 30000, "default": 0},
+          "overwrite": {"type": "boolean", "default": false},
+          "expected_target_sha256": {"type": "string", "minLength": 64, "maxLength": 64}
+        },
+        "required": ["monitor_index", "output_path"],
+        "additionalProperties": false
+      },
+      "effect_contract": {
+        "effect_semantics": "external_effect",
+        "lifetime": "foreground"
+      }
+    },
+    "capture-region": {
+      "read_only": false,
+      "requires_workspace": true,
+      "authorization": "global",
+      "mutation_scope": {"mode": "paths", "claims": [{"param": "output_path", "kind": "exact"}]},
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "x": {"type": "integer", "minimum": -32768, "maximum": 32768},
+          "y": {"type": "integer", "minimum": -32768, "maximum": 32768},
+          "width": {"type": "integer", "minimum": 1, "maximum": 16384},
+          "height": {"type": "integer", "minimum": 1, "maximum": 16384},
+          "output_path": {"type": "string", "minLength": 5, "maxLength": 1024},
+          "delay_ms": {"type": "integer", "minimum": 0, "maximum": 30000, "default": 0},
+          "overwrite": {"type": "boolean", "default": false},
+          "expected_target_sha256": {"type": "string", "minLength": 64, "maxLength": 64}
+        },
+        "required": ["x", "y", "width", "height", "output_path"],
+        "additionalProperties": false
+      },
+      "effect_contract": {
+        "effect_semantics": "external_effect",
+        "lifetime": "foreground"
+      }
+    }
+  }
+}

@@ -25,15 +25,54 @@ $bundledExtensions = @("git-publisher", "office", "skill-engine")
 $bundledSkillPacks = @("matt-pocock-engineering")
 $publicExternalExtensions = @(
     "blender-toolkit",
+    "chatgpt-web-llm-adapter",
     "comfyui",
     "download-toolkit",
     "ffmpeg-toolkit",
     "ftp-toolkit",
     "godot-ai",
     "gpt-sovits-local",
-    "pdf-toolkit"
+    "pdf-toolkit",
+    "storyboard-chatgpt-web",
+    "windows-capture-toolkit"
 )
 $externalReleaseDir = Join-Path $projectRoot "release\external-extensions"
+$externalReleaseFileAllowlists = @{
+    "chatgpt-web-llm-adapter" = @(
+        "folderbridge-extension.json",
+        "plugin.py",
+        "browser_runtime.py",
+        "standalone.py",
+        "launch-standalone.ps1",
+        "README.md",
+        "install.ps1"
+    )
+    "storyboard-chatgpt-web" = @(
+        "folderbridge-extension.json",
+        "plugin.py",
+        "bridge.cjs",
+        "live_judge.py",
+        "live_generator.py",
+        "live_state.py",
+        "README.md",
+        "install.ps1",
+        "engine\bundle-manifest.json",
+        "engine\compiler\storyboard-forge-core.js",
+        "engine\runner\compiled-task-adapter.cjs",
+        "engine\runner\execution-handoff.cjs",
+        "engine\runner\judge-contract.cjs",
+        "engine\runner\operation-identity.cjs",
+        "engine\runner\reference-binder.cjs",
+        "engine\runner\repair-execution.cjs",
+        "engine\runner\state-machine.cjs"
+    )
+    "windows-capture-toolkit" = @(
+        "folderbridge-extension.json",
+        "plugin.py",
+        "README.md",
+        "install.ps1"
+    )
+}
 $retiredFileOpsDir = Join-Path $projectRoot "Plugins\extensions\file-ops-toolkit"
 
 # File Ops moved into FolderBridge Core in 0.8.34. A developer checkout can still
@@ -130,7 +169,58 @@ try {
         }
         $assetName = "FolderBridge-Plugin-$extensionId-v$version.zip"
         $assetPath = Join-Path $externalReleaseDir $assetName
-        Compress-Archive -Path (Join-Path $source "*") -DestinationPath $assetPath -CompressionLevel Optimal -Force
+        $releaseAllowlist = $null
+        if ($externalReleaseFileAllowlists.ContainsKey($extensionId)) {
+            $releaseAllowlist = @($externalReleaseFileAllowlists[$extensionId])
+        }
+        if ($releaseAllowlist) {
+            $releaseStage = Join-Path $projectRoot (".build\external-release-" + $extensionId + "-" + [Guid]::NewGuid().ToString("N"))
+            try {
+                New-Item -ItemType Directory -Path $releaseStage -Force | Out-Null
+                foreach ($name in $releaseAllowlist) {
+                    $releaseSource = Join-Path $source $name
+                    if (-not (Test-Path -LiteralPath $releaseSource -PathType Leaf)) {
+                        throw "Missing explicit Release file for '$extensionId': $name"
+                    }
+                    $releaseDestination = Join-Path $releaseStage $name
+                    $releaseParent = Split-Path -Parent $releaseDestination
+                    if ($releaseParent) {
+                        New-Item -ItemType Directory -Path $releaseParent -Force | Out-Null
+                    }
+                    Copy-Item -LiteralPath $releaseSource -Destination $releaseDestination
+                }
+                Compress-Archive -Path (Join-Path $releaseStage "*") -DestinationPath $assetPath -CompressionLevel Optimal -Force
+            }
+            finally {
+                if (Test-Path -LiteralPath $releaseStage) {
+                    Remove-Item -LiteralPath $releaseStage -Recurse -Force
+                }
+            }
+        }
+        else {
+            Compress-Archive -Path (Join-Path $source "*") -DestinationPath $assetPath -CompressionLevel Optimal -Force
+        }
+        if ($releaseAllowlist) {
+            Add-Type -AssemblyName System.IO.Compression.FileSystem
+            $archive = [IO.Compression.ZipFile]::OpenRead($assetPath)
+            try {
+                $members = @(
+                    $archive.Entries |
+                    Where-Object { -not $_.FullName.EndsWith('/') } |
+                    ForEach-Object { $_.FullName.Replace('\\', '/') } |
+                    Sort-Object
+                )
+                $expectedMembers = @($releaseAllowlist | ForEach-Object { $_.Replace('\\', '/') } | Sort-Object)
+                $diff = @(Compare-Object -ReferenceObject $expectedMembers -DifferenceObject $members)
+                if ($diff.Count -ne 0) {
+                    $detail = ($diff | ForEach-Object { "$($_.SideIndicator) $($_.InputObject)" }) -join '; '
+                    throw "Explicit Release ZIP member mismatch for '$extensionId': $detail"
+                }
+            }
+            finally {
+                $archive.Dispose()
+            }
+        }
         $assetHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $assetPath).Hash.ToLowerInvariant()
         "$assetHash *$assetName" | Set-Content -LiteralPath ($assetPath + ".sha256") -Encoding ascii
         Write-Host "Packaged external Extension: $assetName"

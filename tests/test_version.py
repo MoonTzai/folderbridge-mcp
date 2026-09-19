@@ -13,11 +13,12 @@ class VersionTests(unittest.TestCase):
         with (PROJECT_ROOT / "pyproject.toml").open("rb") as stream:
             project_version = tomllib.load(stream)["project"]["version"]
 
-        self.assertEqual(project_version, "0.8.36")
+        self.assertEqual(project_version, "0.8.38")
         self.assertEqual(__version__, project_version)
+        major, minor, patch = (int(part) for part in project_version.split("."))
         version_info = (PROJECT_ROOT / "packaging" / "windows_version_info.txt").read_text(encoding="utf-8")
-        self.assertIn(f"filevers=(0, 8, 36, 0)", version_info)
-        self.assertIn(f"prodvers=(0, 8, 36, 0)", version_info)
+        self.assertIn(f"filevers=({major}, {minor}, {patch}, 0)", version_info)
+        self.assertIn(f"prodvers=({major}, {minor}, {patch}, 0)", version_info)
         self.assertIn(f"StringStruct('FileVersion', '{project_version}')", version_info)
         self.assertIn(f"StringStruct('ProductVersion', '{project_version}')", version_info)
         self.assertIn(

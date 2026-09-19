@@ -62,6 +62,7 @@ class RepositoryHygieneTests(unittest.TestCase):
         ]
         public_plugin_ids = (
             "blender-toolkit",
+            "chatgpt-web-llm-adapter",
             "comfyui",
             "download-toolkit",
             "ffmpeg-toolkit",
@@ -69,6 +70,8 @@ class RepositoryHygieneTests(unittest.TestCase):
             "godot-ai",
             "gpt-sovits-local",
             "pdf-toolkit",
+            "storyboard-chatgpt-web",
+            "windows-capture-toolkit",
         )
         public_roots.extend(ROOT / "Plugins" / "extensions" / plugin_id for plugin_id in public_plugin_ids)
         public_files.extend(
@@ -106,6 +109,7 @@ class RepositoryHygieneTests(unittest.TestCase):
 
     def test_public_external_plugins_use_the_public_folderbridge_python_helpers(self) -> None:
         public_plugins = (
+            "chatgpt-web-llm-adapter",
             "comfyui",
             "download-toolkit",
             "ffmpeg-toolkit",
@@ -113,6 +117,8 @@ class RepositoryHygieneTests(unittest.TestCase):
             "godot-ai",
             "gpt-sovits-local",
             "pdf-toolkit",
+            "storyboard-chatgpt-web",
+            "windows-capture-toolkit",
         )
         legacy_process_fallback = {
             "ffmpeg-toolkit",
@@ -137,6 +143,7 @@ class RepositoryHygieneTests(unittest.TestCase):
     def test_published_external_extension_table_matches_manifest_versions(self) -> None:
         published = {
             "blender-toolkit": ("0.1.2", "test_external_blender_toolkit.py"),
+            "chatgpt-web-llm-adapter": ("0.3.2", "test_external_chatgpt_web_llm_adapter.py"),
             "comfyui": ("1.6.0", "test_external_comfyui.py"),
             "download-toolkit": ("0.1.0", "test_external_download_toolkit.py"),
             "ffmpeg-toolkit": ("0.1.2", "test_external_ffmpeg_toolkit.py"),
@@ -144,6 +151,8 @@ class RepositoryHygieneTests(unittest.TestCase):
             "godot-ai": ("0.1.0", "test_external_godot_ai.py"),
             "gpt-sovits-local": ("0.1.2", "test_external_gpt_sovits.py"),
             "pdf-toolkit": ("0.6.0", "test_pdf_toolkit_v06.py"),
+            "storyboard-chatgpt-web": ("0.2.0", "test_external_storyboard_chatgpt_web.py"),
+            "windows-capture-toolkit": ("0.1.3", "test_windows_capture_toolkit_extension.py"),
         }
         readme = (ROOT / "Plugins" / "extensions" / "README.md").read_text(encoding="utf-8")
         for plugin_id, (expected_version, test_name) in published.items():
@@ -163,6 +172,7 @@ class RepositoryHygieneTests(unittest.TestCase):
         allowlist = build[allowlist_start:allowlist_end]
         expected = {
             "blender-toolkit",
+            "chatgpt-web-llm-adapter",
             "comfyui",
             "download-toolkit",
             "ffmpeg-toolkit",
@@ -170,6 +180,8 @@ class RepositoryHygieneTests(unittest.TestCase):
             "godot-ai",
             "gpt-sovits-local",
             "pdf-toolkit",
+            "storyboard-chatgpt-web",
+            "windows-capture-toolkit",
         }
         for extension_id in expected:
             self.assertIn(f'"{extension_id}"', allowlist)
@@ -177,16 +189,28 @@ class RepositoryHygieneTests(unittest.TestCase):
         self.assertNotIn('"file-ops-toolkit"', allowlist)
         self.assertIn("release\\external-extensions", build)
         self.assertIn("Compress-Archive", build)
+        self.assertIn("$externalReleaseFileAllowlists", build)
+        for extension_id in ("chatgpt-web-llm-adapter", "storyboard-chatgpt-web", "windows-capture-toolkit"):
+            self.assertIn(f'"{extension_id}" = @(', build)
+        self.assertIn("Explicit Release ZIP member mismatch", build)
+        self.assertNotIn('"HANDOFF-LLM-Bridge-OneClick-Plugin-UI-then-Cognitive-20260918.md"', build)
+        self.assertNotIn('"CLOSURE-Standalone-0.2.1-JSON-Concurrency-20260918.md"', build)
         self.assertIn("FolderBridge-Plugin-$extensionId-v$version.zip", build)
         legacy_file_ops = ROOT / "Plugins" / "extensions" / "file-ops-toolkit"
         self.assertFalse((legacy_file_ops / "folderbridge-extension.json").exists())
         if legacy_file_ops.exists():
             self.assertEqual([path for path in legacy_file_ops.rglob("*") if path.is_file()], [])
-        self.assertIn("if ($assets.Count -ne 16)", workflow)
-        self.assertIn("if ($zips.Count -ne 8 -or $checksums.Count -ne 8)", workflow)
-        self.assertIn("Expected 16 internal external Extension build artifacts (8 ZIP + 8 SHA256)", workflow)
+        self.assertIn("if ($assets.Count -ne 22)", workflow)
+        self.assertIn("if ($zips.Count -ne 11 -or $checksums.Count -ne 11)", workflow)
+        self.assertIn("Expected 22 internal external Extension build artifacts (11 ZIP + 11 SHA256)", workflow)
+        self.assertIn("if ($published.Count -ne 12)", workflow)
         self.assertIn("FolderBridge-Windows-x64.exe", workflow)
         self.assertIn("FolderBridge-Plugin-", workflow)
+        self.assertIn("Id = 'chatgpt-web-llm-adapter'", workflow)
+        self.assertIn("Id = 'storyboard-chatgpt-web'", workflow)
+        self.assertIn("Id = 'windows-capture-toolkit'", workflow)
+        self.assertIn("if ($assetSpecs.Count -ne 12)", workflow)
+        self.assertIn("if ($remoteNames.Count -ne 12)", workflow)
         self.assertIn("SHA sidecars must not enter GitHub Release assets", workflow)
         self.assertIn("gh release delete-asset", workflow)
         self.assertIn("file-ops-toolkit", workflow)

@@ -113,6 +113,24 @@ class Gui041RegressionTests(unittest.TestCase):
         self.assertNotIn("extension_action_buttons = service_primary_actions", self.gui)
         self.assertIn("if busy or not owned:\n                    stop_button.configure(state=\"disabled\")", self.gui)
 
+    def test_extension_sidebar_can_install_or_update_validated_zip_without_auto_approval(self) -> None:
+        self.assertIn('text="安装/更新插件 ZIP…"', self.gui)
+        self.assertIn("def _install_extension_zip(self) -> None:", self.gui)
+        install_block = self.gui.split("def _install_extension_zip", 1)[1].split("def _open_extension_folder", 1)[0]
+        self.assertIn("install_external_extension_zip(selected, before_replace=before_replace)", install_block)
+        self.assertIn("controller.stop()", install_block)
+        self.assertNotIn("trust_store.approve", install_block)
+        self.assertIn("安装动作不会自动批准新代码", self.gui)
+
+    def test_chatgpt_bridge_has_separate_login_page_and_real_validation_actions(self) -> None:
+        self.assertIn('text="登录 / 验证页"', self.gui)
+        self.assertIn('text="验证调用"', self.gui)
+        self.assertIn("def _probe_managed_service", self.gui)
+        self.assertIn('self._run_managed_service_action(extension_id, "probe")', self.gui)
+        self.assertIn('elif action == "probe":\n                    state = controller.probe()', self.gui)
+        self.assertIn("LIVE_PROBE_PASS", self.gui)
+        self.assertIn("service_bridge_actions", self.gui)
+
     def test_runtime_api_key_field_trims_clipboard_edge_whitespace(self) -> None:
         self.assertIn("def _normalize_runtime_api_key_field(self) -> str:", self.gui)
         self.assertIn("normalized = current.strip()", self.gui)

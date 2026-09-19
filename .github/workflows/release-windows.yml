@@ -81,8 +81,8 @@ jobs:
         shell: pwsh
         run: |
           $assets = @(Get-ChildItem "release/external-extensions" -File | Sort-Object Name)
-          if ($assets.Count -ne 16) {
-            throw "Expected 16 internal external Extension build artifacts (8 ZIP + 8 SHA256); found $($assets.Count)."
+          if ($assets.Count -ne 22) {
+            throw "Expected 22 internal external Extension build artifacts (11 ZIP + 11 SHA256); found $($assets.Count)."
           }
           if ($assets.Name -match 'debate-judge-adapter') {
             throw "Private Debate Judge adapter must never be published as a Release asset."
@@ -92,7 +92,7 @@ jobs:
           }
           $zips = @($assets | Where-Object { $_.Name -like '*.zip' })
           $checksums = @($assets | Where-Object { $_.Name -like '*.zip.sha256' })
-          if ($zips.Count -ne 8 -or $checksums.Count -ne 8) {
+          if ($zips.Count -ne 11 -or $checksums.Count -ne 11) {
             throw "External Extension build artifact shape is incomplete."
           }
           foreach ($zip in $zips) {
@@ -121,8 +121,8 @@ jobs:
             Copy-Item -LiteralPath $_.FullName -Destination (Join-Path $publishDir $_.Name) -Force
           }
           $published = @(Get-ChildItem $publishDir -File | Sort-Object Name)
-          if ($published.Count -ne 9) {
-            throw "Expected 9 curated GitHub Release assets (1 main program + 8 plugins); found $($published.Count)."
+          if ($published.Count -ne 12) {
+            throw "Expected 12 curated GitHub Release assets (1 main program + 11 plugins); found $($published.Count)."
           }
           if ($published.Name -match '\.sha256$') {
             throw "SHA sidecars must not enter GitHub Release assets."
@@ -182,13 +182,16 @@ jobs:
           $publishDir = (Resolve-Path "release/github-assets").Path
           $plugins = @(
             @{ Id = 'blender-toolkit'; Name = 'Blender Toolkit'; Description = 'Local Blender scene and render control bridge.' },
+            @{ Id = 'chatgpt-web-llm-adapter'; Name = 'ChatGPT Web LLM Adapter'; Description = 'Test-only fresh-chat local LLM bridge with Launcher-owned one-click service control.' },
             @{ Id = 'comfyui'; Name = 'Local ComfyUI'; Description = 'Local ComfyUI workflow, health, progress, and job bridge.' },
             @{ Id = 'download-toolkit'; Name = 'Download Toolkit'; Description = 'Bounded public HTTPS and GitHub snapshot downloader.' },
             @{ Id = 'ffmpeg-toolkit'; Name = 'FFmpeg Toolkit'; Description = 'Workspace-confined FFmpeg and FFprobe media operations.' },
             @{ Id = 'ftp-toolkit'; Name = 'FTP Toolkit'; Description = 'Workspace-confined FTP and FTPS transfer bridge.' },
             @{ Id = 'godot-ai'; Name = 'Godot AI Local Bridge'; Description = 'Local Godot editor and runtime bridge.' },
             @{ Id = 'gpt-sovits-local'; Name = 'Local GPT-SoVITS'; Description = 'Local GPT-SoVITS training and inference bridge.' },
-            @{ Id = 'pdf-toolkit'; Name = 'PDF Toolkit'; Description = 'Bounded PDF inspection, search, and page rendering.' }
+            @{ Id = 'pdf-toolkit'; Name = 'PDF Toolkit'; Description = 'Bounded PDF inspection, search, and page rendering.' },
+            @{ Id = 'storyboard-chatgpt-web'; Name = 'Storyboard ChatGPT Web'; Description = 'ChatGPT Web native storyboard image generation/editing with optional independent native Visual Judge review.' },
+            @{ Id = 'windows-capture-toolkit'; Name = 'Windows Capture Toolkit'; Description = 'Bounded one-shot Windows screenshots and exact-window left-click automation.' }
           )
           $assetSpecs = @()
           $mainPath = Join-Path $publishDir 'FolderBridge-Windows-x64.exe'
@@ -209,8 +212,8 @@ jobs:
             $assetSpecs += "$($asset.FullName)#Plugin · $($plugin.Name) — $($plugin.Description)"
             $notes.Add("- ``$($asset.Name)`` — $($plugin.Description)")
           }
-          if ($assetSpecs.Count -ne 9) {
-            throw "Expected 9 labeled GitHub Release assets; found $($assetSpecs.Count)."
+          if ($assetSpecs.Count -ne 12) {
+            throw "Expected 12 labeled GitHub Release assets; found $($assetSpecs.Count)."
           }
           $notes.Add('')
           $notes.Add('SHA-256 sidecars are verified during build/CI but are intentionally not published as Release assets.')
@@ -239,8 +242,8 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "Could not verify final GitHub Release assets." }
           $verify = $verifyJson | ConvertFrom-Json
           $remoteNames = @($verify.assets | ForEach-Object { [string]$_.name })
-          if ($remoteNames.Count -ne 9) {
-            throw "Final GitHub Release must contain exactly 9 explicit assets; found $($remoteNames.Count)."
+          if ($remoteNames.Count -ne 12) {
+            throw "Final GitHub Release must contain exactly 12 explicit assets; found $($remoteNames.Count)."
           }
           if ($remoteNames -match '\.sha256$|file-ops-toolkit') {
             throw "Final GitHub Release still contains checksum or retired File Ops assets."

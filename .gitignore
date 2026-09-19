@@ -9,6 +9,9 @@ venv/
 /release/
 /FolderBridge.exe
 /local-private/
+/_tmp/
+/artifacts/
+/tmp/
 /external-skills/
 /Plugins/extensions/debate-judge-adapter/
 /Plugins/skill-packs/folderbridge-discipline/

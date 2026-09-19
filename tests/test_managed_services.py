@@ -7,12 +7,17 @@ from pathlib import Path
 from unittest import mock
 
 from folderbridge_mcp.managed_services import (
+    ChatGPTWebLLMServiceConfig,
+    ChatGPTWebLLMServiceController,
     ComfyUIServiceConfig,
     ComfyUIServiceController,
     ManagedServiceError,
     ManagedServiceManager,
     detect_comfyui_install,
+    default_managed_service_manager,
+    load_chatgpt_web_llm_service_config,
     load_comfyui_service_config,
+    save_chatgpt_web_llm_service_config,
     save_comfyui_service_config,
 )
 
@@ -265,6 +270,140 @@ class ManagedServiceTests(unittest.TestCase):
         state = controller.ensure_auto_started()
         self.assertEqual(state["reason"], "path-required")
         self.assertEqual(spawned, [])
+
+    def test_chatgpt_service_config_persists_only_safe_declarative_settings(self) -> None:
+        path = self.base / "chatgpt" / "launcher-service.json"
+        save_chatgpt_web_llm_service_config(
+            ChatGPTWebLLMServiceConfig(auto_start=True, max_parallel=4, response_timeout_seconds=900),
+            path,
+        )
+        loaded = load_chatgpt_web_llm_service_config(path)
+        self.assertTrue(loaded.auto_start)
+        self.assertEqual(loaded.max_parallel, 4)
+        self.assertEqual(loaded.response_timeout_seconds, 900)
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        self.assertEqual(set(raw), {"version", "auto_start", "max_parallel", "response_timeout_seconds"})
+        serialized = path.read_text(encoding="utf-8").lower()
+        self.assertNotIn("pid", serialized)
+        self.assertNotIn("api_key", serialized)
+        self.assertNotIn("command", serialized)
+
+    def test_chatgpt_ui_contract_is_one_click_without_arbitrary_install_path(self) -> None:
+        controller = ChatGPTWebLLMServiceController(mock.Mock(), config_path=self.base / "chatgpt.json")
+        spec = controller.ui_spec()
+        self.assertFalse(spec["requires_install_root"])
+        self.assertFalse(spec["select_directory"])
+        self.assertTrue(spec["supports_restart"])
+        self.assertTrue(spec["supports_open_status"])
+        self.assertTrue(spec["supports_open_login"])
+        self.assertTrue(spec["supports_probe"])
+        self.assertTrue(spec["show_parallel_control"])
+
+    def test_chatgpt_probe_uses_local_temp_key_and_requires_exact_json_result(self) -> None:
+        controller = ChatGPTWebLLMServiceController(mock.Mock(), config_path=self.base / "chatgpt.json")
+        live_state = {
+            "ready": True,
+            "version_match": True,
+            "api_key": "unit-temp-key",
+            "online": True,
+        }
+        envelope = {
+            "choices": [{"message": {"content": '{"ok":true,"adapter_probe":"pass"}'}}]
+        }
+        with mock.patch.object(controller, "status", return_value=live_state), mock.patch.object(
+            controller, "_http_json", return_value=envelope
+        ) as request:
+            result = controller.probe()
+        self.assertTrue(result["probe_passed"])
+        self.assertEqual(result["probe_response"], {"ok": True, "adapter_probe": "pass"})
+        request.assert_called_once()
+        args, kwargs = request.call_args
+        self.assertEqual(args, ("POST", "/v1/chat/completions"))
+        self.assertEqual(kwargs["token"], "unit-temp-key")
+        self.assertEqual(kwargs["timeout"], 180.0)
+        self.assertEqual(kwargs["body"]["response_format"], {"type": "json_object"})
+        self.assertNotIn("unit-temp-key", str(result))
+
+    def test_chatgpt_status_page_must_match_current_temp_key_and_uses_fresh_browser_url(self) -> None:
+        state_dir = self.base / "standalone"
+        state_dir.mkdir()
+        page = state_dir / "status.html"
+        page.write_text('<input value="current-temp-key">', encoding="utf-8")
+        controller = ChatGPTWebLLMServiceController(
+            mock.Mock(),
+            config_path=self.base / "chatgpt.json",
+            standalone_state_dir=state_dir,
+        )
+        live_state = {"online": True, "version_match": True, "api_key": "current-temp-key"}
+        with mock.patch.object(controller, "status", return_value=live_state), mock.patch(
+            "webbrowser.open", return_value=True
+        ) as browser_open:
+            result = controller.open_status_page()
+        self.assertTrue(result["opened_status"])
+        opened_url = browser_open.call_args.args[0]
+        self.assertTrue(opened_url.startswith(page.resolve().as_uri() + "?v="))
+        self.assertEqual(browser_open.call_args.kwargs["new"], 2)
+
+    def test_chatgpt_status_page_rejects_stale_temp_key(self) -> None:
+        state_dir = self.base / "standalone"
+        state_dir.mkdir()
+        (state_dir / "status.html").write_text('<input value="old-temp-key">', encoding="utf-8")
+        controller = ChatGPTWebLLMServiceController(
+            mock.Mock(),
+            config_path=self.base / "chatgpt.json",
+            standalone_state_dir=state_dir,
+        )
+        live_state = {"online": True, "version_match": True, "api_key": "current-temp-key"}
+        with mock.patch.object(controller, "status", return_value=live_state):
+            with self.assertRaisesRegex(ManagedServiceError, "API Key 不一致"):
+                controller.open_status_page(wait_seconds=0)
+
+    def test_chatgpt_start_removes_previous_status_page_before_spawning(self) -> None:
+        state_dir = self.base / "standalone"
+        state_dir.mkdir()
+        stale_page = state_dir / "status.html"
+        stale_page.write_text("stale-status", encoding="utf-8")
+        process = FakeProcess()
+        controller = ChatGPTWebLLMServiceController(
+            mock.Mock(),
+            config_path=self.base / "chatgpt.json",
+            standalone_state_dir=state_dir,
+            popen_factory=lambda *_args, **_kwargs: process,
+        )
+        offline = {"online": False, "owned": False, "version_match": False}
+        online = {"online": True, "owned": True, "version_match": True, "ready": True}
+        record = mock.Mock()
+        record.path = self.base
+        with mock.patch.object(controller, "status", side_effect=[offline, online]), mock.patch.object(
+            controller, "_installed_record", return_value=(record, {"trusted": True, "enabled": True})
+        ), mock.patch.object(controller, "_assert_start_ports_available"), mock.patch.object(
+            controller, "_python_prefix", return_value=["python"]
+        ), mock.patch.object(controller, "open_status_page", return_value={"opened_status": True}):
+            result = controller.start(ready_timeout_seconds=1)
+        self.assertTrue(result["started"])
+        self.assertFalse(stale_page.exists())
+
+    def test_chatgpt_unknown_busy_port_fails_closed_without_pid_discovery(self) -> None:
+        controller = ChatGPTWebLLMServiceController(mock.Mock(), config_path=self.base / "chatgpt.json")
+        with mock.patch.object(ChatGPTWebLLMServiceController, "_port_available", side_effect=[False, True]):
+            with self.assertRaisesRegex(ManagedServiceError, "不会按端口强杀陌生 PID"):
+                controller._assert_start_ports_available()
+
+    def test_chatgpt_restart_refuses_external_instance_without_stop_or_start(self) -> None:
+        controller = ChatGPTWebLLMServiceController(mock.Mock(), config_path=self.base / "chatgpt.json")
+        with mock.patch.object(controller, "status", return_value={"online": True, "owned": False}), mock.patch.object(
+            controller, "stop"
+        ) as stop, mock.patch.object(controller, "start") as start:
+            with self.assertRaisesRegex(ManagedServiceError, "外部实例"):
+                controller.restart()
+        stop.assert_not_called()
+        start.assert_not_called()
+
+    def test_default_manager_adds_chatgpt_controller_only_when_registry_is_available(self) -> None:
+        without_registry = default_managed_service_manager()
+        self.assertIsNone(without_registry.controller("chatgpt-web-llm-adapter"))
+        with_registry = default_managed_service_manager(mock.Mock())
+        self.assertIsInstance(with_registry.controller("chatgpt-web-llm-adapter"), ChatGPTWebLLMServiceController)
 
     def test_manager_shutdown_follows_loaded_extension_order(self) -> None:
         order: list[str] = []
