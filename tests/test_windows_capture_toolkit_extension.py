@@ -178,7 +178,10 @@ class WindowsCapturePureFunctionTests(unittest.TestCase):
             self.assertNotEqual(sha1, sha2)
 
 
-@unittest.skipUnless(os.name == "nt", "live enumeration requires Windows")
+@unittest.skipUnless(
+    os.name == "nt" and os.environ.get("GITHUB_ACTIONS") != "true",
+    "live enumeration requires an interactive Windows desktop",
+)
 class WindowsCaptureLiveReadOnlyTests(unittest.TestCase):
     def test_status_and_monitor_enumeration_are_available(self):
         status = plugin._status()
