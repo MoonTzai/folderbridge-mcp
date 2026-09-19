@@ -68,7 +68,30 @@ jobs:
         run: python -m pip install -r packaging/requirements-build.txt
 
       - name: Run full regression suite
-        run: python -m unittest discover -s tests -p "test_*.py" -v
+        shell: pwsh
+        run: |
+          $log = Join-Path $env:RUNNER_TEMP "folderbridge-unittest.log"
+          & python -m unittest discover -s tests -p "test_*.py" -v 2>&1 | Tee-Object -FilePath $log
+          $exitCode = $LASTEXITCODE
+          if ($exitCode -ne 0) {
+            $failureLines = @(
+              Select-String -LiteralPath $log -Pattern '^(FAIL|ERROR): ' |
+              ForEach-Object { $_.Line }
+            )
+            if ($failureLines.Count -eq 0) {
+              $failureLines = @("unittest exited with code $exitCode; see diagnostic tail below")
+            }
+            foreach ($line in $failureLines) {
+              $escaped = $line.Replace('%', '%25').Replace([char]13, '%0D').Replace([char]10, '%0A')
+              Write-Host "::error title=FolderBridge unit test failure::$escaped"
+            }
+            $tail = @(Get-Content -LiteralPath $log -Tail 120)
+            Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Value "### FolderBridge regression failure"
+            Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Value '```text'
+            Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Value ($tail -join [Environment]::NewLine)
+            Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Value '```'
+            exit $exitCode
+          }
 
       - name: Build Windows x64 release
         shell: pwsh
