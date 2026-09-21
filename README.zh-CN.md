@@ -50,6 +50,12 @@ Skill Pack 是另一条扩展轴，主要承载**方法论、领域知识、审�
 
 公开 Pack 源码位于 [`Plugins/skill-packs/`](Plugins/skill-packs/)。如果只是希望加入项目方法、领域规则或工作规范，可以使用 Skill Pack 而不给它任何可执行权限；只有确实需要本地动作、进程或 API 集成时，才使用 Extension。
 
+## 0.8.39 重点更新
+
+- **单个工作区损坏不再拖死 `server_info`：** 若某个已配置目录在运行中被删除、移动或暂时不可达，只把该 workspace 标为异常，其它健康 workspace 继续正常汇报，不再让整个总状态接口一起崩溃。
+- **不再只报裸 `FileNotFoundError`：** 每个 workspace 现在明确返回 `available` 与有界 `diagnostics`，顶层新增 `healthy` / `issues`，可直接看到失败 scope、stage、code、异常类型和受影响路径；缺失目录会直接报告 `WORKSPACE_ROOT_MISSING`。
+- **诊断失败也留下可追踪证据：** `server_info` 的异常会以 warning 写入 Flight Recorder，但不会记录完整本地路径；若 FolderBridge 启动前 workspace 就已不存在或不可访问，启动校验也会直接给出具体路径。新增运行中删除 workspace、全局 Skill 汇总异常、启动前目录缺失三类回归测试。
+
 ## 0.8.38 重点更新
 
 - **公开插件源码／Release 对齐：** 当前公开外源 Extension 目录扩展为 11 个；`storyboard-chatgpt-web 0.2.0` 与 `windows-capture-toolkit 0.1.3` 正式进入仓库和 Release 面，与已经公开的 ChatGPT Web LLM Adapter 一起按明确发行白名单打包。Release 固定为 1 个 Windows 主程序 + 11 个 Plugin ZIP；SHA sidecar 仍只用于 CI，私有 Debate Judge adapter 继续硬排除。

@@ -50,6 +50,12 @@ The public source and installation layout is under [`Plugins/extensions/`](Plugi
 
 Public Pack source lives under [`Plugins/skill-packs/`](Plugins/skill-packs/). A custom Pack can add project-specific methodology without receiving executable permissions, while an Extension is the right mechanism when the integration needs bounded local actions or external-process/API access.
 
+## 0.8.39 highlights
+
+- **`server_info` no longer goes blind when one workspace breaks:** a workspace removed or made unavailable after startup is isolated to that workspace instead of crashing the whole server summary. Healthy workspaces continue to report normally.
+- **Actionable diagnostics instead of a bare `FileNotFoundError`:** each workspace now exposes `available` and bounded `diagnostics`; top-level `healthy` / `issues` identify the failing scope, stage, code, exception type, and affected path. Missing roots report `WORKSPACE_ROOT_MISSING` directly.
+- **Failure evidence is preserved:** `server_info` issues are recorded as warning events in the Flight Recorder without storing full local paths, while startup-time workspace validation names missing/inaccessible paths directly. Regression coverage locks the runtime-removal, global-summary-failure, and pre-start missing-root cases.
+
 ## 0.8.38 highlights
 
 - **Public plugin source/Release alignment:** the public external Extension catalog is now 11 plugins. `storyboard-chatgpt-web 0.2.0` and `windows-capture-toolkit 0.1.3` join the repository/Release surface alongside the already-public ChatGPT Web LLM Adapter; curated Releases contain one Windows executable plus 11 Plugin ZIPs, while SHA sidecars remain CI-only and the private Debate Judge adapter remains excluded.

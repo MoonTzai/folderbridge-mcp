@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import hashlib
 import json
+import shutil
 import subprocess
 import sys
 import tempfile
 import threading
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from folderbridge_mcp.cli import build_parser
 from folderbridge_mcp.config import load_config
@@ -544,6 +546,56 @@ class McpWorkflowTests(unittest.TestCase):
 
         workspace_tool = next(tool for tool in runtime.list_tools() if tool["name"] == "workspace")
         self.assertIn("workspace_id", workspace_tool["inputSchema"]["required"])
+
+    def test_server_info_survives_workspace_removed_after_runtime_start(self) -> None:
+        second = Path(self.temporary.name) / "removed-after-start"
+        second.mkdir()
+        runtime = ToolRuntime.from_roots((self.workspace, second), capabilities=["test", "build"])
+        removed_id = next(
+            item["workspace_id"]
+            for item in runtime.call("server_info", {})["structuredContent"]["workspaces"]
+            if item["name"] == second.name
+        )
+
+        shutil.rmtree(second)
+        result = runtime.call("server_info", {})
+
+        self.assertFalse(result["isError"])
+        info = result["structuredContent"]
+        self.assertEqual(info["workspace_count"], 2)
+        self.assertFalse(info["healthy"])
+        removed = next(item for item in info["workspaces"] if item["workspace_id"] == removed_id)
+        self.assertFalse(removed["available"])
+        self.assertEqual(removed["unavailable_reason"], "WORKSPACE_ROOT_MISSING")
+        self.assertTrue(all(not item["available"] for item in removed["capabilities"]))
+        self.assertEqual(removed["extensions"]["installed"], [])
+        diagnostic = removed["diagnostics"][0]
+        self.assertEqual(diagnostic["stage"], "workspace-root-check")
+        self.assertEqual(diagnostic["code"], "WORKSPACE_ROOT_MISSING")
+        self.assertEqual(diagnostic["error_type"], "FileNotFoundError")
+        self.assertEqual(Path(diagnostic["path"]), second)
+        issue = next(item for item in info["issues"] if item.get("workspace_id") == removed_id)
+        self.assertEqual(issue["scope"], "workspace")
+        self.assertEqual(issue["path"], str(second))
+        self.assertIn(str(second), issue["message"])
+
+    def test_server_info_reports_global_component_failure_without_crashing(self) -> None:
+        runtime = ToolRuntime(self.workspace, load_config(self.workspace))
+        failure = FileNotFoundError(2, "missing", str(self.workspace / "missing-skill-pack"))
+
+        with mock.patch.object(runtime, "_skill_summary", side_effect=failure):
+            result = runtime.call("server_info", {})
+
+        self.assertFalse(result["isError"])
+        info = result["structuredContent"]
+        self.assertFalse(info["healthy"])
+        issue = next(item for item in info["issues"] if item["code"] == "SKILL_SUMMARY_FAILED")
+        self.assertEqual(issue["scope"], "server")
+        self.assertEqual(issue["stage"], "skill-summary")
+        self.assertEqual(issue["error_type"], "FileNotFoundError")
+        self.assertEqual(issue["path"], str(self.workspace / "missing-skill-pack"))
+        self.assertIn("missing-skill-pack", issue["message"])
+        self.assertEqual(info["skill_engine"]["error_count"], 1)
 
     def test_skills_cli_reports_bundled_pack_as_json(self) -> None:
         completed = subprocess.run(

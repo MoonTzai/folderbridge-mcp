@@ -59,6 +59,14 @@ class ConfigAndTaskTests(unittest.TestCase):
         with self.assertRaisesRegex(ConfigError, "too broad"):
             canonical_workspace(Path(self.root.anchor))
 
+    def test_missing_workspace_reports_exact_path(self) -> None:
+        missing = self.base / "missing-workspace"
+        with self.assertRaises(ConfigError) as raised:
+            canonical_workspace(missing)
+        message = str(raised.exception)
+        self.assertIn("Workspace path does not exist", message)
+        self.assertIn(str(missing), message)
+
     def test_workspace_set_rejects_duplicates_and_overlaps(self) -> None:
         child = self.root / "child"
         child.mkdir()

@@ -57,7 +57,18 @@ class ProjectConfig:
 
 
 def canonical_workspace(raw: str | os.PathLike[str]) -> Path:
-    root = Path(raw).expanduser().resolve(strict=True)
+    candidate = Path(raw).expanduser()
+    try:
+        root = candidate.resolve(strict=True)
+    except FileNotFoundError as exc:
+        missing = getattr(exc, "filename", None) or candidate
+        raise ConfigError(f"Workspace path does not exist: {missing}") from exc
+    except PermissionError as exc:
+        denied = getattr(exc, "filename", None) or candidate
+        raise ConfigError(f"Workspace path is not accessible: {denied}") from exc
+    except OSError as exc:
+        failed = getattr(exc, "filename", None) or candidate
+        raise ConfigError(f"Cannot resolve workspace path {failed}: {exc}") from exc
     if not root.is_dir():
         raise ConfigError(f"Workspace is not a directory: {root}")
     anchor = Path(root.anchor).resolve(strict=True)

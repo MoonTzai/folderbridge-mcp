@@ -2,6 +2,13 @@
 
 All notable changes to FolderBridge MCP are documented here.
 
+## 0.8.39 — 2026-09-22
+
+- Hardened `server_info` so one broken workspace or summary component can no longer blind the whole diagnostic surface. Each workspace now reports `available` plus bounded `diagnostics`, while the top-level response exposes `healthy` and aggregated `issues`; healthy workspaces continue to report normally even when one configured root disappears after startup.
+- Added precise workspace-root diagnostics for missing, inaccessible, resolution-failed, or rebound roots. Missing roots now surface `WORKSPACE_ROOT_MISSING` with the failing stage, exception type, bounded OS error metadata, and the exact affected path instead of collapsing into a generic `INTERNAL_ERROR: FileNotFoundError`. Server-level Extension/Skill summary failures are likewise isolated and reported explicitly.
+- `server_info` issues are mirrored into the Flight Recorder as warning events without recording full local paths, so a failed diagnostic no longer leaves `flight_recorder(errors)` empty. Startup-time workspace validation now also turns missing/inaccessible paths into clear `ConfigError` messages that name the exact path.
+- Added regressions for a workspace removed after runtime start, a failing global Skill summary, and a workspace already missing before startup. Final local Windows source regression: **770 tests GREEN, 3 skipped**. The rebuilt Windows bundle reports `folderbridge-mcp 0.8.39`; Release publication keeps the existing curated surface of one Windows main program plus 11 optional public Plugin ZIPs, with SHA sidecars remaining build/CI-only.
+
 ## 0.8.38 — 2026-09-18
 
 - Synchronized the public Extension source and Release surface with accepted local runtimes: **Storyboard ChatGPT Web 0.2.0** and **Windows Capture Toolkit 0.1.3** are now public optional plugins alongside ChatGPT Web LLM Adapter 0.3.2. The public catalog is 11 external Extensions; curated Releases contain one Windows executable plus 11 Plugin ZIPs. Explicit minimal file allowlists are member-verified for LLM Adapter, Storyboard ChatGPT Web, and Windows Capture, while the private Debate Judge adapter remains excluded.

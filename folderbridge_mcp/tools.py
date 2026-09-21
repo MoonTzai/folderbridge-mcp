@@ -630,11 +630,70 @@ class ToolRuntime:
 
     def _server_info(self, arguments: dict[str, Any]) -> dict[str, Any]:
         _require_only(arguments, set())
-        summaries = [self._target_summary(target) for target in self._targets]
+        summaries: list[dict[str, Any]] = []
+        issues: list[dict[str, Any]] = []
+        for target in self._targets:
+            try:
+                summary = self._target_summary(target)
+            except Exception as exc:
+                diagnostic = self._diagnostic(
+                    stage="workspace-summary",
+                    code="WORKSPACE_SUMMARY_FAILED",
+                    message=f"Workspace summary failed for {target.root.name}: {type(exc).__name__}: {exc}",
+                    exc=exc,
+                    path=getattr(exc, "filename", None) or target.root,
+                )
+                summary = self._unavailable_target_summary(target, diagnostic)
+            summaries.append(summary)
+            for diagnostic in summary.get("diagnostics", []):
+                issues.append({
+                    "scope": "workspace",
+                    "workspace": summary["name"],
+                    "workspace_id": summary["workspace_id"],
+                    **diagnostic,
+                })
+
+        try:
+            global_extensions = self._extension_summary(None)
+        except Exception as exc:
+            diagnostic = self._diagnostic(
+                stage="global-extension-summary",
+                code="GLOBAL_EXTENSION_SUMMARY_FAILED",
+                message=f"Global Extension summary failed: {type(exc).__name__}: {exc}",
+                exc=exc,
+                path=getattr(exc, "filename", None),
+            )
+            issues.append({"scope": "server", **diagnostic})
+            global_extensions = {
+                "installed": [],
+                "errors": [{"code": diagnostic["code"], "message": diagnostic["message"]}],
+            }
+
+        try:
+            skill_engine = self._skill_summary()
+        except Exception as exc:
+            diagnostic = self._diagnostic(
+                stage="skill-summary",
+                code="SKILL_SUMMARY_FAILED",
+                message=f"Skill summary failed: {type(exc).__name__}: {exc}",
+                exc=exc,
+                path=getattr(exc, "filename", None),
+            )
+            issues.append({"scope": "server", **diagnostic})
+            skill_engine = {
+                "gateway": "extension/skill-engine",
+                "automatic_invocation": "model-routed-not-forced",
+                "packs": [],
+                "error_count": 1,
+                "errors": [{"code": diagnostic["code"], "message": diagnostic["message"]}],
+            }
+
         result: dict[str, Any] = {
             "version": __version__,
             "workspace_count": len(summaries),
             "workspaces": summaries,
+            "issues": issues,
+            "healthy": not issues,
             "mode": "read-only" if self.read_only else "read/write",
             "network_listener": False,
             "telemetry": False,
@@ -645,8 +704,8 @@ class ToolRuntime:
                 "flight_recorder", "workspace", "file_info", "pptx_inspect", "image_open", "extension",
                 *([] if self.read_only else ["edit_file", "write_file", "file_ops"]),
             ],
-            "extensions": self._extension_summary(None),
-            "skill_engine": self._skill_summary(),
+            "extensions": global_extensions,
+            "skill_engine": skill_engine,
             "flight_recorder": {
                 "enabled": True,
                 "window_minutes": 15,
@@ -732,6 +791,19 @@ class ToolRuntime:
                 "skill_policy": "Skill Packs are bounded read-only methodology text. Bundled packs are release-trusted; external packs remain model-invisible until exact-hash local approval. Skill text is never executed, but it can influence model behavior.",
             },
         }
+        for issue in issues:
+            try:
+                self.flight_recorder.record(
+                    "server_info.issue",
+                    severity="warning",
+                    scope=issue.get("scope"),
+                    stage=issue.get("stage"),
+                    code=issue.get("code"),
+                    error_type=issue.get("error_type"),
+                    workspace_id=issue.get("workspace_id"),
+                )
+            except Exception:
+                pass
         if len(summaries) == 1:
             result.update(summaries[0])
             result["workspace"] = summaries[0]["name"]
@@ -759,11 +831,153 @@ class ToolRuntime:
                 raise ToolError("INVALID_ARGUMENT", str(exc)) from exc
         raise ToolError("INVALID_ARGUMENT", "action must be status, recent, or errors")
 
-    def _target_summary(self, target: _WorkspaceTarget) -> dict[str, Any]:
-        discovered = discover_capabilities(target.root)
+    @staticmethod
+    def _diagnostic(
+        *,
+        stage: str,
+        code: str,
+        message: str,
+        exc: BaseException | None = None,
+        path: Path | str | None = None,
+    ) -> dict[str, Any]:
+        bounded_message = message[:2000]
+        item: dict[str, Any] = {
+            "stage": stage,
+            "code": code,
+            "message": bounded_message,
+        }
+        if exc is not None:
+            item["error_type"] = type(exc).__name__
+            errno = getattr(exc, "errno", None)
+            winerror = getattr(exc, "winerror", None)
+            if isinstance(errno, int):
+                item["errno"] = errno
+            if isinstance(winerror, int):
+                item["winerror"] = winerror
+        if path is not None:
+            item["path"] = str(path)[:2048]
+        return item
+
+    @classmethod
+    def _target_root_diagnostic(cls, target: _WorkspaceTarget) -> tuple[bool, dict[str, Any] | None]:
+        try:
+            resolved = target.root.resolve(strict=True)
+        except FileNotFoundError as exc:
+            missing = getattr(exc, "filename", None) or target.root
+            return False, cls._diagnostic(
+                stage="workspace-root-check",
+                code="WORKSPACE_ROOT_MISSING",
+                message=f"Configured workspace root is missing: {missing}",
+                exc=exc,
+                path=missing,
+            )
+        except OSError as exc:
+            failed = getattr(exc, "filename", None) or target.root
+            return False, cls._diagnostic(
+                stage="workspace-root-check",
+                code="WORKSPACE_ROOT_OS_ERROR",
+                message=f"Configured workspace root is not accessible: {failed}",
+                exc=exc,
+                path=failed,
+            )
+        except RuntimeError as exc:
+            return False, cls._diagnostic(
+                stage="workspace-root-check",
+                code="WORKSPACE_ROOT_RESOLUTION_ERROR",
+                message=f"Configured workspace root could not be resolved: {target.root}",
+                exc=exc,
+                path=target.root,
+            )
+        if resolved != target.root or not resolved.is_dir():
+            return False, cls._diagnostic(
+                stage="workspace-root-check",
+                code="WORKSPACE_ROOT_CHANGED",
+                message=f"Configured workspace root no longer resolves to the bound directory: {target.root}",
+                path=target.root,
+            )
+        return True, None
+
+    def _unavailable_target_summary(
+        self,
+        target: _WorkspaceTarget,
+        diagnostic: dict[str, Any],
+    ) -> dict[str, Any]:
         return {
             "name": target.root.name,
             "workspace_id": target.workspace_id,
+            "available": False,
+            "unavailable_reason": diagnostic["code"],
+            "diagnostics": [diagnostic],
+            "task_config_trusted": False,
+            "tasks": [
+                {"name": task.name, "timeout_seconds": task.timeout_seconds}
+                for task in target.config.tasks.values()
+            ],
+            "capabilities": [
+                {"name": name, "available": False}
+                for name in self.capabilities
+            ],
+            "extensions": {
+                "installed": [],
+                "errors": [
+                    {
+                        "code": diagnostic["code"],
+                        "message": diagnostic["message"],
+                    }
+                ],
+            },
+        }
+
+    def _target_summary(self, target: _WorkspaceTarget) -> dict[str, Any]:
+        root_available, root_diagnostic = self._target_root_diagnostic(target)
+        if not root_available:
+            assert root_diagnostic is not None
+            return self._unavailable_target_summary(target, root_diagnostic)
+        try:
+            discovered = discover_capabilities(target.root)
+        except Exception as exc:
+            root_available, root_diagnostic = self._target_root_diagnostic(target)
+            if not root_available:
+                assert root_diagnostic is not None
+                return self._unavailable_target_summary(target, root_diagnostic)
+            diagnostic = self._diagnostic(
+                stage="capability-discovery",
+                code="CAPABILITY_DISCOVERY_FAILED",
+                message=f"Capability discovery failed for workspace {target.root.name}: {type(exc).__name__}: {exc}",
+                exc=exc,
+                path=getattr(exc, "filename", None),
+            )
+            discovered = {}
+            capability_diagnostics = [diagnostic]
+        else:
+            capability_diagnostics = []
+        try:
+            extensions = self._extension_summary(target.root)
+        except Exception as exc:
+            root_available, root_diagnostic = self._target_root_diagnostic(target)
+            if not root_available:
+                assert root_diagnostic is not None
+                return self._unavailable_target_summary(target, root_diagnostic)
+            diagnostic = self._diagnostic(
+                stage="extension-summary",
+                code="EXTENSION_SUMMARY_FAILED",
+                message=f"Extension summary failed for workspace {target.root.name}: {type(exc).__name__}: {exc}",
+                exc=exc,
+                path=getattr(exc, "filename", None),
+            )
+            extensions = {
+                "installed": [],
+                "errors": [{"code": diagnostic["code"], "message": diagnostic["message"]}],
+            }
+            extension_diagnostics = [diagnostic]
+        else:
+            extension_diagnostics = []
+        diagnostics = [*capability_diagnostics, *extension_diagnostics]
+        return {
+            "name": target.root.name,
+            "workspace_id": target.workspace_id,
+            "available": True,
+            "diagnostics": diagnostics,
             "task_config_trusted": config_is_trusted(target.root, target.config),
             "tasks": [
                 {"name": task.name, "timeout_seconds": task.timeout_seconds}
@@ -784,7 +998,7 @@ class ToolRuntime:
                 }
                 for name in self.capabilities
             ],
-            "extensions": self._extension_summary(target.root),
+            "extensions": extensions,
         }
 
     def _extension_summary(self, workspace: Path | None) -> dict[str, Any]:
