@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+import hashlib
 import json
+import queue
 import subprocess
 import sys
+import threading
+import time
 import tempfile
 import tomllib
 from pathlib import Path
@@ -55,7 +59,7 @@ def _json(executable: Path, *args: str) -> dict[str, Any]:
     return payload
 
 
-def _mcp_tool_catalog(executable: Path) -> dict[str, dict[str, Any]]:
+def _mcp_lifecycle_smoke(executable: Path) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     with tempfile.TemporaryDirectory(prefix="folderbridge-bundle-smoke-") as temporary:
         requests = [
             {
@@ -69,11 +73,13 @@ def _mcp_tool_catalog(executable: Path) -> dict[str, dict[str, Any]]:
                 },
             },
             {"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}},
+            {
+                "jsonrpc": "2.0",
+                "id": 3,
+                "method": "tools/call",
+                "params": {"name": "server_info", "arguments": {}},
+            },
         ]
-        payload = b"".join(
-            json.dumps(request, separators=(",", ":")).encode("utf-8") + b"\n"
-            for request in requests
-        )
         process = subprocess.Popen(
             [
                 str(executable),
@@ -88,32 +94,89 @@ def _mcp_tool_catalog(executable: Path) -> dict[str, dict[str, Any]]:
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
         )
-        try:
-            stdout, stderr = process.communicate(payload, timeout=30)
-        except subprocess.TimeoutExpired:
+        if process.stdin is None or process.stdout is None or process.stderr is None:
             process.kill()
-            process.communicate()
-            raise RuntimeError("packaged MCP tools/list smoke timed out")
-        if process.returncode != 0:
-            diagnostics = stderr.decode("utf-8", errors="replace")[-2000:]
-            raise RuntimeError(f"packaged MCP tools/list smoke failed with exit code {process.returncode}: {diagnostics}")
-        responses: dict[int, dict[str, Any]] = {}
-        for raw in stdout.splitlines():
+            process.wait()
+            raise RuntimeError("packaged MCP lifecycle smoke could not open stdio pipes")
+
+        response_lines: queue.Queue[bytes | None] = queue.Queue()
+
+        def read_stdout() -> None:
             try:
-                response = json.loads(raw)
-            except (UnicodeDecodeError, json.JSONDecodeError, ValueError):
-                continue
-            if isinstance(response, dict) and isinstance(response.get("id"), int):
-                responses[int(response["id"])] = response
+                for raw in iter(process.stdout.readline, b""):
+                    response_lines.put(raw)
+            finally:
+                response_lines.put(None)
+
+        reader = threading.Thread(target=read_stdout, name="bundle-mcp-stdout", daemon=True)
+        reader.start()
+
+        responses: dict[int, dict[str, Any]] = {}
+        try:
+            for request in requests:
+                request_id = int(request["id"])
+                encoded = json.dumps(request, separators=(",", ":")).encode("utf-8") + b"\n"
+                process.stdin.write(encoded)
+                process.stdin.flush()
+
+                deadline = time.monotonic() + 30.0
+                while request_id not in responses:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise RuntimeError(
+                            f"packaged MCP lifecycle smoke timed out waiting for response {request_id}"
+                        )
+                    try:
+                        raw = response_lines.get(timeout=remaining)
+                    except queue.Empty as exc:
+                        raise RuntimeError(
+                            f"packaged MCP lifecycle smoke timed out waiting for response {request_id}"
+                        ) from exc
+                    if raw is None:
+                        diagnostics = process.stderr.read().decode("utf-8", errors="replace")[-2000:]
+                        raise RuntimeError(
+                            f"packaged MCP lifecycle smoke closed before response {request_id}: {diagnostics}"
+                        )
+                    try:
+                        response = json.loads(raw)
+                    except (UnicodeDecodeError, json.JSONDecodeError, ValueError):
+                        continue
+                    if isinstance(response, dict) and isinstance(response.get("id"), int):
+                        responses[int(response["id"])] = response
+
+            # Only retire stdin after all three active-runtime observations have
+            # been received. Closing it earlier races EOF shutdown against queued
+            # control requests and can falsely report runtime_state=shutting_down.
+            process.stdin.close()
+            process.wait(timeout=15)
+        except (BrokenPipeError, OSError, subprocess.TimeoutExpired, RuntimeError):
+            if process.poll() is None:
+                process.kill()
+                process.wait()
+            raise
+        finally:
+            reader.join(timeout=1)
+
+        if process.returncode != 0:
+            diagnostics = process.stderr.read().decode("utf-8", errors="replace")[-2000:]
+            raise RuntimeError(
+                f"packaged MCP lifecycle smoke failed with exit code {process.returncode}: {diagnostics}"
+            )
+
         catalog_response = responses.get(2)
         tools = catalog_response.get("result", {}).get("tools") if isinstance(catalog_response, dict) else None
-        if not isinstance(tools, list):
-            raise RuntimeError("packaged MCP tools/list did not return a tool catalog")
-        return {
-            str(tool.get("name")): tool
-            for tool in tools
-            if isinstance(tool, dict) and isinstance(tool.get("name"), str)
-        }
+        if not isinstance(tools, list) or not all(isinstance(tool, dict) for tool in tools):
+            raise RuntimeError("packaged MCP tools/list did not return a valid tool catalog")
+
+        info_response = responses.get(3)
+        info = (
+            info_response.get("result", {}).get("structuredContent")
+            if isinstance(info_response, dict)
+            else None
+        )
+        if not isinstance(info, dict):
+            raise RuntimeError("packaged MCP server_info did not return structuredContent")
+        return tools, info
 
 
 def _action_enum(tool: dict[str, Any]) -> set[str]:
@@ -136,7 +199,12 @@ def verify(executable: Path) -> dict[str, Any]:
     if version != expected_version:
         raise RuntimeError(f"version smoke mismatch: expected {expected_version!r}, got {version!r}")
 
-    mcp_tools = _mcp_tool_catalog(executable)
+    mcp_tool_list, mcp_info = _mcp_lifecycle_smoke(executable)
+    mcp_tools = {
+        str(tool.get("name")): tool
+        for tool in mcp_tool_list
+        if isinstance(tool.get("name"), str)
+    }
     required_tools = {"flight_recorder", "extension", "file_ops", "run_task", "run_capability"}
     missing_tools = sorted(required_tools.difference(mcp_tools))
     if missing_tools:
@@ -147,6 +215,51 @@ def verify(executable: Path) -> dict[str, Any]:
     for tool_name in ("run_task", "run_capability"):
         if _action_enum(mcp_tools[tool_name]) != expected_task_actions:
             raise RuntimeError(f"packaged {tool_name} Job-management action contract mismatch")
+
+    continuity = mcp_info.get("continuity")
+    if not isinstance(continuity, dict):
+        raise RuntimeError("packaged server_info is missing continuity metadata")
+    if continuity.get("runtime_state") != "ready":
+        raise RuntimeError(f"packaged runtime_state mismatch: {continuity.get('runtime_state')!r}")
+    catalog_revision = continuity.get("catalog_revision")
+    if isinstance(catalog_revision, bool) or not isinstance(catalog_revision, int) or catalog_revision < 1:
+        raise RuntimeError(f"packaged catalog_revision is invalid: {catalog_revision!r}")
+    if continuity.get("diagnostics_available") is not True:
+        raise RuntimeError("packaged diagnostics_available must be true")
+
+    expected_catalog_sha256 = hashlib.sha256(
+        json.dumps(
+            mcp_tool_list,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    if continuity.get("catalog_sha256") != expected_catalog_sha256:
+        raise RuntimeError("packaged continuity catalog_sha256 does not match tools/list")
+
+    tool_surface = mcp_info.get("tool_surface")
+    if not isinstance(tool_surface, dict):
+        raise RuntimeError("packaged server_info is missing tool_surface metadata")
+    expected_tool_names = [str(tool["name"]) for tool in mcp_tool_list]
+    if tool_surface.get("tool_names") != expected_tool_names:
+        raise RuntimeError("packaged tool_surface names do not match tools/list")
+    if tool_surface.get("tool_count") != len(expected_tool_names):
+        raise RuntimeError("packaged tool_surface count does not match tools/list")
+    if tool_surface.get("catalog_sha256") != expected_catalog_sha256:
+        raise RuntimeError("packaged tool_surface catalog_sha256 does not match tools/list")
+    if tool_surface.get("run_capability_exposed") is not True or tool_surface.get("run_task_exposed") is not True:
+        raise RuntimeError("packaged execution tool surface is incomplete")
+    if tool_surface.get("binding_consistent") is not True or tool_surface.get("binding_issues") != []:
+        raise RuntimeError(
+            f"packaged execution tool binding is inconsistent: {tool_surface.get('binding_issues')!r}"
+        )
+    if tool_surface.get("run_capability_names") != ["test"]:
+        raise RuntimeError("packaged run_capability enum does not match requested test capability")
+    if mcp_info.get("global_capabilities_enabled") != ["test"]:
+        raise RuntimeError("packaged server_info global capabilities do not match tools/list")
+    if mcp_info.get("task_execution_enabled") is not True:
+        raise RuntimeError("packaged server_info task execution flag does not match run_task exposure")
 
     extension_catalog = _json(executable, "extensions", "--json")
     extensions = extension_catalog.get("extensions")
@@ -263,6 +376,8 @@ def verify(executable: Path) -> dict[str, Any]:
         "bundled_skill_packs": sorted(bundled_skill_packs),
         "engineering_skills": sorted(actual_skills),
         "mcp_job_management": True,
+        "mcp_continuity": continuity,
+        "mcp_tool_surface": tool_surface,
     }
 
 

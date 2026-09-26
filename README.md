@@ -50,6 +50,12 @@ The public source and installation layout is under [`Plugins/extensions/`](Plugi
 
 Public Pack source lives under [`Plugins/skill-packs/`](Plugins/skill-packs/). A custom Pack can add project-specific methodology without receiving executable permissions, while an Extension is the right mechanism when the integration needs bounded local actions or external-process/API access.
 
+## 0.8.40 highlights
+
+- **Lifecycle truth is now self-describing:** `server_info` reports `tool_surface` plus `continuity.runtime_state`, `catalog_revision`, `diagnostics_available`, and the SHA-256 of the actual MCP tool catalog. Execution binding mismatches raise `TOOL_SURFACE_BINDING_FAILURE` instead of relying on capability declarations alone.
+- **Windows packaging now proves the real EXE surface:** the bundle verifier launches the newly built executable and checks `initialize → tools/list → server_info`, including exact tool-name/count/hash agreement and `run_capability` / `run_task` exposure before packaging can pass.
+- **Version identity is advanced to 0.8.40:** this prevents an older 0.8.39 runtime from being mistaken for the lifecycle-resilience candidate merely because both report the same semantic version.
+
 ## 0.8.39 highlights
 
 - **`server_info` no longer goes blind when one workspace breaks:** a workspace removed or made unavailable after startup is isolated to that workspace instead of crashing the whole server summary. Healthy workspaces continue to report normally.

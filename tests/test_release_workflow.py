@@ -36,6 +36,22 @@ class ReleaseWorkflowTests(unittest.TestCase):
         self.assertNotIn('"release/windows-x64/FolderBridge.exe.sha256"', text)
         self.assertNotIn("git-publisher", text.lower())
 
+    def test_windows_bundle_verifier_checks_mcp_lifecycle_continuity(self) -> None:
+        verifier = (ROOT / "scripts" / "verify_windows_bundle.py").read_text(encoding="utf-8")
+        self.assertIn('"method": "tools/list"', verifier)
+        self.assertIn('"name": "server_info"', verifier)
+        self.assertIn('"runtime_state"', verifier)
+        self.assertIn('"catalog_revision"', verifier)
+        self.assertIn('"diagnostics_available"', verifier)
+        self.assertIn('"catalog_sha256"', verifier)
+        self.assertIn('"tool_surface"', verifier)
+        self.assertIn('"binding_consistent"', verifier)
+        self.assertIn('"binding_issues"', verifier)
+        self.assertIn("process.stdin.write(encoded)", verifier)
+        self.assertIn("process.stdin.flush()", verifier)
+        self.assertNotIn("process.communicate(payload", verifier)
+        self.assertIn("Only retire stdin after all three active-runtime observations", verifier)
+
     def test_release_workflow_has_no_manual_or_tag_input_surface(self) -> None:
         text = WORKFLOW.read_text(encoding="utf-8")
         self.assertNotIn("workflow_dispatch", text)

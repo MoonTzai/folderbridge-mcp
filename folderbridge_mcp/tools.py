@@ -196,6 +196,9 @@ class ToolRuntime:
         self._workspace_mutations = WorkspaceMutationCoordinator(event_callback=self._record_workspace_mutation_event)
         self._shutdown_lock = threading.Lock()
         self._shutting_down = False
+        # Explicit schema generation marker for client/runtime continuity diagnostics.
+        # This is runtime metadata only; it never identifies a client conversation.
+        self.catalog_revision = 1
 
     @property
     def identity(self) -> dict[str, str]:
@@ -628,6 +631,33 @@ class ToolRuntime:
         except Exception as exc:  # keep protocol stdout clean while returning bounded diagnostics
             return error_result("INTERNAL_ERROR", f"Unexpected local tool failure: {type(exc).__name__}")
 
+    def _tool_surface_summary(self) -> dict[str, Any]:
+        tools = self.list_tools()
+        tool_names = [str(tool["name"]) for tool in tools]
+        run_capability = next((tool for tool in tools if tool.get("name") == "run_capability"), None)
+        capability_names: list[str] = []
+        if isinstance(run_capability, dict):
+            schema = run_capability.get("inputSchema")
+            properties = schema.get("properties") if isinstance(schema, dict) else None
+            name_schema = properties.get("name") if isinstance(properties, dict) else None
+            values = name_schema.get("enum") if isinstance(name_schema, dict) else None
+            if isinstance(values, list):
+                capability_names = [str(value) for value in values]
+        canonical_catalog = json.dumps(
+            tools,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        return {
+            "tool_count": len(tool_names),
+            "tool_names": tool_names,
+            "catalog_sha256": hashlib.sha256(canonical_catalog).hexdigest(),
+            "run_capability_exposed": "run_capability" in tool_names,
+            "run_capability_names": capability_names,
+            "run_task_exposed": "run_task" in tool_names,
+        }
+
     def _server_info(self, arguments: dict[str, Any]) -> dict[str, Any]:
         _require_only(arguments, set())
         summaries: list[dict[str, Any]] = []
@@ -687,6 +717,30 @@ class ToolRuntime:
                 "error_count": 1,
                 "errors": [{"code": diagnostic["code"], "message": diagnostic["message"]}],
             }
+
+        tool_surface = self._tool_surface_summary()
+        binding_issues: list[str] = []
+        expected_capability_names = list(self.execution_capabilities)
+        capability_exposed = bool(tool_surface["run_capability_exposed"])
+        if capability_exposed != bool(expected_capability_names):
+            binding_issues.append(
+                "run_capability_missing" if expected_capability_names else "run_capability_unexpected"
+            )
+        if tool_surface["run_capability_names"] != expected_capability_names:
+            binding_issues.append("run_capability_names_mismatch")
+        task_exposed = bool(tool_surface["run_task_exposed"])
+        if task_exposed != self.allow_tasks:
+            binding_issues.append("run_task_missing" if self.allow_tasks else "run_task_unexpected")
+        tool_surface["binding_consistent"] = not binding_issues
+        tool_surface["binding_issues"] = binding_issues
+        if binding_issues:
+            issues.append({
+                "scope": "server",
+                "stage": "tool-surface-binding",
+                "code": "TOOL_SURFACE_BINDING_FAILURE",
+                "message": "Advertised execution capability state does not match the actual MCP tool surface.",
+                "details": list(binding_issues),
+            })
 
         result: dict[str, Any] = {
             "version": __version__,
@@ -790,6 +844,15 @@ class ToolRuntime:
                 "extension_policy": "Extensions are hot-scanned, exact-hash approved, permission-declared, and executed out of process with bounded I/O. Only explicitly declared environment variables may cross the cleaned-environment boundary; the control-plane key is never inheritable. Foreground workers and host-owned Jobs retain workspace mutation protection until their worker process is confirmed exited; failed termination is exposed as termination_pending and reconciled by host-owned reapers. External plugin code is not an OS sandbox; use a VM/container for untrusted code.",
                 "skill_policy": "Skill Packs are bounded read-only methodology text. Bundled packs are release-trusted; external packs remain model-invisible until exact-hash local approval. Skill text is never executed, but it can influence model behavior.",
             },
+        }
+        with self._shutdown_lock:
+            runtime_state = "shutting_down" if self._shutting_down else "ready"
+        result["tool_surface"] = tool_surface
+        result["continuity"] = {
+            "runtime_state": runtime_state,
+            "catalog_revision": self.catalog_revision,
+            "diagnostics_available": "flight_recorder" in tool_surface["tool_names"],
+            "catalog_sha256": tool_surface["catalog_sha256"],
         }
         for issue in issues:
             try:

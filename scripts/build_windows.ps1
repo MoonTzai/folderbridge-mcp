@@ -228,6 +228,7 @@ try {
     }
 
     Write-Host "Built: $executable"
+    Write-Host "Bundle verification: $bundleSmoke"
     Write-Host "Smoke: $smoke"
     Write-Host "SHA-256: $hash"
 }

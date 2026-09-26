@@ -50,6 +50,12 @@ Skill Pack 是另一条扩展轴，主要承载**方法论、领域知识、审�
 
 公开 Pack 源码位于 [`Plugins/skill-packs/`](Plugins/skill-packs/)。如果只是希望加入项目方法、领域规则或工作规范，可以使用 Skill Pack 而不给它任何可执行权限；只有确实需要本地动作、进程或 API 集成时，才使用 Extension。
 
+## 0.8.40 重点更新
+
+- **生命周期真值可自描述：** `server_info` 新增 `tool_surface`，并通过 `continuity.runtime_state`、`catalog_revision`、`diagnostics_available` 与真实 MCP tool catalog 的 SHA-256 暴露运行时连续性；若能力声明与实际执行工具面不一致，会明确报告 `TOOL_SURFACE_BINDING_FAILURE`。
+- **Windows 打包直接验证真实 EXE：** bundle verifier 会启动刚生成的可执行文件，逐步执行 `initialize → tools/list → server_info`，核对工具名、数量、catalog hash 以及 `run_capability` / `run_task` 暴露是否一致，未通过则打包失败。
+- **版本身份提升到 0.8.40：** 避免旧 0.8.39 Runtime 与生命周期韧性候选因语义版本相同而被误认为同一实现。
+
 ## 0.8.39 重点更新
 
 - **单个工作区损坏不再拖死 `server_info`：** 若某个已配置目录在运行中被删除、移动或暂时不可达，只把该 workspace 标为异常，其它健康 workspace 继续正常汇报，不再让整个总状态接口一起崩溃。
