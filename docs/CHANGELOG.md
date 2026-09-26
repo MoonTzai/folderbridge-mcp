@@ -7,6 +7,7 @@ All notable changes to FolderBridge MCP are documented here.
 - Added canonical lifecycle-resilience metadata to `server_info`: `tool_surface` is derived from the same `list_tools()` result returned to MCP clients, while `continuity` reports `runtime_state`, `catalog_revision`, `diagnostics_available`, and the exact SHA-256 of that catalog. Declared execution state is cross-checked against actual `run_capability` / `run_task` exposure and reports `TOOL_SURFACE_BINDING_FAILURE` on mismatch.
 - Hardened the Windows bundle gate so packaging starts the newly generated `FolderBridge.exe` and verifies `initialize → tools/list → server_info` against the executable itself before accepting the artifact. The verifier checks lifecycle metadata, catalog hash/name/count equality, execution-tool schemas, and binding consistency rather than trusting source-side tests alone.
 - Advanced the release identity to **0.8.40** so a previously installed/running 0.8.39 binary cannot be mistaken for this lifecycle-resilience candidate solely because the semantic version string matches.
+- Final local release-candidate acceptance on the committed authority completed **778 tests GREEN (3 skipped)** and rebuilt the Windows x64 package through the real-EXE lifecycle gate before publication. Release publication remains CI-authoritative and separate from local Production Promotion.
 
 ## 0.8.39 — 2026-09-22
 
