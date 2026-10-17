@@ -9,6 +9,8 @@ All notable changes to FolderBridge MCP are documented here.
 - Carried forward the 0.8.43 local Node registration CLI/UI, fixed argv registration, explicit per-workspace task approval and bounded two-hour task/capability timeout handling.
 - Windows x64 bundle built and inspected locally from the canonical `folderbridge-mcp` repository; **818 tests passed, 4 conditional skips**. Existing installed 0.8.43 remains separately controllable until a normal application restart. The standard `scripts/build_windows.ps1` output paths are preserved for the GitHub Actions release workflow.
 
+- Public 0.8.44 release source now includes the verified GPT-SoVITS v0.2.2 Extension, matching its locally packaged v0.2.2 ZIP: dedicated actions, schema and effect-contract tests, and the installation script. Machine-specific handoffs, old binary backups and private Qwen regression remain local-only rather than being published to GitHub.
+
 ## 0.8.40 — 2026-09-26
 
 - Added canonical lifecycle-resilience metadata to `server_info`: `tool_surface` is derived from the same `list_tools()` result returned to MCP clients, while `continuity` reports `runtime_state`, `catalog_revision`, `diagnostics_available`, and the exact SHA-256 of that catalog. Declared execution state is cross-checked against actual `run_capability` / `run_task` exposure and reports `TOOL_SURFACE_BINDING_FAILURE` on mismatch.
