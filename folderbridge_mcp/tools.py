@@ -996,6 +996,11 @@ class ToolRuntime:
         if not root_available:
             assert root_diagnostic is not None
             return self._unavailable_target_summary(target, root_diagnostic)
+        # The workspace list is fixed at connection startup, but its locally
+        # approved task configuration can change while the MCP session remains up.
+        # Read current bytes for each status response; never reuse the startup
+        # task snapshot as authority for newly registered or revoked tasks.
+        target = self._fresh_task_target(target)
         try:
             discovered = discover_capabilities(target.root)
         except Exception as exc:
@@ -1129,6 +1134,19 @@ class ToolRuntime:
                 ],
             )
         return target
+
+    @staticmethod
+    def _fresh_task_target(target: _WorkspaceTarget) -> _WorkspaceTarget:
+        # Local file and trust SHA are re-evaluated without an MCP write/approve
+        # surface. A malformed/linked configuration must fail closed.
+        try:
+            current = load_config(target.root, required=False)
+        except (OSError, ValueError) as exc:
+            raise ToolError(
+                "TASK_CONFIG_REFRESH_FAILED",
+                "The current local task config could not be safely loaded; inspect it on this computer.",
+            ) from exc
+        return replace(target, config=current)
 
     @staticmethod
     def _scope_result(payload: dict[str, Any], target: _WorkspaceTarget) -> dict[str, Any]:
@@ -1692,6 +1710,7 @@ class ToolRuntime:
         name = arguments.get("name")
         if not isinstance(name, str):
             raise ToolError("INVALID_ARGUMENT", "name is required for run")
+        target = self._fresh_task_target(target)
         if not config_is_trusted(target.root, target.config):
             raise ToolError(
                 "CONFIG_NOT_TRUSTED",
@@ -1738,6 +1757,15 @@ class ToolRuntime:
             with self._shutdown_lock:
                 if self._shutting_down:
                     raise ToolError("SERVER_SHUTTING_DOWN", "FolderBridge is shutting down; new tasks are disabled.")
+                # A config or its local approval can change while waiting for
+                # the workspace lease. Recheck both before reserving/executing.
+                current = self._fresh_task_target(target)
+                if (current.config.sha256 != target.config.sha256 or
+                        not config_is_trusted(current.root, current.config)):
+                    raise ToolError(
+                        "TASK_CONFIG_CHANGED",
+                        "Task configuration or local approval changed during admission; retry after reviewing it locally.",
+                    )
                 owner_digest, owner_snapshot = self._task_operation_contract(
                     target,
                     name=name,

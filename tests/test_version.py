@@ -13,7 +13,7 @@ class VersionTests(unittest.TestCase):
         with (PROJECT_ROOT / "pyproject.toml").open("rb") as stream:
             project_version = tomllib.load(stream)["project"]["version"]
 
-        self.assertEqual(project_version, "0.8.40")
+        self.assertEqual(project_version, "0.8.44")
         self.assertEqual(__version__, project_version)
         major, minor, patch = (int(part) for part in project_version.split("."))
         version_info = (PROJECT_ROOT / "packaging" / "windows_version_info.txt").read_text(encoding="utf-8")

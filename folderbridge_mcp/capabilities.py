@@ -8,7 +8,7 @@ import subprocess
 from pathlib import Path
 from typing import Callable, Iterable
 
-from .config import Task
+from .config import MAX_TASK_TIMEOUT_SECONDS, Task
 from .security import ToolError, clean_environment, resolve_task_executable
 from .task_runner import run_task
 from .workspace_validation import run_safe_build, run_workspace_smoke
@@ -140,15 +140,15 @@ def run_capability(
     return result
 
 
-def _npm_script_task(root: Path, script_name: str, task_name: str, timeout_seconds: int) -> Task | None:
+def _npm_script_task(root: Path, script_name: str, task_name: str) -> Task | None:
     scripts = _package_json_scripts(root)
     if script_name not in scripts:
         return None
-    return Task(task_name, ("npm", "run", script_name), timeout_seconds)
+    return Task(task_name, ("npm", "run", script_name), MAX_TASK_TIMEOUT_SECONDS)
 
 
 def _test_task(root: Path) -> Task | None:
-    declared = _npm_script_task(root, "test", "capability-test", 300)
+    declared = _npm_script_task(root, "test", "capability-test")
     if declared is not None:
         return declared
     tests = root / "tests"
@@ -158,19 +158,19 @@ def _test_task(root: Path) -> Task | None:
         return Task(
             "capability-test",
             ("python", "-m", "unittest", "discover", "-s", "tests", "-p", "test_*.py", "-v"),
-            300,
+            MAX_TASK_TIMEOUT_SECONDS,
         )
     if any(_safe_file(root, name) for name in ("pytest.ini", "tox.ini")):
-        return Task("capability-test", ("python", "-m", "pytest", "-q"), 300)
+        return Task("capability-test", ("python", "-m", "pytest", "-q"), MAX_TASK_TIMEOUT_SECONDS)
     return None
 
 
 def _build_task(root: Path) -> Task | None:
-    return _npm_script_task(root, "build", "capability-build", 600)
+    return _npm_script_task(root, "build", "capability-build")
 
 
 def _windows_package_task(root: Path) -> Task | None:
-    declared = _npm_script_task(root, "package:windows", "capability-package-windows", 600)
+    declared = _npm_script_task(root, "package:windows", "capability-package-windows")
     if declared is not None:
         return declared
     candidates = (
@@ -196,24 +196,24 @@ def _windows_package_task(root: Path) -> Task | None:
                 if _safe_file(root, python_relative):
                     argv.extend(("-Python", python_relative))
                     break
-        return Task("capability-package-windows", tuple(argv), 600)
+        return Task("capability-package-windows", tuple(argv), MAX_TASK_TIMEOUT_SECONDS)
 
     specs = [path for path in root.glob("*.spec") if path.is_file() and not path.is_symlink()]
     if len(specs) == 1:
         return Task(
             "capability-package-windows",
             ("python", "-m", "PyInstaller", "--noconfirm", specs[0].name),
-            600,
+            MAX_TASK_TIMEOUT_SECONDS,
         )
     return None
 
 
 def _release_sync_task(root: Path) -> Task | None:
-    return _npm_script_task(root, "release:sync", "capability-release-sync", 900)
+    return _npm_script_task(root, "release:sync", "capability-release-sync")
 
 
 def _android_package_task(root: Path) -> Task | None:
-    declared = _npm_script_task(root, "package:android", "capability-package-android", 900)
+    declared = _npm_script_task(root, "package:android", "capability-package-android")
     if declared is not None:
         return declared
 
@@ -225,18 +225,18 @@ def _android_package_task(root: Path) -> Task | None:
             return Task(
                 "capability-package-android",
                 ("cmd.exe", "/d", "/c", relative, "assembleRelease"),
-                900,
+                MAX_TASK_TIMEOUT_SECONDS,
             )
         return Task(
             "capability-package-android",
             ("sh", relative, "assembleRelease"),
-            900,
+            MAX_TASK_TIMEOUT_SECONDS,
         )
     if _safe_file(root, "pubspec.yaml"):
         return Task(
             "capability-package-android",
             ("flutter", "build", "apk", "--release"),
-            900,
+            MAX_TASK_TIMEOUT_SECONDS,
         )
     return None
 
@@ -274,7 +274,7 @@ def _run_github_push(
             "origin",
             f"HEAD:refs/heads/{branch}",
         ),
-        300,
+        MAX_TASK_TIMEOUT_SECONDS,
     )
     result = (task_runner or run_task)(root, task)
     result["capability"] = "git-push"

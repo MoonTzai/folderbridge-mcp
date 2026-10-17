@@ -8,11 +8,12 @@ import webbrowser
 from pathlib import Path
 import tkinter as tk
 import tkinter.font as tkfont
-from tkinter import filedialog, messagebox, scrolledtext, ttk
+from tkinter import filedialog, messagebox, scrolledtext, simpledialog, ttk
 
 from . import __version__
 from .capabilities import CAPABILITY_LABELS, CAPABILITY_NAMES
-from .config import MAX_WORKSPACES, canonical_workspaces, workspace_id
+from .config import MAX_WORKSPACES, approve_config, canonical_workspaces, workspace_id
+from .node_task_registration import NodeTaskRegistrationError, install_node_task, plan_node_task
 from .extensions import ExtensionRegistry, extension_root_path, install_external_extension_zip
 from .extension_spec import EXTENSION_FORMAT_SUMMARY, EXTENSION_LLM_PROMPT
 from .dpi import (
@@ -1943,6 +1944,10 @@ class FolderBridgeLauncher:
             variable=self.allow_tasks_var,
         )
         self.tasks_check.grid(row=5, column=1, columnspan=2, sticky="w", pady=(9, 0))
+        self.node_task_register_button = ttk.Button(
+            card, text="注册 Node 任务…", command=self._register_node_task,
+        )
+        self.node_task_register_button.grid(row=6, column=1, sticky="w", pady=(8, 0))
         return card
 
     def _build_dpi_entry(
@@ -2227,6 +2232,137 @@ class FolderBridgeLauncher:
         self.workspace_paths = [str(root) for root in roots]
         self._render_workspace_tree()
         self._refresh_status_cards()
+
+    def _select_node_task_workspace(self) -> Path | None:
+        """Pick one of the existing local roots, even while the main form is locked."""
+        if not self.workspace_paths:
+            self._show_info("Node 任务注册", "当前没有允许的工作区。")
+            return None
+        dialog = tk.Toplevel(self.root)
+        dialog.title(self._t("选择 Node 任务工作区"))
+        dialog.transient(self.root)
+        dialog.resizable(True, True)
+        frame = ttk.Frame(dialog, padding=16)
+        frame.pack(fill="both", expand=True)
+        ttk.Label(
+            frame, text=self._t("选择已允许的工作区（不添加、删除或扩大访问权限）："),
+        ).pack(anchor="w", pady=(0, 9))
+        middle = ttk.Frame(frame)
+        middle.pack(fill="both", expand=True)
+        options = tk.Listbox(
+            middle, selectmode=tk.SINGLE, exportselection=False,
+            height=min(12, max(4, len(self.workspace_paths))), width=96,
+        )
+        options.pack(side="left", fill="both", expand=True)
+        scroll = ttk.Scrollbar(middle, orient="vertical", command=options.yview)
+        scroll.pack(side="right", fill="y")
+        options.configure(yscrollcommand=scroll.set)
+        for index, value in enumerate(self.workspace_paths):
+            options.insert("end", f"{index + 1:02d} | {value}")
+        current = list(self.workspace_tree.selection())
+        if len(current) == 1:
+            try:
+                selected_index = int(current[0])
+                if 0 <= selected_index < len(self.workspace_paths):
+                    options.selection_set(selected_index)
+                    options.see(selected_index)
+            except ValueError:
+                pass
+        selection: list[int] = []
+        buttons = ttk.Frame(frame)
+        buttons.pack(fill="x", pady=(12, 0))
+        def accept(_event: object = None) -> None:
+            rows = options.curselection()
+            if not rows:
+                return
+            selection.append(int(rows[0]))
+            dialog.destroy()
+        def cancel(_event: object = None) -> None:
+            dialog.destroy()
+        ttk.Button(buttons, text=self._t("确定"), command=accept).pack(side="right")
+        ttk.Button(buttons, text=self._t("取消"), command=cancel).pack(side="right", padx=(0, 8))
+        options.bind("<Double-Button-1>", accept)
+        dialog.bind("<Return>", accept)
+        dialog.bind("<Escape>", cancel)
+        dialog.protocol("WM_DELETE_WINDOW", cancel)
+        options.focus_set()
+        dialog.wait_visibility()
+        dialog.grab_set()
+        self.root.wait_window(dialog)
+        if not selection:
+            return None
+        try:
+            return Path(self.workspace_paths[selection[0]]).expanduser().resolve(strict=True)
+        except (IndexError, ValueError, OSError) as exc:
+            self._show_error(f"选择的工作区无效：{exc}")
+            return None
+
+    def _register_node_task(self) -> None:
+        """Local human-only task creation; no remote MCP execution or approval."""
+        workspace = self._select_node_task_workspace()
+        if workspace is None:
+            return
+        script = filedialog.askopenfilename(
+            title=self._t("选择当前工作区内的 Node.js 脚本"),
+            initialdir=str(workspace),
+            filetypes=(("Node.js JavaScript", "*.js *.cjs *.mjs"), ("All files", "*.*")),
+            parent=self.root,
+        )
+        if not script:
+            return
+        name = simpledialog.askstring(
+            self._t("注册 Node 任务"), self._t("输入唯一任务名（字母开头，可使用数字、下划线和短横线）："),
+            parent=self.root,
+        )
+        if name is None:
+            return
+        timeout = simpledialog.askinteger(
+            self._t("Node 任务超时"), self._t("超时时间（秒，1–7200，最高两小时）："),
+            initialvalue=7200, minvalue=1, maxvalue=7200, parent=self.root,
+        )
+        if timeout is None:
+            return
+        try:
+            plan = plan_node_task(workspace, name, script, timeout)
+        except (NodeTaskRegistrationError, OSError) as exc:
+            self._show_error(f"Node 任务注册预检失败：{exc}")
+            return
+        preview = (
+            f"工作区：{plan.workspace}\n脚本：{plan.script_path}\n"
+            f"任务名：{plan.task.name}\n固定命令：node {plan.script_path}\n"
+            f"超时：{plan.task.timeout_seconds} 秒\n"
+            f"原配置 SHA-256：{plan.old_config_sha256 or '(无旧配置)'}\n"
+            f"新配置 SHA-256：{plan.new_config_sha256}\n\n"
+            "本机批准任务后，Node 脚本及其依赖会以当前操作系统用户权限执行；"
+            "批准的是固定任务配置，不是不可更改的 JS 源码。"
+            "不会开放任意 Shell，不会现在执行 Node。\n\n是否写入新任务配置？"
+        )
+        if not self._ask_yesno("注册 Node 任务 · 写入前确认", preview):
+            return
+        try:
+            installed = install_node_task(plan)
+        except (NodeTaskRegistrationError, OSError) as exc:
+            self._show_error(f"配置发生变化或写入失败，未批准任务：{exc}")
+            return
+        trusted = self._ask_yesno(
+            "单独批准 Node 任务配置",
+            f"新配置已写入，但仍未获批准。\n配置 SHA-256：{installed.sha256}\n\n"
+            "是否由你在本机明确批准当前配置？批准后该工作区所有已列明任务"
+            "均可以当前用户权限执行；脚本文件和依赖将继续可被项目更新。",
+        )
+        if trusted:
+            try:
+                approve_config(workspace, installed)
+            except (OSError, ValueError) as exc:
+                self._show_error(f"任务配置已写入，但本机批准失败：{exc}")
+                return
+        self._show_info(
+            "Node 任务注册",
+            ("Node 任务已写入且完成本机配置批准。" if trusted else
+             "Node 任务已写入但尚未批准；可稍后在本机使用 approve 命令批准。") +
+            "\n当前连接会在下一次 server_info / run_task 时重新核验本机配置及批准 SHA，"
+            "无需重连即可发现已批准的任务；若启动时未启用“允许自定义任务”，仍需先启用并重连。",
+        )
 
     def _remove_workspaces(self) -> None:
         selected = {int(item) for item in self.workspace_tree.selection()}
@@ -3269,7 +3405,10 @@ class FolderBridgeLauncher:
             self.tasks_check,
         ):
             widget.configure(state=state)
-        self.workspace_tree.state(("!disabled",) if enabled else ("disabled",))
+        # Selecting an already-authorized workspace is read-only and must stay
+        # possible while the Tunnel is running. Add/remove buttons remain
+        # disabled above, but task registration can now select its target.
+        self.workspace_tree.state(("!disabled",))
 
     def _log(self, text: str) -> None:
         clean = redact_text(self._t(text.rstrip()), (self._active_secret,))

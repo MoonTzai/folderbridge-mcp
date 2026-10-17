@@ -2,6 +2,13 @@
 
 All notable changes to FolderBridge MCP are documented here.
 
+## 0.8.44 — 2026-10-17
+
+- Added **hot discovery of locally approved Node tasks** for already configured workspaces: `server_info` and `run_task` reload task configuration from disk; a newly added task can be used on the same running MCP connection after explicit local exact-SHA approval. Added rejection for stale, revoked, malformed, or changed task configuration, including a second SHA/trust check after acquiring the workspace lease and before task admission. This does not expose remote task registration or approval.
+- Corrected the Node registration GUI when the FolderBridge Tunnel is connected. A standalone workspace picker lists only previously allowed workspace roots, and existing-root selection remains enabled even while editing workspace membership or connection settings is locked. Updated bilingual interface text.
+- Carried forward the 0.8.43 local Node registration CLI/UI, fixed argv registration, explicit per-workspace task approval and bounded two-hour task/capability timeout handling.
+- Windows x64 bundle built and inspected locally from the canonical `folderbridge-mcp` repository; **818 tests passed, 4 conditional skips**. Existing installed 0.8.43 remains separately controllable until a normal application restart. The standard `scripts/build_windows.ps1` output paths are preserved for the GitHub Actions release workflow.
+
 ## 0.8.40 — 2026-09-26
 
 - Added canonical lifecycle-resilience metadata to `server_info`: `tool_surface` is derived from the same `list_tools()` result returned to MCP clients, while `continuity` reports `runtime_state`, `catalog_revision`, `diagnostics_available`, and the exact SHA-256 of that catalog. Declared execution state is cross-checked against actual `run_capability` / `run_task` exposure and reports `TOOL_SURFACE_BINDING_FAILURE` on mismatch.

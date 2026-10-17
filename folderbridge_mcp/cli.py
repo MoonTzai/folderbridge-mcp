@@ -15,6 +15,7 @@ from .config import (
     CONFIG_NAME,
     ConfigError,
     MAX_WORKSPACES,
+    MAX_TASK_TIMEOUT_SECONDS,
     approve_config,
     canonical_workspace,
     canonical_workspaces,
@@ -44,6 +45,14 @@ def build_parser() -> argparse.ArgumentParser:
 
     approve = subparsers.add_parser("approve", help="Approve the exact current task config on this machine.")
     _workspace_argument(approve)
+
+    node_task = subparsers.add_parser("node-task-add", help="Locally register one fixed Node.js script task; never executes it.")
+    _workspace_argument(node_task)
+    node_task.add_argument("--name", required=True, help="A new unique task name.")
+    node_task.add_argument("--script", required=True, help="Existing .js/.cjs/.mjs script in this workspace.")
+    node_task.add_argument("--timeout", type=int, default=MAX_TASK_TIMEOUT_SECONDS, help="Bounded task timeout, 1..7200 seconds (up to two hours).")
+    node_task.add_argument("--update-timeout", action="store_true", help="Update only the timeout of an existing task with identical Node argv; never creates a replacement task.")
+    node_task.add_argument("--approve", action="store_true", help="Explicitly approve the resulting exact config SHA locally.")
 
     doctor = subparsers.add_parser("doctor", help="Show local safety and setup status.")
     _workspace_argument(doctor)
@@ -199,6 +208,8 @@ def main(argv: list[str] | None = None) -> int:
             return _init(workspace, force=args.force, trust=args.trust)
         if args.command == "approve":
             return _approve(workspace)
+        if args.command == "node-task-add":
+            return _node_task_add(workspace, args.name, args.script, args.timeout, approve=args.approve, update_timeout=args.update_timeout)
         if args.command == "doctor":
             return _doctor(workspace)
     except ConfigError as exc:
@@ -217,6 +228,25 @@ def _init(workspace: Path, *, force: bool, trust: bool) -> int:
     elif config.tasks:
         print(f"Tasks remain disabled until you inspect {CONFIG_NAME} and run: {_local_command('approve', workspace)}")
     print(f"MCP command: {_server_command(workspace, read_only=False, allow_tasks=False)}")
+    return 0
+
+
+def _node_task_add(workspace: Path, name: str, script: str, timeout: int, *, approve: bool, update_timeout: bool = False) -> int:
+    from .node_task_registration import install_node_task, plan_node_task
+
+    plan = plan_node_task(workspace, name, script, timeout, update_timeout=update_timeout)
+    print(f"Local Node task: {plan.task.name}")
+    print(f"Fixed argv: {' '.join(plan.task.argv)}")
+    print(f"Timeout: {plan.task.timeout_seconds}s")
+    print(f"Next config SHA-256: {plan.new_config_sha256}")
+    print("Warning: approved tasks execute mutable repository code with your OS user permissions.")
+    config = install_node_task(plan)
+    if approve:
+        trust = approve_config(workspace, config)
+        print(f"EXPLICIT LOCAL APPROVAL: SHA-256 {config.sha256}; trust record: {trust}")
+    else:
+        print("NOT APPROVED: inspect config and invoke local 'approve --workspace ...' before execution.")
+    print("For new task discovery, enable allow_tasks if necessary and reconnect the MCP session.")
     return 0
 
 

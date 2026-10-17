@@ -15,6 +15,7 @@ from typing import Any
 CONFIG_NAME = ".folderbridge.json"
 CONFIG_VERSION = 1
 MAX_CONFIG_BYTES = 256 * 1024
+MAX_TASK_TIMEOUT_SECONDS = 2 * 60 * 60
 MAX_WORKSPACES = 16
 WORKSPACE_ROOT_IDENTITY_VERSION = 1
 WORKSPACE_RECOVERY_KEY_VERSION = 1
@@ -164,9 +165,9 @@ def _validate_task(name: str, raw: Any) -> Task:
             raise ConfigError(
                 f"Task {name!r} uses an inline shell/interpreter entry point; use a checked-in script instead"
             )
-    timeout = raw.get("timeout_seconds", 120)
-    if not isinstance(timeout, int) or isinstance(timeout, bool) or not 1 <= timeout <= 600:
-        raise ConfigError(f"Task {name!r}.timeout_seconds must be between 1 and 600")
+    timeout = raw.get("timeout_seconds", MAX_TASK_TIMEOUT_SECONDS)
+    if not isinstance(timeout, int) or isinstance(timeout, bool) or not 1 <= timeout <= MAX_TASK_TIMEOUT_SECONDS:
+        raise ConfigError(f"Task {name!r}.timeout_seconds must be between 1 and {MAX_TASK_TIMEOUT_SECONDS}")
     return Task(name=name, argv=tuple(argv), timeout_seconds=timeout)
 
 
@@ -203,7 +204,7 @@ def load_config(workspace: Path, *, required: bool = False) -> ProjectConfig:
 def default_config(workspace: Path) -> dict[str, Any]:
     tasks: dict[str, Any] = {}
     if any((workspace / name).exists() for name in ("pyproject.toml", "pytest.ini", "setup.cfg", "tox.ini")):
-        tasks["test"] = {"argv": ["python", "-m", "pytest", "-q"], "timeout_seconds": 120}
+        tasks["test"] = {"argv": ["python", "-m", "pytest", "-q"], "timeout_seconds": MAX_TASK_TIMEOUT_SECONDS}
     package_json = workspace / "package.json"
     if package_json.is_file() and not package_json.is_symlink():
         try:
@@ -218,7 +219,7 @@ def default_config(workspace: Path) -> dict[str, Any]:
                 if isinstance(scripts.get(script_name), str):
                     tasks[f"npm-{script_name}"] = {
                         "argv": ["npm", "run", script_name],
-                        "timeout_seconds": 180,
+                        "timeout_seconds": MAX_TASK_TIMEOUT_SECONDS,
                     }
     return {"version": CONFIG_VERSION, "tasks": tasks}
 
