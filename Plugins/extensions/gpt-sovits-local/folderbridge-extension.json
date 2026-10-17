@@ -3,14 +3,17 @@
   "runtime_abi": 1,
   "id": "gpt-sovits-local",
   "name": "Local GPT-SoVITS",
-  "version": "0.1.2",
-  "description": "Workspace-confined adapter for a dedicated GPT-SoVITS Windows runtime under GPT-SoVITS/. Runs only the fixed GPT-SoVITS-Bridge/runner.ps1 entrypoint for bootstrap, dataset preparation, ASR, training, inference, and status checks.",
+  "version": "0.2.2",
+  "description": "Workspace-confined GPT-SoVITS v2Pro toolkit with dedicated runtime/model inspection, audio analysis/slicing, ASR, dataset preparation, training, single/batch inference, WebUI/API service lifecycle, artifact receipts, and a deprecated compatibility run action. It invokes only the fixed GPT-SoVITS-Bridge runner.",
   "entrypoint": "plugin.py",
   "permissions": [
     "workspace.read",
     "workspace.write",
     "extension.state",
-    "process.execute:powershell.exe"
+    "process.execute:powershell.exe",
+    "network.loopback:127.0.0.1:9874",
+    "network.loopback:127.0.0.1:9880",
+    "network.outbound:https"
   ],
   "execution": {
     "mode": "isolated-process",
@@ -21,6 +24,20 @@
     "state": "none"
   },
   "actions": {
+    "verification-plan": {
+      "read_only": true,
+      "requires_workspace": false,
+      "authorization": "global",
+      "input_schema": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false
+      },
+      "effect_contract": {
+        "effect_semantics": "read_only",
+        "lifetime": "foreground"
+      }
+    },
     "status": {
       "read_only": true,
       "requires_workspace": true,
@@ -33,6 +50,996 @@
       "effect_contract": {
         "effect_semantics": "read_only",
         "lifetime": "foreground"
+      }
+    },
+    "list-models": {
+      "read_only": true,
+      "requires_workspace": true,
+      "authorization": "global",
+      "input_schema": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false
+      },
+      "effect_contract": {
+        "effect_semantics": "read_only",
+        "lifetime": "foreground"
+      }
+    },
+    "dataset-status": {
+      "read_only": true,
+      "requires_workspace": true,
+      "authorization": "global",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "exp_name": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          }
+        },
+        "required": [
+          "exp_name"
+        ],
+        "additionalProperties": false
+      },
+      "effect_contract": {
+        "effect_semantics": "read_only",
+        "lifetime": "foreground"
+      }
+    },
+    "service-status": {
+      "read_only": true,
+      "requires_workspace": true,
+      "authorization": "global",
+      "input_schema": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false
+      },
+      "effect_contract": {
+        "effect_semantics": "read_only",
+        "lifetime": "foreground"
+      }
+    },
+    "probe-runtime": {
+      "read_only": true,
+      "requires_workspace": true,
+      "authorization": "global",
+      "run_mode": "job",
+      "timeout_seconds": 0,
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "timeout_seconds": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 86400,
+            "default": 7200
+          }
+        },
+        "additionalProperties": false
+      },
+      "mutation_scope": {
+        "mode": "none"
+      },
+      "effect_contract": {
+        "effect_semantics": "read_only",
+        "lifetime": "job_owned"
+      }
+    },
+    "bootstrap": {
+      "read_only": false,
+      "requires_workspace": true,
+      "authorization": "global",
+      "run_mode": "job",
+      "timeout_seconds": 0,
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "timeout_seconds": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 86400,
+            "default": 7200
+          }
+        },
+        "additionalProperties": false
+      },
+      "mutation_scope": {
+        "mode": "workspace"
+      },
+      "effect_contract": {
+        "effect_semantics": "external_effect",
+        "lifetime": "job_owned"
+      }
+    },
+    "analyze-audio": {
+      "read_only": false,
+      "requires_workspace": true,
+      "authorization": "global",
+      "run_mode": "job",
+      "timeout_seconds": 0,
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "audio_path": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1024
+          },
+          "timeout_seconds": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 86400,
+            "default": 7200
+          }
+        },
+        "required": [
+          "audio_path"
+        ],
+        "additionalProperties": false
+      },
+      "mutation_scope": {
+        "mode": "workspace"
+      },
+      "effect_contract": {
+        "effect_semantics": "external_effect",
+        "lifetime": "job_owned"
+      }
+    },
+    "analyze-audio-batch": {
+      "read_only": false,
+      "requires_workspace": true,
+      "authorization": "global",
+      "run_mode": "job",
+      "timeout_seconds": 0,
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "audio_paths": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 128,
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 1024
+            }
+          },
+          "timeout_seconds": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 86400,
+            "default": 7200
+          }
+        },
+        "required": [
+          "audio_paths"
+        ],
+        "additionalProperties": false
+      },
+      "mutation_scope": {
+        "mode": "workspace"
+      },
+      "effect_contract": {
+        "effect_semantics": "external_effect",
+        "lifetime": "job_owned"
+      }
+    },
+    "slice-audio": {
+      "read_only": false,
+      "requires_workspace": true,
+      "authorization": "global",
+      "run_mode": "job",
+      "timeout_seconds": 0,
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "source": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1024
+          },
+          "output_dir": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1024
+          },
+          "threshold": {
+            "type": "number",
+            "minimum": -120,
+            "maximum": 0,
+            "default": -34
+          },
+          "min_length": {
+            "type": "integer",
+            "minimum": 100,
+            "maximum": 120000,
+            "default": 4000
+          },
+          "min_interval": {
+            "type": "integer",
+            "minimum": 10,
+            "maximum": 60000,
+            "default": 300
+          },
+          "hop_size": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 1000,
+            "default": 10
+          },
+          "max_sil_kept": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 30000,
+            "default": 500
+          },
+          "max_amp": {
+            "type": "number",
+            "minimum": 0.01,
+            "maximum": 1,
+            "default": 0.9
+          },
+          "alpha": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1,
+            "default": 0.25
+          },
+          "reuse_existing": {
+            "type": "boolean",
+            "default": false
+          },
+          "timeout_seconds": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 86400,
+            "default": 7200
+          }
+        },
+        "required": [
+          "source",
+          "output_dir"
+        ],
+        "additionalProperties": false
+      },
+      "mutation_scope": {
+        "mode": "workspace"
+      },
+      "effect_contract": {
+        "effect_semantics": "external_effect",
+        "lifetime": "job_owned"
+      }
+    },
+    "asr": {
+      "read_only": false,
+      "requires_workspace": true,
+      "authorization": "global",
+      "run_mode": "job",
+      "timeout_seconds": 0,
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "source": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1024
+          },
+          "job_name": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          },
+          "slice": {
+            "type": "boolean",
+            "default": true
+          },
+          "reuse_existing_slices": {
+            "type": "boolean",
+            "default": false
+          },
+          "backend": {
+            "type": "string",
+            "enum": [
+              "classic",
+              "fun-asr-nano",
+              "sensevoice"
+            ],
+            "default": "fun-asr-nano"
+          },
+          "language": {
+            "type": "string",
+            "enum": [
+              "zh",
+              "yue",
+              "ja",
+              "en",
+              "ko",
+              "auto"
+            ],
+            "default": "zh"
+          },
+          "threshold": {
+            "type": "number",
+            "minimum": -120,
+            "maximum": 0,
+            "default": -34
+          },
+          "min_length": {
+            "type": "integer",
+            "minimum": 100,
+            "maximum": 120000,
+            "default": 4000
+          },
+          "min_interval": {
+            "type": "integer",
+            "minimum": 10,
+            "maximum": 60000,
+            "default": 300
+          },
+          "hop_size": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 1000,
+            "default": 10
+          },
+          "max_sil_kept": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 30000,
+            "default": 500
+          },
+          "max_amp": {
+            "type": "number",
+            "minimum": 0.01,
+            "maximum": 1,
+            "default": 0.9
+          },
+          "alpha": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1,
+            "default": 0.25
+          },
+          "timeout_seconds": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 86400,
+            "default": 7200
+          }
+        },
+        "required": [
+          "source"
+        ],
+        "additionalProperties": false
+      },
+      "mutation_scope": {
+        "mode": "workspace"
+      },
+      "effect_contract": {
+        "effect_semantics": "external_effect",
+        "lifetime": "job_owned"
+      }
+    },
+    "prepare-dataset": {
+      "read_only": false,
+      "requires_workspace": true,
+      "authorization": "global",
+      "run_mode": "job",
+      "timeout_seconds": 0,
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "list_file": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1024
+          },
+          "wav_dir": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1024
+          },
+          "exp_name": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          },
+          "gpu": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 31,
+            "default": 0
+          },
+          "is_half": {
+            "type": "boolean",
+            "default": true
+          },
+          "timeout_seconds": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 86400,
+            "default": 7200
+          }
+        },
+        "required": [
+          "list_file",
+          "exp_name"
+        ],
+        "additionalProperties": false
+      },
+      "mutation_scope": {
+        "mode": "workspace"
+      },
+      "effect_contract": {
+        "effect_semantics": "external_effect",
+        "lifetime": "job_owned"
+      }
+    },
+    "train": {
+      "read_only": false,
+      "requires_workspace": true,
+      "authorization": "global",
+      "run_mode": "job",
+      "timeout_seconds": 0,
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "exp_name": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          },
+          "gpu": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 31,
+            "default": 0
+          },
+          "batch_size": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 64,
+            "default": 2
+          },
+          "sovits_epochs": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 1000,
+            "default": 4
+          },
+          "gpt_epochs": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 1000,
+            "default": 8
+          },
+          "save_every_epoch": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 1000,
+            "default": 2
+          },
+          "text_low_lr_rate": {
+            "type": "number",
+            "minimum": 0.05,
+            "maximum": 1,
+            "default": 0.4
+          },
+          "timeout_seconds": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 86400,
+            "default": 7200
+          }
+        },
+        "required": [
+          "exp_name"
+        ],
+        "additionalProperties": false
+      },
+      "mutation_scope": {
+        "mode": "workspace"
+      },
+      "effect_contract": {
+        "effect_semantics": "external_effect",
+        "lifetime": "job_owned"
+      }
+    },
+    "infer": {
+      "read_only": false,
+      "requires_workspace": true,
+      "authorization": "global",
+      "run_mode": "job",
+      "timeout_seconds": 0,
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "prompt_text": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 12000
+          },
+          "ref_audio": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1024
+          },
+          "aux_ref_audio_paths": {
+            "type": "array",
+            "maxItems": 16,
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 1024
+            },
+            "default": []
+          },
+          "exp_name": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          },
+          "gpt_weight": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1024
+          },
+          "sovits_weight": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1024
+          },
+          "text_lang": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 32,
+            "default": "en"
+          },
+          "prompt_lang": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 32,
+            "default": "zh"
+          },
+          "top_k": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 1000,
+            "default": 15
+          },
+          "top_p": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1,
+            "default": 1
+          },
+          "temperature": {
+            "type": "number",
+            "minimum": 0.01,
+            "maximum": 5,
+            "default": 1
+          },
+          "text_split_method": {
+            "type": "string",
+            "enum": [
+              "cut0",
+              "cut1",
+              "cut2",
+              "cut3",
+              "cut4",
+              "cut5"
+            ],
+            "default": "cut5"
+          },
+          "batch_size": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 200,
+            "default": 1
+          },
+          "batch_threshold": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1,
+            "default": 0.75
+          },
+          "speed_factor": {
+            "type": "number",
+            "minimum": 0.25,
+            "maximum": 4,
+            "default": 1
+          },
+          "fragment_interval": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 10,
+            "default": 0.2
+          },
+          "seed": {
+            "type": "integer",
+            "minimum": -1,
+            "maximum": 2147483647,
+            "default": -1
+          },
+          "parallel_infer": {
+            "type": "boolean",
+            "default": true
+          },
+          "repetition_penalty": {
+            "type": "number",
+            "minimum": 0.1,
+            "maximum": 10,
+            "default": 1.35
+          },
+          "force_cpu": {
+            "type": "boolean",
+            "default": false
+          },
+          "is_half": {
+            "type": "boolean",
+            "default": true
+          },
+          "timeout_seconds": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 86400,
+            "default": 7200
+          },
+          "text": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 100000
+          },
+          "output_name": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 255
+          }
+        },
+        "required": [
+          "text",
+          "prompt_text",
+          "ref_audio"
+        ],
+        "additionalProperties": false
+      },
+      "mutation_scope": {
+        "mode": "workspace"
+      },
+      "effect_contract": {
+        "effect_semantics": "external_effect",
+        "lifetime": "job_owned"
+      }
+    },
+    "infer-batch": {
+      "read_only": false,
+      "requires_workspace": true,
+      "authorization": "global",
+      "run_mode": "job",
+      "timeout_seconds": 0,
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "prompt_text": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 12000
+          },
+          "ref_audio": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1024
+          },
+          "aux_ref_audio_paths": {
+            "type": "array",
+            "maxItems": 16,
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 1024
+            },
+            "default": []
+          },
+          "exp_name": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          },
+          "gpt_weight": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1024
+          },
+          "sovits_weight": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1024
+          },
+          "text_lang": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 32,
+            "default": "en"
+          },
+          "prompt_lang": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 32,
+            "default": "zh"
+          },
+          "top_k": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 1000,
+            "default": 15
+          },
+          "top_p": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1,
+            "default": 1
+          },
+          "temperature": {
+            "type": "number",
+            "minimum": 0.01,
+            "maximum": 5,
+            "default": 1
+          },
+          "text_split_method": {
+            "type": "string",
+            "enum": [
+              "cut0",
+              "cut1",
+              "cut2",
+              "cut3",
+              "cut4",
+              "cut5"
+            ],
+            "default": "cut5"
+          },
+          "batch_size": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 200,
+            "default": 1
+          },
+          "batch_threshold": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1,
+            "default": 0.75
+          },
+          "speed_factor": {
+            "type": "number",
+            "minimum": 0.25,
+            "maximum": 4,
+            "default": 1
+          },
+          "fragment_interval": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 10,
+            "default": 0.2
+          },
+          "seed": {
+            "type": "integer",
+            "minimum": -1,
+            "maximum": 2147483647,
+            "default": -1
+          },
+          "parallel_infer": {
+            "type": "boolean",
+            "default": true
+          },
+          "repetition_penalty": {
+            "type": "number",
+            "minimum": 0.1,
+            "maximum": 10,
+            "default": 1.35
+          },
+          "force_cpu": {
+            "type": "boolean",
+            "default": false
+          },
+          "is_half": {
+            "type": "boolean",
+            "default": true
+          },
+          "timeout_seconds": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 86400,
+            "default": 7200
+          },
+          "items": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 64,
+            "items": {
+              "type": "object",
+              "properties": {
+                "text": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 100000
+                },
+                "output_name": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 255
+                },
+                "seed": {
+                  "type": "integer",
+                  "minimum": -1,
+                  "maximum": 2147483647
+                },
+                "speed_factor": {
+                  "type": "number",
+                  "minimum": 0.25,
+                  "maximum": 4
+                },
+                "fragment_interval": {
+                  "type": "number",
+                  "minimum": 0,
+                  "maximum": 10
+                }
+              },
+              "required": [
+                "text"
+              ],
+              "additionalProperties": false
+            }
+          }
+        },
+        "required": [
+          "prompt_text",
+          "ref_audio",
+          "items"
+        ],
+        "additionalProperties": false
+      },
+      "mutation_scope": {
+        "mode": "workspace"
+      },
+      "effect_contract": {
+        "effect_semantics": "external_effect",
+        "lifetime": "job_owned"
+      }
+    },
+    "launch-webui": {
+      "read_only": false,
+      "requires_workspace": true,
+      "authorization": "global",
+      "run_mode": "job",
+      "timeout_seconds": 0,
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "timeout_seconds": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 86400,
+            "default": 7200
+          }
+        },
+        "additionalProperties": false
+      },
+      "mutation_scope": {
+        "mode": "workspace"
+      },
+      "effect_contract": {
+        "effect_semantics": "external_effect",
+        "lifetime": "managed_service"
+      }
+    },
+    "stop-webui": {
+      "read_only": false,
+      "requires_workspace": true,
+      "authorization": "global",
+      "run_mode": "job",
+      "timeout_seconds": 0,
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "timeout_seconds": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 86400,
+            "default": 7200
+          }
+        },
+        "additionalProperties": false
+      },
+      "mutation_scope": {
+        "mode": "workspace"
+      },
+      "effect_contract": {
+        "effect_semantics": "external_effect",
+        "lifetime": "managed_service"
+      }
+    },
+    "launch-api": {
+      "read_only": false,
+      "requires_workspace": true,
+      "authorization": "global",
+      "run_mode": "job",
+      "timeout_seconds": 0,
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "config_path": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1024
+          },
+          "timeout_seconds": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 86400,
+            "default": 7200
+          },
+          "exp_name": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          },
+          "gpt_weight": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1024
+          },
+          "sovits_weight": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1024
+          },
+          "force_cpu": {
+            "type": "boolean",
+            "default": false
+          },
+          "is_half": {
+            "type": "boolean",
+            "default": true
+          }
+        },
+        "additionalProperties": false
+      },
+      "mutation_scope": {
+        "mode": "workspace"
+      },
+      "effect_contract": {
+        "effect_semantics": "external_effect",
+        "lifetime": "managed_service"
+      }
+    },
+    "stop-api": {
+      "read_only": false,
+      "requires_workspace": true,
+      "authorization": "global",
+      "run_mode": "job",
+      "timeout_seconds": 0,
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "timeout_seconds": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 86400,
+            "default": 7200
+          }
+        },
+        "additionalProperties": false
+      },
+      "mutation_scope": {
+        "mode": "workspace"
+      },
+      "effect_contract": {
+        "effect_semantics": "external_effect",
+        "lifetime": "managed_service"
       }
     },
     "run": {
@@ -49,12 +1056,18 @@
             "enum": [
               "probe",
               "bootstrap",
+              "analyze-audio",
+              "prepare-reference",
+              "stitch-audio",
+              "slice-audio",
               "prepare-dataset",
               "asr",
               "train",
               "infer",
               "launch-webui",
-              "stop"
+              "stop",
+              "launch-api",
+              "stop-api"
             ]
           },
           "params": {
@@ -108,9 +1121,193 @@
             "stop": {
               "effect_semantics": "external_effect",
               "lifetime": "managed_service"
+            },
+            "analyze-audio": {
+              "effect_semantics": "external_effect",
+              "lifetime": "job_owned"
+            },
+            "slice-audio": {
+              "effect_semantics": "external_effect",
+              "lifetime": "job_owned"
+            },
+            "launch-api": {
+              "effect_semantics": "external_effect",
+              "lifetime": "managed_service"
+            },
+            "stop-api": {
+              "effect_semantics": "external_effect",
+              "lifetime": "managed_service"
+            },
+            "prepare-reference": {
+              "effect_semantics": "external_effect",
+              "lifetime": "job_owned"
+            },
+            "stitch-audio": {
+              "effect_semantics": "external_effect",
+              "lifetime": "job_owned"
             }
           }
         }
+      }
+    },
+    "prepare-reference": {
+      "read_only": false,
+      "requires_workspace": true,
+      "authorization": "global",
+      "run_mode": "job",
+      "timeout_seconds": 0,
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "input_audio": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1024
+          },
+          "output_path": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1024
+          },
+          "start_seconds": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 86400,
+            "default": 0
+          },
+          "duration_seconds": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 86400
+          },
+          "target_sample_rate": {
+            "type": "integer",
+            "minimum": 8000,
+            "maximum": 192000,
+            "default": 32000
+          },
+          "mono": {
+            "type": "boolean",
+            "default": true
+          },
+          "trim_silence": {
+            "type": "boolean",
+            "default": false
+          },
+          "silence_threshold": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1,
+            "default": 0.001
+          },
+          "normalize_peak": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1
+          },
+          "fade_ms": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 5000,
+            "default": 0
+          },
+          "overwrite": {
+            "type": "boolean",
+            "default": false
+          },
+          "write_metadata": {
+            "type": "boolean",
+            "default": true
+          },
+          "timeout_seconds": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 86400,
+            "default": 7200
+          }
+        },
+        "required": [
+          "input_audio",
+          "output_path"
+        ],
+        "additionalProperties": false
+      },
+      "mutation_scope": {
+        "mode": "workspace"
+      },
+      "effect_contract": {
+        "effect_semantics": "external_effect",
+        "lifetime": "job_owned"
+      }
+    },
+    "stitch-audio": {
+      "read_only": false,
+      "requires_workspace": true,
+      "authorization": "global",
+      "run_mode": "job",
+      "timeout_seconds": 0,
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "audio_paths": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 256,
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 1024
+            }
+          },
+          "output_path": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1024
+          },
+          "target_sample_rate": {
+            "type": "integer",
+            "minimum": 8000,
+            "maximum": 192000,
+            "default": 32000
+          },
+          "pause_ms": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 10000,
+            "default": 0
+          },
+          "normalize_peak": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1
+          },
+          "overwrite": {
+            "type": "boolean",
+            "default": false
+          },
+          "write_metadata": {
+            "type": "boolean",
+            "default": true
+          },
+          "timeout_seconds": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 86400,
+            "default": 7200
+          }
+        },
+        "required": [
+          "audio_paths",
+          "output_path"
+        ],
+        "additionalProperties": false
+      },
+      "mutation_scope": {
+        "mode": "workspace"
+      },
+      "effect_contract": {
+        "effect_semantics": "external_effect",
+        "lifetime": "job_owned"
       }
     }
   }

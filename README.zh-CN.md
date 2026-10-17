@@ -34,7 +34,7 @@ Skill Pack 是另一条扩展轴，主要承载**方法论、领域知识、审�
 | **FFmpeg Toolkit** (`ffmpeg-toolkit`) | 0.1.2 | workspace 受限的 FFmpeg/FFprobe 探测、能力发现与长媒体任务。 |
 | **FTP Toolkit** (`ftp-toolkit`) | 0.2.1 | workspace 受限的 FTP/FTPS profile、list/stat、上传下载、递归上传、rename、mkdir 与精确文件删除。 |
 | **Godot AI Local Bridge** (`godot-ai`) | 0.1.0 | 本地 Godot editor、scene、run、log、截图和运行时输入的受限桥接。 |
-| **Local GPT-SoVITS** (`gpt-sovits-local`) | 0.1.2 | 固定本地 GPT-SoVITS 数据准备、ASR、训练、推理与状态工作流桥。 |
+| **Local GPT-SoVITS** (`gpt-sovits-local`) | 0.2.2 | 完整本地 v2Pro 工具链：参考/音频预处理、ASR、数据集准备、训练、批量推理与 WebUI/API 生命周期。 |
 | **PDF Toolkit** (`pdf-toolkit`) | 0.6.0 | 有界 PDF 结构检查、文本搜索、outline 读取与独立页面渲染。 |
 | **Storyboard ChatGPT Web** (`storyboard-chatgpt-web`) | 0.2.0 | 基于 ChatGPT Web 原生生图／编辑的分镜执行器，可选 GENERATE_ONLY 或独立原生 Visual Judge，保留精确图片／provenance 恢复与 PASS-only canonical。 |
 | **Windows Capture Toolkit** (`windows-capture-toolkit`) | 0.1.3 | 有界的一次性 Windows 截图与精确窗口左键点击，不提供键盘／宏，也不绕过 DRM／HDCP。 |

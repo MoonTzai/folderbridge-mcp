@@ -28,6 +28,14 @@ build/
 .DS_Store
 Thumbs.db
 
+# Local-only release scratch, Windows acceptance backups and private tests.
+# These are preserved on disk and excluded from the public GitHub source/CI.
+# The Qwen test requires gitignored local-private/ runtime assets unavailable in CI.
+/Upload/FolderBridge-HotNode-0.8.44-20261017/
+/FOLDERBRIDGE-0.8.40-*.md
+/FOLDERBRIDGE-LIFECYCLE-RESILIENCE-CLOSURE-20260926.md
+/tests/test_local_qwen3_tts_extension.py
+
 # Local-only handoffs, diagnostics, acceptance evidence, and smoke artifacts.
 # These may contain machine-specific paths or transient runtime identifiers and
 # must never be published as part of the public source tree.

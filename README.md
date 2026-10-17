@@ -34,7 +34,7 @@ Skill Packs provide a second extension axis for **methods, domain knowledge, rev
 | **FFmpeg Toolkit** (`ffmpeg-toolkit`) | 0.1.2 | Workspace-confined FFmpeg/FFprobe probing, capability discovery, and long-running media jobs. |
 | **FTP Toolkit** (`ftp-toolkit`) | 0.2.1 | Workspace-confined FTP/FTPS profiles, listing/stat, upload/download, recursive upload, rename, mkdir, and exact-file delete. |
 | **Godot AI Local Bridge** (`godot-ai`) | 0.1.0 | Bounded local Godot editor, scene, run, log, screenshot, and runtime-input actions. |
-| **Local GPT-SoVITS** (`gpt-sovits-local`) | 0.1.2 | Fixed local GPT-SoVITS dataset, ASR, training, inference, and status workflow bridge. |
+| **Local GPT-SoVITS** (`gpt-sovits-local`) | 0.2.2 | Full local v2Pro toolkit for reference/audio prep, ASR, dataset preparation, training, batch inference, and WebUI/API lifecycle. |
 | **PDF Toolkit** (`pdf-toolkit`) | 0.6.0 | Bounded PDF inspection, text search, outline reading, and parser-independent page rendering. |
 | **Storyboard ChatGPT Web** (`storyboard-chatgpt-web`) | 0.2.0 | ChatGPT Web native storyboard image generation/editing with GENERATE_ONLY or an independent native Visual Judge, exact image/provenance recovery, and PASS-only canonical acceptance. |
 | **Windows Capture Toolkit** (`windows-capture-toolkit`) | 0.1.3 | Bounded one-shot Windows screenshots plus exact-window left-click automation, without keyboard/macro or DRM-bypass surfaces. |

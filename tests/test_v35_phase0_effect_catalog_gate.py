@@ -264,10 +264,27 @@ EXPECTED_EFFECTS = {
         ]
     },
     "gpt-sovits-local": {
-        "status": [
-            "read_only",
-            "foreground"
-        ]
+        "verification-plan": ["read_only", "foreground"],
+        "status": ["read_only", "foreground"],
+        "list-models": ["read_only", "foreground"],
+        "dataset-status": ["read_only", "foreground"],
+        "service-status": ["read_only", "foreground"],
+        "probe-runtime": ["read_only", "job_owned"],
+        "bootstrap": ["external_effect", "job_owned"],
+        "analyze-audio": ["external_effect", "job_owned"],
+        "analyze-audio-batch": ["external_effect", "job_owned"],
+        "prepare-reference": ["external_effect", "job_owned"],
+        "stitch-audio": ["external_effect", "job_owned"],
+        "slice-audio": ["external_effect", "job_owned"],
+        "asr": ["external_effect", "job_owned"],
+        "prepare-dataset": ["external_effect", "job_owned"],
+        "train": ["external_effect", "job_owned"],
+        "infer": ["external_effect", "job_owned"],
+        "infer-batch": ["external_effect", "job_owned"],
+        "launch-webui": ["external_effect", "managed_service"],
+        "stop-webui": ["external_effect", "managed_service"],
+        "launch-api": ["external_effect", "managed_service"],
+        "stop-api": ["external_effect", "managed_service"]
     },
     "pdf-toolkit": {
         "status": [
@@ -306,6 +323,22 @@ EXPECTED_GPT_SOVITS_RUN_CASES = {
         "external_effect",
         "job_owned"
     ],
+    "analyze-audio": [
+        "external_effect",
+        "job_owned"
+    ],
+    "prepare-reference": [
+        "external_effect",
+        "job_owned"
+    ],
+    "stitch-audio": [
+        "external_effect",
+        "job_owned"
+    ],
+    "slice-audio": [
+        "external_effect",
+        "job_owned"
+    ],
     "prepare-dataset": [
         "external_effect",
         "job_owned"
@@ -327,6 +360,14 @@ EXPECTED_GPT_SOVITS_RUN_CASES = {
         "managed_service"
     ],
     "stop": [
+        "external_effect",
+        "managed_service"
+    ],
+    "launch-api": [
+        "external_effect",
+        "managed_service"
+    ],
+    "stop-api": [
         "external_effect",
         "managed_service"
     ]
