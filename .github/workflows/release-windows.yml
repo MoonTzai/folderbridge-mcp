@@ -208,7 +208,12 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git tag -a $env:FOLDERBRIDGE_TAG -m "FolderBridge $env:FOLDERBRIDGE_VERSION" $env:GITHUB_SHA
-          git push origin "refs/tags/$env:FOLDERBRIDGE_TAG:refs/tags/$env:FOLDERBRIDGE_TAG"
+          $tagRef = "refs/tags/$($env:FOLDERBRIDGE_TAG)"
+          $tagPushRefspec = "$($tagRef):$($tagRef)"
+          git push origin $tagPushRefspec
+          if ($LASTEXITCODE -ne 0) {
+            throw "Failed to push exact release tag $tagRef."
+          }
 
       - name: Create or repair GitHub Release
         shell: pwsh
