@@ -17,6 +17,7 @@ HEALTH_EVIDENCE = ROOT / "docs/v35-phase0-end-to-end-data-plane-health-acceptanc
 
 
 class V35ActualTunnelSettlementGateRedAcceptanceTests(unittest.TestCase):
+    @unittest.skipUnless(MATRIX.is_file(), "Requires intentionally untracked local V35 historical evidence")
     def test_actual_v0013_candidate_is_explicitly_fail_closed(self) -> None:
         matrix = json.loads(MATRIX.read_text(encoding="utf-8"))
         transport = matrix["transport_evidence"]
@@ -44,6 +45,7 @@ class V35ActualTunnelSettlementGateRedAcceptanceTests(unittest.TestCase):
         self.assertFalse(verdict["persistent_side_effecting_remote_cutover_allowed"])
         self.assertEqual(verdict["status"], "FORBIDDEN")
 
+    @unittest.skipUnless(MATRIX.is_file(), "Requires intentionally untracked local V35 historical evidence")
     def test_repo_candidate_gate2_is_recorded_without_promoting_live_runtime_rows(self) -> None:
         matrix = json.loads(MATRIX.read_text(encoding="utf-8"))
         runtime = matrix["runtime_activation_evidence"]
@@ -88,6 +90,7 @@ class V35ActualTunnelSettlementGateRedAcceptanceTests(unittest.TestCase):
         self.assertNotIn("settlement-callback", rendered)
         self.assertNotIn("response-ack-callback", rendered)
 
+    @unittest.skipUnless(EVIDENCE_V0013.is_file(), "Requires intentionally untracked local V35 historical evidence")
     def test_red_evidence_names_the_exact_missing_pre_and_post_effect_seams(self) -> None:
         evidence = EVIDENCE_V0013.read_text(encoding="utf-8")
 
@@ -98,6 +101,7 @@ class V35ActualTunnelSettlementGateRedAcceptanceTests(unittest.TestCase):
         self.assertIn("structured per-command callback/API", evidence)
         self.assertIn("side-effecting Tunnel activation: **FORBIDDEN**", evidence)
 
+    @unittest.skipUnless(EVIDENCE_V0014.is_file() and RELIABILITY_V0014.is_file(), "Requires intentionally untracked local V35 historical evidence")
     def test_v0014_reliability_and_settlement_remain_separate_fail_closed_claims(self) -> None:
         settlement = EVIDENCE_V0014.read_text(encoding="utf-8")
         reliability = RELIABILITY_V0014.read_text(encoding="utf-8")
@@ -108,6 +112,7 @@ class V35ActualTunnelSettlementGateRedAcceptanceTests(unittest.TestCase):
         self.assertIn("Windows v0.0.14 exact response-deadline retirement dynamic acceptance = GREEN", reliability)
         self.assertIn("Gate 3 settlement = RED / BLOCKED", reliability)
 
+    @unittest.skipUnless(HEALTH_EVIDENCE.is_file(), "Requires intentionally untracked local V35 historical evidence")
     def test_data_plane_health_evidence_refuses_process_only_false_green(self) -> None:
         health = HEALTH_EVIDENCE.read_text(encoding="utf-8")
 

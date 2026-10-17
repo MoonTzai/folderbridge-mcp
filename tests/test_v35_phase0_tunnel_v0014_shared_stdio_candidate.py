@@ -22,6 +22,14 @@ PINNED_TRANSPORT_SHA256 = "22107bba2664f27a439066a705b93943c7004cb981038b11985d0
 PINNED_E2E_SHA256 = "616a42cd2089c3dc355120e7d96303c6e4a22b4831bd1181c693bbb976b38ad8"
 
 
+@unittest.skipUnless(
+    all(path.is_file() for path in (
+        MATRIX, RELIABILITY, SETTLEMENT, HEALTH, WINDOWS_DYNAMIC_RAW,
+        REAL_FOLDERBRIDGE_RAW, MULTISESSION_RAW, NORMAL_RUN_CHILD_DEATH_RAW,
+        DEV_PROXY_CHILD_DEATH_RAW, SLOW_OPERATION_RAW,
+    )),
+    "Requires intentionally untracked local V35 historical tunnel evidence",
+)
 class V35TunnelV0014SharedStdioCandidateEvidenceTests(unittest.TestCase):
     def test_matrix_keeps_live_v0013_separate_from_latest_v0014_candidate(self) -> None:
         matrix = json.loads(MATRIX.read_text(encoding="utf-8"))

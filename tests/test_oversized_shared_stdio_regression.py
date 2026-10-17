@@ -52,6 +52,10 @@ def _post(url: str, payload: dict, session_id: str | None = None, timeout: float
         return exc.code, decoded, dict(exc.headers.items())
 
 
+@unittest.skipUnless(
+    ZIP_PATH.is_file(),
+    "Requires local signed tunnel-client-v0.0.14 binary, which is not part of the public source tree",
+)
 class OversizedSharedStdioRegressionTests(unittest.TestCase):
     def test_v0014_real_folderbridge_oversize_is_request_scoped_and_child_survives(self) -> None:
         self.assertTrue(ZIP_PATH.is_file(), ZIP_PATH)

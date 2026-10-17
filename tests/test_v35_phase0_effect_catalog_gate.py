@@ -453,6 +453,10 @@ class V35EffectContractCatalogGateAcceptanceTests(unittest.TestCase):
                 f"gpt-sovits-local/run({operation})",
             )
 
+    @unittest.skipUnless(
+        (ROOT / "docs/v35-phase0-remote-settlement-capability-matrix-20260905.json").is_file(),
+        "Requires intentionally untracked local V35 historical evidence",
+    )
     def test_private_debate_judge_owner_remains_explicitly_blocked_until_its_source_contract_is_audited(self) -> None:
         matrix = json.loads(
             (ROOT / "docs/v35-phase0-remote-settlement-capability-matrix-20260905.json").read_text(

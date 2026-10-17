@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import shutil
 import struct
 import subprocess
@@ -343,7 +344,10 @@ $page.Dispose()
             self.assertGreater(int(mta[1]), 0)
 
 
-    @unittest.skipUnless(sys.platform == "win32" and shutil.which("powershell.exe"), "Windows PowerShell unavailable")
+    @unittest.skipUnless(
+        sys.platform == "win32" and shutil.which("powershell.exe") and os.environ.get("GITHUB_ACTIONS") != "true",
+        "Requires locally installed desktop Microsoft Word; GitHub-hosted Windows runners do not provide Word COM",
+    )
     def test_minimal_word_docx_renders_through_plugin_without_orphan_word(self) -> None:
         plugin = load_plugin()
 

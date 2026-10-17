@@ -70,6 +70,19 @@ jobs:
       - name: Run full regression suite
         shell: pwsh
         run: |
+          # Hosted Windows TEMP may use the RUNNER~1 8.3 alias, whereas Python
+          # Path.resolve() expands it. Test fixture paths must use the same
+          # canonical spelling that the security boundary verifies.
+          $testTemp = Join-Path $env:RUNNER_TEMP "folderbridge-ci-tests"
+          New-Item -ItemType Directory -Path $testTemp -Force | Out-Null
+          $testTemp = (Resolve-Path -LiteralPath $testTemp).ProviderPath
+          $env:TEMP = $testTemp
+          $env:TMP = $testTemp
+          $env:TMPDIR = $testTemp
+          & python -c "import pathlib,tempfile; p=pathlib.Path(tempfile.mkdtemp()); assert p == p.resolve(strict=True), (p, p.resolve(strict=True)); p.rmdir()"
+          if ($LASTEXITCODE -ne 0) {
+            throw "Unit-test temporary root is not canonical on this Windows runner."
+          }
           $log = Join-Path $env:RUNNER_TEMP "folderbridge-unittest.log"
           & python -m unittest discover -s tests -p "test_*.py" -v 2>&1 | Tee-Object -FilePath $log
           $exitCode = $LASTEXITCODE
@@ -82,7 +95,7 @@ jobs:
               $failureLines = @("unittest exited with code $exitCode; see diagnostic tail below")
             }
             foreach ($line in $failureLines) {
-              $escaped = $line.Replace('%', '%25').Replace([char]13, '%0D').Replace([char]10, '%0A')
+              $escaped = $line.Replace('%', '%25').Replace([string][char]13, '%0D').Replace([string][char]10, '%0A')
               Write-Host "::error title=FolderBridge unit test failure::$escaped"
             }
             $tail = @(Get-Content -LiteralPath $log -Tail 120)
