@@ -196,10 +196,10 @@ class ExtensionTests(unittest.TestCase):
 
     def test_external_zip_install_cannot_shadow_release_bundled_extension_id(self) -> None:
         archive_path = self.base / "bundled-id.zip"
-        self._write_extension_zip(archive_path, version="99.0.0", extension_id="git-publisher")
+        self._write_extension_zip(archive_path, version="99.0.0", extension_id="office")
         with self.assertRaisesRegex(ValueError, "release-bundled Extension id"):
             install_external_extension_zip(archive_path, destination_root=self.user_root)
-        self.assertFalse((self.user_root / "git-publisher").exists())
+        self.assertFalse((self.user_root / "office").exists())
 
     def test_explicit_param_mutation_scope_is_resolved_before_worker_start(self) -> None:
         self.make_extension(
@@ -1768,7 +1768,7 @@ class ExtensionTests(unittest.TestCase):
         self.assertNotIn("comfyui", records)
         self.assertEqual(
             {extension_id for extension_id, record in records.items() if record.bundled},
-            {"git-publisher", "office", "skill-engine"},
+            {"office", "skill-engine"},
         )
 
 

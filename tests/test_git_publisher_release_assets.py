@@ -11,7 +11,7 @@ from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
-EXT_DIR = ROOT / "extensions" / "git-publisher"
+EXT_DIR = ROOT / "Plugins" / "extensions" / "git-publisher"
 
 
 def load_plugin():

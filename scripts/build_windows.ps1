@@ -21,7 +21,7 @@ $projectRoot = Split-Path -Parent $PSScriptRoot
 $releaseDir = Join-Path $projectRoot "release\windows-x64"
 $workDir = Join-Path $projectRoot ".build\pyinstaller"
 $specDir = Join-Path $projectRoot ".build"
-$bundledExtensions = @("git-publisher", "office", "skill-engine")
+$bundledExtensions = @("office", "skill-engine")
 $bundledSkillPacks = @("matt-pocock-engineering")
 $publicExternalExtensions = @(
     "blender-toolkit",
@@ -31,6 +31,7 @@ $publicExternalExtensions = @(
     "ffmpeg-toolkit",
     "ftp-toolkit",
     "godot-ai",
+    "git-publisher",
     "gpt-sovits-local",
     "pdf-toolkit",
     "storyboard-chatgpt-web",
@@ -38,6 +39,7 @@ $publicExternalExtensions = @(
 )
 $externalReleaseDir = Join-Path $projectRoot "release\external-extensions"
 $externalReleaseFileAllowlists = @{
+    "git-publisher" = @("folderbridge-extension.json", "plugin.py", "README.md")
     "chatgpt-web-llm-adapter" = @(
         "folderbridge-extension.json",
         "plugin.py",

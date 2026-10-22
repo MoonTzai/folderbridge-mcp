@@ -2,6 +2,31 @@
 
 All notable changes to FolderBridge MCP are documented here.
 
+## 0.8.45 candidate — 2026-10-22 (Git Publisher unbundling; not yet deployed)
+
+- **One-time FolderBridge core separation:** remove `git-publisher` from the
+  bundled allowlist and Windows executable payload; Office and Skill Engine
+  remain bundled. Version 0.8.45 also recognizes the explicit
+  `github.create-repository` permission used by external Git Publisher.
+- **Git Publisher 1.6.0 becomes a fully external, independently hot-updatable
+  Extension** under `Plugins/extensions/git-publisher/`. It is shipped as
+  `FolderBridge-Plugin-git-publisher-v1.6.0.zip` alongside the new main EXE,
+  installed through the GUI and locally approved by exact Extension-tree hash.
+  All actions, including read-only status, require approval as an external
+  Extension; subsequent plugin updates need no new main EXE.
+- Native first-time publication actions cover explicit workspace-relative
+  preflight/init, personal-account GitHub repository creation with explicit
+  visibility, and byte-exact initial commit. Existing commit/current-branch
+  push/Release capability and GCM browser OAuth remain within the plugin.
+  Remote branch SHA is verified after push; ambiguous remote results fail closed.
+- Public Extension release assets increase from 11 to 12 plugin ZIPs. Update
+  packaging/CI member allowlists and external hot-update regression tests.
+- Keep historical Releases unchanged during ordinary version publication: the
+  release workflow no longer deletes assets in older Releases while creating
+  a new tagged Release.
+- Candidate source/tests and Windows EXE remain independent from the active
+  user's installed runtime; this entry makes no live promotion claim.
+
 ## 0.8.44 — 2026-10-17
 
 - Added **hot discovery of locally approved Node tasks** for already configured workspaces: `server_info` and `run_task` reload task configuration from disk; a newly added task can be used on the same running MCP connection after explicit local exact-SHA approval. Added rejection for stale, revoked, malformed, or changed task configuration, including a second SHA/trust check after acquiring the workspace lease and before task admission. This does not expose remote task registration or approval.

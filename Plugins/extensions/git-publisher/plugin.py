@@ -13,7 +13,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 from urllib.parse import urlsplit
 
-from folderbridge_mcp.process_control import owned_process_group_kwargs, terminate_owned_process_tree
+from folderbridge_mcp.extension_api import owned_process_group_kwargs, terminate_owned_process_tree
 
 
 MAX_OUTPUT = 32_000
@@ -51,8 +51,12 @@ BRANCH_RE = re.compile(r"^[A-Za-z0-9._/-]{1,240}$")
 
 def handle(action: str, params: dict[str, Any], context: dict[str, Any]) -> dict[str, Any]:
     workspace_root = _workspace_root(context)
+    if action in {"first-publication-preflight", "init-local-repository", "create-github-repository", "initial-commit"} and "repo_path" not in params:
+        raise RuntimeError("first publication requires an explicitly selected repo_path")
     root, repo_path = _repo_root(workspace_root, params.get("repo_path"))
-    if action == "status":
+    if action == "first-publication-preflight":
+        result = _first_publication_preflight(root)
+    elif action == "status":
         result = _status(
             root,
             offset=params.get("offset", 0),
@@ -61,7 +65,13 @@ def handle(action: str, params: dict[str, Any], context: dict[str, Any]) -> dict
     else:
         if bool(context.get("workspace_read_only")):
             raise RuntimeError("FolderBridge is read-only; Git Publisher mutations are unavailable.")
-        if action == "connect":
+        if action == "init-local-repository":
+            result = _init_local_repository(root)
+        elif action == "create-github-repository":
+            result = _create_github_repository(root, params.get("owner"), params.get("name"), params.get("visibility"), params.get("description", ""))
+        elif action == "initial-commit":
+            result = _commit(root, params.get("paths"), params.get("message"), initial=True)
+        elif action == "connect":
             result = _connect(root, username=params.get("username"), force=bool(params.get("force", False)))
         elif action == "commit":
             result = _commit(root, params.get("paths"), params.get("message"))
@@ -435,7 +445,21 @@ def _status(root: Path, *, offset: Any = 0, limit: Any = DEFAULT_STATUS_PAGE) ->
 
 
 def _connect(root: Path, *, username: Any, force: bool) -> dict[str, Any]:
-    repo = _repo_info(root)
+    origin_check = _run_git(root, "remote", "get-url", "origin", check=False)
+    if origin_check.returncode == 0:
+        repo = _repo_info(root)
+    else:
+        # New first-publication repositories do not have origin yet. Only the
+        # exact Publisher-initialized, unborn/main Git root can use this seam.
+        state = _read_first_publication_state(root)
+        if state["phase"] not in {"local_initialized", "remote_request_pending"}:
+            raise RuntimeError("missing origin on a repository that should already be bound")
+        if Path(_text(_run_git(root, "rev-parse", "--show-toplevel"))).resolve(strict=True) != root:
+            raise RuntimeError("first-publication authentication requires the selected Git root")
+        if _text(_run_git(root, "symbolic-ref", "--short", "HEAD")) != "main":
+            raise RuntimeError("first-publication authentication requires main")
+        _reject_unsafe_local_git_config(root)
+        repo = {"branch": "main", "origin": None, "owner": None, "repo": None}
     gcm = _gcm_status(root)
     if not gcm.get("available"):
         raise RuntimeError("Git Credential Manager is required for browser authorization; install/repair Git for Windows with GCM enabled")
@@ -546,9 +570,24 @@ def _rollback_stage(root: Path, paths: list[str]) -> None:
     _run_git(root, "reset", "-q", "HEAD", "--", *paths, check=False)
 
 
-def _commit(root: Path, raw_paths: Any, raw_message: Any) -> dict[str, Any]:
+def _commit(root: Path, raw_paths: Any, raw_message: Any, *, initial: bool = False) -> dict[str, Any]:
     repo = _repo_info(root)
-    _run_git(root, "rev-parse", "--verify", "HEAD")
+    current_head = _run_git(root, "rev-parse", "--verify", "HEAD", check=False)
+    if initial:
+        state = _read_first_publication_state(root)
+        if state.get("phase") == "initial_committed" and current_head.returncode == 0:
+            actual = _text(current_head)
+            if actual != state.get("head"):
+                raise RuntimeError("existing initial-commit HEAD differs from the recorded publication state")
+            if raw_paths != state.get("paths") or raw_message != state.get("message"):
+                raise RuntimeError("retry cannot change the already committed file allowlist or message")
+            return {**repo, "commit": actual, "already_committed": True}
+        if state.get("phase") != "remote_created" or current_head.returncode == 0:
+            raise RuntimeError("initial-commit requires an initialized first-publication repository with unborn main and a verified remote")
+        if repo["branch"] != "main":
+            raise RuntimeError("initial-commit only supports main")
+    elif current_head.returncode != 0:
+        raise RuntimeError("commit requires an existing HEAD; use initial-commit for first publication")
     if not isinstance(raw_paths, list) or not raw_paths:
         raise RuntimeError("paths must contain at least one explicit file")
     if len(raw_paths) > MAX_COMMIT_PATHS:
@@ -590,6 +629,8 @@ def _commit(root: Path, raw_paths: Any, raw_message: Any) -> dict[str, Any]:
         staged = _staged_paths(root)
         if {item.casefold() for item in staged} != {item.casefold() for item in paths}:
             raise RuntimeError("staged file set differs from the explicit Publisher allowlist")
+        if initial:
+            _assert_staged_bytes_match_worktree(root, existing_paths)
         completed = _run_git(
             root,
             "-c", "core.fsmonitor=false",
@@ -599,9 +640,15 @@ def _commit(root: Path, raw_paths: Any, raw_message: Any) -> dict[str, Any]:
             timeout=120,
         )
     except Exception:
-        _rollback_stage(root, paths)
+        if initial:
+            _run_git(root, "rm", "--cached", "-q", "--ignore-unmatch", "--", *paths, check=False)
+        else:
+            _rollback_stage(root, paths)
         raise
     commit_sha = _text(_run_git(root, "rev-parse", "HEAD"))
+    if initial:
+        next_state = {**state, "phase": "initial_committed", "head": commit_sha, "paths": paths, "message": message}
+        _write_first_publication_state(root, next_state)
     remaining = _status_page(root, offset=0, limit=DEFAULT_STATUS_PAGE)
     return {
         **repo,
@@ -637,10 +684,16 @@ def _push(root: Path) -> dict[str, Any]:
         timeout=300,
         gcm_only=True,
     )
+    head = _text(_run_git(root, "rev-parse", "HEAD"))
+    remote_check = _run_git(root, "ls-remote", "--heads", "origin", f"refs/heads/{branch}", timeout=120, gcm_only=True)
+    remote_sha = _text(remote_check).split("\t", 1)[0] if remote_check.stdout else ""
+    if remote_sha != head:
+        raise RuntimeError("GitHub branch SHA differs from local HEAD after push")
     return {
         **repo,
         "pushed": True,
-        "head": _text(_run_git(root, "rev-parse", "HEAD")),
+        "head": head,
+        "verified_remote_head": remote_sha,
         "git_output": _redact((completed.stdout + completed.stderr).decode("utf-8", errors="replace").strip())[:4000],
         "safety": {
             "current_branch_only": True,
@@ -958,6 +1011,268 @@ def _release_assets(
             "force_push": False,
         },
     }
+
+
+# Private, repository-local recovery record; always under the selected .git directory.
+# These actions never authorize a remote repository merely because its name exists.
+FIRST_PUBLISH_STATE = "folderbridge-first-publication.json"
+FIRST_PUBLISH_WORKFLOW = "folderbridge-git-publisher-first-publication"
+FIRST_PUBLISH_PHASES = frozenset({
+    "local_initialized", "remote_request_pending", "remote_created", "initial_committed",
+})
+
+
+def _first_publication_state_path(root: Path) -> Path:
+    git_dir = root / ".git"
+    if git_dir.is_symlink() or _is_reparse(git_dir) or not git_dir.is_dir():
+        raise RuntimeError("first publication requires an ordinary, non-linked .git directory")
+    state = git_dir / FIRST_PUBLISH_STATE
+    if state.is_symlink() or _is_reparse(state):
+        raise RuntimeError("first-publication state may not be a symlink or reparse point")
+    return state
+
+
+def _read_first_publication_state(root: Path) -> dict[str, Any]:
+    state_path = _first_publication_state_path(root)
+    try:
+        raw = state_path.read_bytes()
+    except FileNotFoundError as exc:
+        raise RuntimeError("repository was not initialized by Git Publisher's first-publication action") from exc
+    if len(raw) > 4096:
+        raise RuntimeError("first-publication recovery record exceeds 4096 bytes")
+    try:
+        result = json.loads(raw.decode("utf-8"))
+    except (ValueError, UnicodeDecodeError) as exc:
+        raise RuntimeError("first-publication recovery record is invalid") from exc
+    if (
+        not isinstance(result, dict)
+        or result.get("workflow") != FIRST_PUBLISH_WORKFLOW
+        or result.get("version") != 1
+        or result.get("branch") != "main"
+        or result.get("phase") not in FIRST_PUBLISH_PHASES
+    ):
+        raise RuntimeError("first-publication recovery record is not recognized")
+    return result
+
+
+def _write_first_publication_state(root: Path, value: dict[str, Any]) -> None:
+    state_path = _first_publication_state_path(root)
+    if value.get("workflow") != FIRST_PUBLISH_WORKFLOW or value.get("phase") not in FIRST_PUBLISH_PHASES:
+        raise RuntimeError("refusing to write an invalid first-publication state")
+    encoded = (json.dumps(value, sort_keys=True, ensure_ascii=False, allow_nan=False) + "\n").encode("utf-8")
+    if len(encoded) > 4096:
+        raise RuntimeError("first-publication state exceeds the size limit")
+    tmp: str | None = None
+    try:
+        with tempfile.NamedTemporaryFile(dir=state_path.parent, prefix=".first-publish-", delete=False) as handle:
+            tmp = handle.name
+            handle.write(encoded)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp, state_path)
+        tmp = None
+    finally:
+        if tmp:
+            Path(tmp).unlink(missing_ok=True)
+
+
+def _first_publication_preflight(root: Path) -> dict[str, Any]:
+    git_dir = root / ".git"
+    _reject_links(root, git_dir)
+    if not git_dir.exists():
+        state = "not_initialized"
+        branch = None
+    else:
+        if not git_dir.is_dir() or git_dir.is_symlink() or _is_reparse(git_dir):
+            raise RuntimeError("selected path has an unsupported .git entry")
+        top = _text(_run_git(root, "rev-parse", "--show-toplevel"))
+        if Path(top).resolve(strict=True) != root:
+            raise RuntimeError("selected repository root does not match the intended directory")
+        branch = _text(_run_git(root, "symbolic-ref", "--quiet", "--short", "HEAD", check=False)) or None
+        head = _run_git(root, "rev-parse", "--verify", "HEAD", check=False)
+        state = "committed" if head.returncode == 0 else "unborn"
+        try:
+            journal = _read_first_publication_state(root)
+        except RuntimeError:
+            journal = None
+        if journal:
+            state = journal["phase"]
+    return {
+        "repository_state": state,
+        "branch": branch,
+        "ready_for_init": state == "not_initialized",
+        "credential_manager": _gcm_status(root),
+        "no_automatic_publication": True,
+    }
+
+
+def _init_local_repository(root: Path) -> dict[str, Any]:
+    git_dir = root / ".git"
+    _reject_links(root, git_dir)
+    if git_dir.exists():
+        state = _read_first_publication_state(root)
+        top = _text(_run_git(root, "rev-parse", "--show-toplevel"))
+        if Path(top).resolve(strict=True) != root:
+            raise RuntimeError("existing .git directory is not the selected repository root")
+        if _text(_run_git(root, "symbolic-ref", "--short", "HEAD")) != "main":
+            raise RuntimeError("first-publication repository changed branch")
+        return {"initialized": True, "already_initialized": True, "branch": "main", "phase": state["phase"]}
+    if not root.is_dir():
+        raise RuntimeError("selected first-publication directory must already exist")
+    _run_git(root, "init", "-b", "main")
+    top = _text(_run_git(root, "rev-parse", "--show-toplevel"))
+    if Path(top).resolve(strict=True) != root:
+        raise RuntimeError("git init did not create a repository rooted at the intended directory")
+    if _run_git(root, "rev-parse", "--verify", "HEAD", check=False).returncode == 0:
+        raise RuntimeError("unexpected existing commit after repository initialization")
+    state = {"workflow": FIRST_PUBLISH_WORKFLOW, "version": 1, "branch": "main", "phase": "local_initialized"}
+    _write_first_publication_state(root, state)
+    return {"initialized": True, "already_initialized": False, "branch": "main", "phase": "local_initialized"}
+
+
+def _clean_new_repository_identity(owner: Any, name: Any, visibility: Any, description: Any) -> tuple[str, str, str, str]:
+    if not isinstance(owner, str) or not re.fullmatch(r"[A-Za-z0-9-]{1,39}", owner):
+        raise RuntimeError("owner must be one explicit GitHub personal-account login")
+    if (
+        not isinstance(name, str) or not re.fullmatch(r"[A-Za-z0-9_.-]{1,100}", name)
+        or name in {".", ".."} or name.endswith(".git")
+    ):
+        raise RuntimeError("repository name contains unsupported characters")
+    if visibility not in ("public", "private"):
+        raise RuntimeError("repository visibility must explicitly be public or private")
+    if not isinstance(description, str) or len(description) > 200 or any(c in description for c in "\r\n\x00"):
+        raise RuntimeError("repository description must be a single line of at most 200 characters")
+    return owner, name, visibility, description
+
+
+def _json_gh_response(result: subprocess.CompletedProcess[bytes], label: str) -> dict[str, Any]:
+    try:
+        value = json.loads(result.stdout.decode("utf-8", errors="strict"))
+    except (UnicodeDecodeError, ValueError) as exc:
+        raise RuntimeError(f"{label} returned malformed JSON") from exc
+    if not isinstance(value, dict):
+        raise RuntimeError(f"{label} did not return a GitHub JSON object")
+    return value
+
+
+def _probe_github_repository(root: Path, full_name: str, token: str) -> dict[str, Any] | None:
+    output = _run_gh(root, "api", f"repos/{full_name}", token=token, check=False, timeout=60)
+    if output.returncode == 0:
+        return _json_gh_response(output, "GitHub repository lookup")
+    error = _redact(output.stderr.decode("utf-8", errors="replace"))
+    if re.search(r"\b(?:HTTP|status)\s*[:=]?\s*404\b", error, re.IGNORECASE):
+        return None
+    raise RuntimeError("GitHub repository lookup failed; remote existence is unknown: " + error[:450])
+
+
+def _assert_expected_github_repository(
+    value: dict[str, Any], owner: str, name: str, visibility: str, *, expected_id: int | None = None,
+) -> None:
+    expected = f"{owner}/{name}"
+    remote_owner = value.get("owner")
+    if (
+        not isinstance(remote_owner, dict)
+        or str(remote_owner.get("login", "")).casefold() != owner.casefold()
+        or str(value.get("full_name", "")).casefold() != expected.casefold()
+        or value.get("private") is not (visibility == "private")
+        or not isinstance(value.get("id"), int)
+    ):
+        raise RuntimeError("GitHub returned an unexpected repository owner, name, identity, or visibility")
+    if expected_id is not None and value["id"] != expected_id:
+        raise RuntimeError("GitHub repository ID changed since this publication created it")
+
+
+def _create_github_repository(
+    root: Path, owner: Any, name: Any, visibility: Any, description: Any,
+) -> dict[str, Any]:
+    owner, name, visibility, description = _clean_new_repository_identity(owner, name, visibility, description)
+    state = _read_first_publication_state(root)
+    if _text(_run_git(root, "symbolic-ref", "--short", "HEAD")) != "main":
+        raise RuntimeError("first publication requires a main branch")
+    full_name = f"{owner}/{name}"
+    _validate_origin(f"https://github.com/{full_name}.git")
+    if state["phase"] not in {"local_initialized", "remote_request_pending", "remote_created", "initial_committed"}:
+        raise RuntimeError("repository is not in a recognized creation phase")
+    previously_bound = state.get("owner")
+    if previously_bound is not None and (
+        str(previously_bound).casefold() != owner.casefold()
+        or state.get("name") != name or state.get("visibility") != visibility
+        or state.get("description") != description
+    ):
+        raise RuntimeError("first-publication intent is already bound to a different repository")
+    existing_origin = _run_git(root, "remote", "get-url", "origin", check=False)
+    expected_origin = f"https://github.com/{full_name}.git"
+    if existing_origin.returncode == 0 and _text(existing_origin) != expected_origin:
+        raise RuntimeError("existing Git origin differs from the requested remote; refusing to overwrite")
+    if existing_origin.returncode != 0 and state["phase"] == "initial_committed":
+        raise RuntimeError("committed first-publication repository unexpectedly lost its origin")
+
+    token = _github_token_from_gcm(root)
+    who = _json_gh_response(_run_gh(root, "api", "user", token=token, timeout=60), "GitHub user")
+    if str(who.get("login", "")).casefold() != owner.casefold():
+        raise RuntimeError("authenticated GitHub account does not match the requested owner")
+    existing = _probe_github_repository(root, full_name, token)
+    created = False
+    if existing is not None:
+        if state["phase"] not in {"remote_created", "initial_committed"}:
+            raise RuntimeError("remote name already exists or creation response is ambiguous; manual reconciliation required")
+        if type(state.get("remote_id")) is not int:
+            raise RuntimeError("verified remote identity was not recorded; refusing to adopt an existing repository")
+        _assert_expected_github_repository(
+            existing, owner, name, visibility, expected_id=state.get("remote_id"),
+        )
+    else:
+        if state["phase"] in {"remote_created", "initial_committed"}:
+            raise RuntimeError("previously created GitHub repository disappeared; refusing to recreate it")
+        if _run_git(root, "rev-parse", "--verify", "HEAD", check=False).returncode == 0:
+            raise RuntimeError("remote creation requires the initial empty local repository")
+        pending = {
+            **state, "phase": "remote_request_pending", "owner": owner, "name": name,
+            "visibility": visibility, "description": description,
+        }
+        _write_first_publication_state(root, pending)
+        response = _run_gh(
+            root, "api", "-X", "POST", "user/repos",
+            "-f", f"name={name}", "-f", f"description={description}",
+            "-F", f"private={'true' if visibility == 'private' else 'false'}",
+            "-F", "auto_init=false",
+            token=token, timeout=90, check=False,
+        )
+        if response.returncode != 0:
+            error = _redact(response.stderr.decode("utf-8", errors="replace"))
+            if re.search(r"\bHTTP\s*(?:401|403)\b", error):
+                raise RuntimeError("GitHub authorization lacks repository-creation access; reconnect Git Publisher. " + error[:300])
+            raise RuntimeError("GitHub creation not confirmed; recovery journal retained. " + error[:400])
+        existing = _json_gh_response(response, "GitHub repository creation")
+        _assert_expected_github_repository(existing, owner, name, visibility)
+        verified = _probe_github_repository(root, full_name, token)
+        if verified is None:
+            raise RuntimeError("GitHub creation returned success but the repository is not yet readable")
+        _assert_expected_github_repository(verified, owner, name, visibility, expected_id=existing["id"])
+        _write_first_publication_state(root, {**pending, "phase": "remote_created", "remote_id": existing["id"]})
+        created = True
+    if existing_origin.returncode != 0:
+        _run_git(root, "remote", "add", "origin", expected_origin)
+    _repo_info(root)
+    return {
+        "created": created, "already_created": not created, "owner": owner, "repo": name,
+        "visibility": visibility, "remote_id": existing["id"], "url": f"https://github.com/{full_name}",
+        "branch": "main", "credential_manager_only": True,
+    }
+
+
+def _assert_staged_bytes_match_worktree(root: Path, paths: list[str]) -> None:
+    for rel in paths:
+        absolute = root.joinpath(*PurePosixPath(rel).parts)
+        staged = _text(_run_git(root, "rev-parse", f":{rel}"))
+        raw = _text(_run_git(root, "hash-object", "--no-filters", "--", rel))
+        if staged != raw:
+            raise RuntimeError(
+                f"Git staging normalized or transformed bytes of {rel}; "
+                "review repository-local .gitattributes before initial publication"
+            )
+        if not absolute.is_file() or absolute.is_symlink() or _is_reparse(absolute):
+            raise RuntimeError("selected first-publication file changed while validating staged bytes")
 
 
 def _sha256_file(path: Path) -> str:

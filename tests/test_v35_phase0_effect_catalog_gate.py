@@ -7,7 +7,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 FIRST_PARTY_MANIFESTS = (
-    "extensions/git-publisher/folderbridge-extension.json",
+    "Plugins/extensions/git-publisher/folderbridge-extension.json",
     "extensions/office/folderbridge-extension.json",
     "extensions/skill-engine/folderbridge-extension.json",
     "Plugins/extensions/comfyui/folderbridge-extension.json",
@@ -20,6 +20,22 @@ FIRST_PARTY_MANIFESTS = (
 )
 EXPECTED_EFFECTS = {
     "git-publisher": {
+        "first-publication-preflight": [
+            "read_only",
+            "foreground"
+        ],
+        "init-local-repository": [
+            "external_effect",
+            "foreground"
+        ],
+        "create-github-repository": [
+            "external_effect",
+            "foreground"
+        ],
+        "initial-commit": [
+            "external_effect",
+            "foreground"
+        ],
         "status": [
             "read_only",
             "foreground"

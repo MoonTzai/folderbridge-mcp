@@ -34,6 +34,7 @@ Skill Pack 是另一条扩展轴，主要承载**方法论、领域知识、审�
 | **FFmpeg Toolkit** (`ffmpeg-toolkit`) | 0.1.2 | workspace 受限的 FFmpeg/FFprobe 探测、能力发现与长媒体任务。 |
 | **FTP Toolkit** (`ftp-toolkit`) | 0.2.1 | workspace 受限的 FTP/FTPS profile、list/stat、上传下载、递归上传、rename、mkdir 与精确文件删除。 |
 | **Godot AI Local Bridge** (`godot-ai`) | 0.1.0 | 本地 Godot editor、scene、run、log、截图和运行时输入的受限桥接。 |
+| **Git Publisher** (`git-publisher`) | 1.6.0 | 可独立热更新的 GitHub 建库、指定文件提交、推送与 Release 插件，复用 Git Credential Manager 授权。 |
 | **Local GPT-SoVITS** (`gpt-sovits-local`) | 0.2.2 | 完整本地 v2Pro 工具链：参考/音频预处理、ASR、数据集准备、训练、批量推理与 WebUI/API 生命周期。 |
 | **PDF Toolkit** (`pdf-toolkit`) | 0.6.0 | 有界 PDF 结构检查、文本搜索、outline 读取与独立页面渲染。 |
 | **Storyboard ChatGPT Web** (`storyboard-chatgpt-web`) | 0.2.0 | 基于 ChatGPT Web 原生生图／编辑的分镜执行器，可选 GENERATE_ONLY 或独立原生 Visual Judge，保留精确图片／provenance 恢复与 PASS-only canonical。 |
@@ -115,7 +116,7 @@ Skill Pack 是另一条扩展轴，主要承载**方法论、领域知识、审�
 - **统一用户状态目录：** Launcher、MCP host 与清理环境后的 Extension worker 现在共用一套 FolderBridge 用户配置根目录解析规则，避免 Extension/Skill 状态因环境变量视图不同而分裂。
 - **Extension 改为校验后私有快照执行：** exact-hash 批准现在真正绑定到最终执行字节。worker 会先把 hash 覆盖的 Extension 文件复制到私有临时快照，对快照重新核验宿主钉住的 SHA-256，再只从该快照 import/运行；插件相对路径读取也统一落在快照中，不再回到可变原目录。
 - **补齐并发与协议边界：** Extension trust store 的读改写在单进程内串行化；manifest、worker 请求和响应改为 strict JSON，拒绝非标准 `NaN`/`Infinity`；重叠密钥按长值优先脱敏；JSON Schema 中 boolean 不再因为 Python 的相等规则被当作数值 enum。
-- **第一方外部进程统一纳入 owned-process 语义：** 核心 Git 检查、bundled Git Publisher 的 Git/GCM、Office PowerShell 渲染都具备进程树超时清理；Git 安全检查一旦输出被截断会直接失败，不把不完整结果当作完整检查。
+- **第一方外部进程统一纳入 owned-process 语义：** 核心 Git 检查、外置 Git Publisher 的 Git/GCM、Office PowerShell 渲染都具备进程树超时清理；Git 安全检查一旦输出被截断会直接失败，不把不完整结果当作完整检查。
 - **补充资源与生命周期保护：** ComfyUI 启动流程持有稳定的本地 process handle，避免与 shutdown 竞态；核心 PPTX 检查在 XML 解析前增加 256 MiB 的 XML/relationship 总未压缩体积上限。
 - **修复跨屏 DPI 字体缩放：** Windows Per-Monitor V2 环境下，FolderBridge 在窗口移动到不同缩放比例的显示器时，会根据新的 `GetDpiForWindow` 结果明确重算 named font 的像素尺寸。ttk 标签/按钮/输入框/Treeview、运行日志、主启动/停止按钮以及连接向导正文都会随当前屏幕重新缩放，不再依赖 Tk 对已有控件运行时 `tk scaling` 更新的未定义行为。
 - **新增长任务 Extension Job：** action 可声明 `run_mode=job`，`extension(action="run")` 会立即返回 FolderBridge 托管的 `job_id`，随后继续用同一个 `extension` 网关查询状态或取消；不新增 MCP tool 名称。超时可配置到 24 小时，`0` 表示关闭自动超时终止。每个 FolderBridge 进程最多同时保有 16 个活跃 Job（包括 `termination_pending`），并只保留最近 128 条已结束 Job 记录；前台 Extension worker 另有独立的 16-worker 生命周期预算。
@@ -126,7 +127,7 @@ Skill Pack 是另一条扩展轴，主要承载**方法论、领域知识、审�
 - **窗口按真实内容自适应并支持折叠：** Tk 完成布局后，启动器会按页面实际请求尺寸扩大窗口，最多占显示器 94%；“本地工作区与权限”“OpenAI Secure MCP Tunnel”“运行日志”三个区域都可单独展开/收起，顶部还提供“全部展开 / 全部折叠”。内容全部放得下时主滚动条自动隐藏，只有可见内容超出可用高度才显示；DPI 改变、区域折叠或打开/关闭 Extensions 侧栏都会重新计算。
 - **托管服务状态实时刷新：** Extensions 侧栏打开时，每 2 秒重新检测一次 ComfyUI 托管状态；在线显示绿色，离线/未配置显示红色，检测中/启动中使用中性色。状态未变化时只更新原有状态标签，不再每 2 秒重建整个侧栏。
 - **API 配置文件默认隐藏：** `.api-config.json` / `api-config.json` 已归入凭据类路径，普通 MCP 文件工具不会把它们当项目文本暴露出来。
-- **新增浏览器授权的 GitHub 发布链：** bundled `git-publisher` Extension 可通过 Git Credential Manager 打开 GitHub 官方网页授权，OAuth 凭据保留在 Windows Credential Manager；插件只提交显式文件白名单、只把当前分支推到既有 GitHub HTTPS origin，并可把显式工作区文件按受限 tag/title/文件名发布为 GitHub Release assets。通用 Release 的长时间上传使用宿主托管 Job。模型侧不暴露 token/PAT/password 输入字段。
+- **新增浏览器授权的 GitHub 发布链：** 外部热更新 `git-publisher` Extension 可通过 Git Credential Manager 打开 GitHub 官方网页授权，OAuth 凭据保留在 Windows Credential Manager；插件只提交显式文件白名单、只把当前分支推到既有 GitHub HTTPS origin，并可把显式工作区文件按受限 tag/title/文件名发布为 GitHub Release assets。通用 Release 的长时间上传使用宿主托管 Job。模型侧不暴露 token/PAT/password 输入字段。
 - **Git 发布仍保持强边界：** 拒绝已有 staged 内容、密钥/凭据类文件、会变换内容的 Git attributes 和危险的仓库本地 Git 设置；绝不执行 `git add .`，不接受任意 remote/ref，受控 commit 禁用 hooks/签名，push 永不 force。
 - **补齐 Microsoft Office 原生视觉链：** bundled `office` Extension 可对 `.pptx`、`.docx`、`.xlsx` 调用本机已安装的 Microsoft Office 做原生渲染。PowerPoint 直接逐页导出 PNG；Word/Excel 先走各自原生固定版式引擎，再由 Windows 原生 PDF renderer 转成逐页 PNG。
 - **Word 不启动 Office 也能做结构读取：** `inspect_docx` 可读取段落、样式/编号、表格、分节与页设置、页眉页脚、媒体、超链接、脚注、尾注、批注等 OOXML 结构。
@@ -368,7 +369,7 @@ MCP 不能删除或移动文件。绝对路径、`..`、符号链接、junction/
 
 对已经全局预授权的 `test` 与 `build`，FolderBridge 现在保证每个已选择工作区都有可用 provider。若项目本身存在 `npm run test`、`npm run build`、Python unittest/pytest 等受支持入口，继续优先执行项目入口；若没有，`test` 自动使用 FolderBridge 自有的有界 workspace smoke：复用核心的凭据/VCS/依赖目录/link 拒绝策略，检查常见 UTF-8 文本、JSON/HTML 结构，并在可信系统 Node 可用时用 `--check` 做有界 JavaScript 语法解析而不执行工作区 JavaScript。`build` 则使用不修改工作区的安全 fallback：静态 HTML、文档/内容型和本来无需构建的目录明确返回 `identity` 模式；有源码但没有构建入口的目录明确返回 `validation-only` 模式。两者都不会伪造编译产物，`server_info` 会报告实际选中的 provider。
 
-`git-push` 继续作为底层“只推送”能力：限制为 GitHub HTTPS `origin`、当前分支、禁止 force push，并拒绝仓库本地的 credential helper、pushurl/receivepack 和 URL 重写配置。若需要浏览器授权＋显式文件 commit＋push，请改用 bundled **Git Publisher** Extension。显式项目构建/封装能力可能执行本地项目代码，所以只勾选你愿意全局预授权的能力。
+`git-push` 继续作为底层“只推送”能力：限制为 GitHub HTTPS `origin`、当前分支、禁止 force push，并拒绝仓库本地的 credential helper、pushurl/receivepack 和 URL 重写配置。若需要浏览器授权＋显式文件 commit＋push，请改用 可独立热更新的外置 **Git Publisher** Extension。显式项目构建/封装能力可能执行本地项目代码，所以只勾选你愿意全局预授权的能力。
 
 直接 stdio 客户端可在 `serve` 或 `client-config` 命令中重复加入 `--capability <名称>`；Windows 启动器提供同样的持久化复选框。
 
@@ -445,7 +446,7 @@ python -m venv .build-venv
 
 ### 发布 GitHub Release
 
-仓库 push 与 GitHub Release 明确分离。Git Publisher 1.5.0 已完全项目无关，只暴露 `status`、`connect`、`commit`、`push`、`release-assets` 五个通用动作。选择性 `commit` 只接受显式路径白名单，并支持经过严格确认的 Git tracked deletion；staged 集合核验会关闭 rename detection，因此“旧路径删除 + 新路径新增”的迁移不会再被误判成白名单缺项。`push` 只作用于当前选中仓库的当前命名分支和既有、无凭据的 GitHub HTTPS `origin`，禁止 force push。现在每个 Git Publisher action 都可选传 workspace-relative POSIX `repo_path`（默认 `.`），因此同一个 FolderBridge 项目工作区可以包含一个独立发布的 nested Git repository，同时继续严格限制在 workspace 内，并要求选中目录本身精确等于 Git repo root。通用 `release-assets` 只作用于当前选中的工作区仓库，接受受限 tag/title 与显式普通文件白名单；tracked 内容必须干净、当前分支必须已与 origin 对齐，禁止移动既有 tag 与 force push，同时允许显式未跟踪构建产物使用 GitHub 稳定的 ASCII Release 文件名上传，并可附带面向用户显示的独立标签。资产在任何远端修改前都会做 SHA-256 校验并复制为临时快照，长时间上传以宿主托管 Job 运行。Release 认证直接复用已经通过浏览器授权的 Git Credential Manager 账号：隔离 worker 从 GCM 取得凭据，只在本次操作期间通过子进程环境交给 `gh.exe`。任何项目专用的版本读取、构建规则、release commit 约定、固定资产名，以及 token/PAT/password 或任意 Git/`gh` 命令输入，都不属于 Git Publisher。
+仓库 push 与 GitHub Release 明确分离。Git Publisher 1.6.0 继续保持项目无关，保留 `status`、`connect`、`commit`、`push`、`release-assets`，并新增 `first-publication-preflight`、`init-local-repository`、`create-github-repository`、`initial-commit` 四个首次建库动作，不再要求为每个新项目单独注册 Node 发布任务。选择性 `commit` 只接受显式路径白名单，并支持经过严格确认的 Git tracked deletion；staged 集合核验会关闭 rename detection，因此“旧路径删除 + 新路径新增”的迁移不会再被误判成白名单缺项。`push` 只作用于当前选中仓库的当前命名分支和既有、无凭据的 GitHub HTTPS `origin`，禁止 force push。原有 Git Publisher 动作仍可选传 workspace-relative POSIX `repo_path`（默认 `.`），新增的四个首次发布动作则必须显式指定 `repo_path`，因此同一个 FolderBridge 项目工作区可以包含一个独立发布的 nested Git repository，同时继续严格限制在 workspace 内，并要求选中目录本身精确等于 Git repo root。通用 `release-assets` 只作用于当前选中的工作区仓库，接受受限 tag/title 与显式普通文件白名单；tracked 内容必须干净、当前分支必须已与 origin 对齐，禁止移动既有 tag 与 force push，同时允许显式未跟踪构建产物使用 GitHub 稳定的 ASCII Release 文件名上传，并可附带面向用户显示的独立标签。资产在任何远端修改前都会做 SHA-256 校验并复制为临时快照，长时间上传以宿主托管 Job 运行。Release 认证直接复用已经通过浏览器授权的 Git Credential Manager 账号：隔离 worker 从 GCM 取得凭据，只在本次操作期间通过子进程环境交给 `gh.exe`。任何项目专用的版本读取、构建规则、release commit 约定、固定资产名，以及 token/PAT/password 或任意 Git/`gh` 命令输入，都不属于 Git Publisher。
 
 FolderBridge 自己的仓库级 `.github/workflows/release-windows.yml` 是项目专用发布路径：当最终 commit 标题严格为 `Release FolderBridge <version>` 时，它会独立重新读取版本、执行完整 Windows 测试、构建并验证 EXE，然后创建或修复对应 Release。已有 tag 只有在确实指向同一个 release commit 时才会被接受；已有 Release 可以重新上传两个固定资产并重新标记为 Latest。
 

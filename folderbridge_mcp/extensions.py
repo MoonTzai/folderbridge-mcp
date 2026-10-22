@@ -69,7 +69,7 @@ MAX_EXTENSION_JOB_CANCEL_GRACE_SECONDS = 2.0
 ACTIVE_EXTENSION_JOB_STATUSES = frozenset({"running", "termination_pending"})
 MAX_INHERITED_ENV_VALUE_BYTES = 64 * 1024
 MAX_WORKSPACE_ARTIFACTS = 64
-DEFAULT_BUNDLED_EXTENSION_IDS = frozenset({"git-publisher", "office", "skill-engine"})
+DEFAULT_BUNDLED_EXTENSION_IDS = frozenset({"office", "skill-engine"})
 EXTENSION_ID_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
 ACTION_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 EXECUTABLE_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+-]{0,127}(?:\.exe|\.cmd|\.bat|\.com)?$", re.IGNORECASE)
@@ -100,6 +100,7 @@ EXACT_PERMISSIONS = {
     "git.commit-selected-files",
     "git.push-current-branch",
     "github.web-auth",
+    "github.create-repository",
     "network.outbound:https",
 }
 

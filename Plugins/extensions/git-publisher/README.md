@@ -1,20 +1,63 @@
 # Git Publisher
 
-Bundled FolderBridge extension for a narrow GitHub publish workflow:
+Pure external / hot-updatable FolderBridge Extension for GitHub publishing, including first publication. It is **never bundled into the main executable**:
 
-1. inspect the selected workspace-root repository or one explicit nested Git repository selected by `repo_path`;
+1. inspect the selected workspace-root repository or one explicit nested Git repository selected by `repo_path`, or initialize a new one;
 2. connect `github.com` through Git Credential Manager's browser OAuth flow;
 3. commit only an explicit allowlist of regular workspace files;
 4. push only the current named branch to the existing credential-free `https://github.com/<owner>/<repo>[.git]` origin;
 5. publish explicit files from any selected GitHub workspace repository through the generic `release-assets` action.
 
+## First-time repository publication (1.6.0)
+
+Once installed from the plugin ZIP and its exact hash + declared permissions are approved in **Extensions & Skills**, all actions—including read-only status—can be used. Future plugin updates use the same local ZIP installer and exact-hash reapproval; the main application does not need to be rebuilt. The first migration from pre-externalization binaries requires the one-time core build with the bundled Git Publisher removed.
+
+New bounded actions allow first publication without a one-off Node task or a
+second GitHub CLI login. GitHub repository creation is explicitly declared as
+the additional `github.create-repository` capability.
+
+1. `first-publication-preflight(repo_path)`: read-only inspection of an
+   existing selected workspace directory, its local repository state and
+   Git Credential Manager availability; never makes a repository.
+2. `init-local-repository(repo_path)`: initialize **only** the existing
+   selected regular directory as a new `main` Git root. An internal recovery
+   journal lives in `.git` and is never uploaded.
+3. `create-github-repository(repo_path, owner, name, visibility, description)`:
+   require an explicit `public` or `private` choice; create **only on the
+   currently authenticated personal account**, with Git Credential Manager's
+   already-approved OAuth. No organization repositories, implicit public
+   defaults, remote takeover, or tokens in tool arguments. The remote identity
+   is verified before adding a credential-free HTTPS origin.
+4. `initial-commit(repo_path, paths, message)`: stage only explicit files,
+   reject credential-like paths and unrelated staged files, and ensure every
+   staged Git Blob matches its source bytes (preventing silent CRLF/LF
+   normalization). Exact first-commit retries retain the original paths/message.
+5. Existing `push(repo_path)`: only push the current branch without force and
+   verify remote HEAD SHA. The ordinary existing `commit` remains unchanged.
+
+A client can call these **separate** actions sequentially after user
+authorization, without requesting extra UI clicks per step or registering a
+new Node task for each repository. Build/test commands still require their
+own independently approved execution route.
+
+If the user's GCM OAuth grant lacks repository-creation permissions, the
+action fails with a precise authorization error. After local reauthorization,
+the existing request can be retried. A remote that was already present
+cannot be silently adopted. If the POST response might have been lost after
+remote creation, the recovery state reports ambiguity and fails closed for
+manual reconciliation; it never force pushes or overwrites remote history.
+
+This README describes *source code for plugin version 1.6.0*. A running
+FolderBridge installation must actually bundle and expose version 1.6.0 before the
+upgrade can be considered installed or accepted.
+
 ## Repository selection
 
-Every action accepts an optional `repo_path`, defaulting to `.`. The value is a trimmed POSIX-style path relative to the selected FolderBridge workspace. This lets one FolderBridge project workspace contain an independently published Git repository such as `Debate-Judge-Public/` without registering an overlapping child workspace.
+Existing-repository actions accept optional `repo_path`, defaulting to `.`. All four first-publication actions require an **explicitly provided** `repo_path` (including `.` only when the entire selected workspace is intended). The value is a trimmed POSIX-style path relative to the selected FolderBridge workspace. This lets one FolderBridge project workspace contain an independently published Git repository such as `Debate-Judge-Public/` without registering an overlapping child workspace.
 
 Repository selection is fail-closed: absolute paths, `..`, backslashes, VCS/dependency containers, symlinks, junctions/reparse points, missing directories, and paths that resolve outside the selected workspace are rejected. After selection, `git rev-parse --show-toplevel` must resolve **exactly** to that selected directory; pointing `repo_path` at an ordinary subdirectory inside a larger Git repository is rejected.
 
-When `repo_path` is omitted, Git Publisher 1.5.0 preserves the previous contract exactly: the selected FolderBridge workspace itself must be the Git repository root.
+When `repo_path` is omitted, Git Publisher 1.6.0 preserves the previous contract for existing repositories: the selected FolderBridge workspace itself must be the Git repository root.
 
 For `commit`, each `paths[]` entry is relative to the selected repository root. For `release-assets`, each `assets[].path` is likewise relative to that repository root. Files elsewhere in the same FolderBridge workspace are outside that Git action's path namespace.
 
@@ -47,7 +90,7 @@ The command pushes only `HEAD` to the same current branch, uses `--no-verify`, n
 
 ## Release assets
 
-Git Publisher 1.5.0 has no project-specific release action. Repository-specific version rules, build steps, commit-title conventions, or fixed asset names belong to that repository's own workflow/task layer.
+Git Publisher 1.6.0 has no project-specific release action. Repository-specific version rules, build steps, commit-title conventions, or fixed asset names belong to that repository's own workflow/task layer.
 
 `release-assets` publishes an explicit allowlist of regular files from the **selected repository only**, where the repository is the workspace root by default or an explicitly validated nested Git repository selected by `repo_path`. Its public inputs are:
 

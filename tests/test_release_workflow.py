@@ -38,11 +38,15 @@ class ReleaseWorkflowTests(unittest.TestCase):
         self.assertIn("release/windows-x64/FolderBridge.exe", text)
         self.assertIn("FolderBridge-Windows-x64.exe", text)
         self.assertIn("FolderBridge-Plugin-", text)
-        self.assertIn("gh release delete-asset", text)
+        self.assertNotIn("gh release delete-asset", text)
+        self.assertNotIn("gh release list --limit 100", text)
+        self.assertIn("Historical Releases are immutable", text)
         self.assertIn("SHA sidecars must not enter GitHub Release assets", text)
         self.assertIn("file-ops-toolkit", text)
         self.assertNotIn('"release/windows-x64/FolderBridge.exe.sha256"', text)
-        self.assertNotIn("git-publisher", text.lower())
+        self.assertIn("Id = 'git-publisher'", text)
+        self.assertIn("FolderBridge-Plugin-", text)
+        self.assertNotIn("git-publisher.exe", text.lower())
 
     def test_windows_bundle_verifier_checks_mcp_lifecycle_continuity(self) -> None:
         verifier = (ROOT / "scripts" / "verify_windows_bundle.py").read_text(encoding="utf-8")

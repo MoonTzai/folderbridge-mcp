@@ -75,6 +75,7 @@ ABI v1 accepts precise permission contracts only:
 - `git.commit-selected-files`
 - `git.push-current-branch`
 - `github.web-auth`
+- `github.create-repository` — explicit permission for first-time remote GitHub repository creation (distinct from pushing an existing repository)
 - `network.loopback:127.0.0.1:<port>` or `network.loopback:localhost:<port>`
 - `network.outbound:https`
 - `process.execute:<basename>`
@@ -122,6 +123,10 @@ The worker preserves `code`, message, and JSON-safe `details` in the normal Exte
 `folderbridge_mcp.extension_api` is the deliberately small public Python helper surface for ABI v1 plugins. In addition to `ExtensionError`, it re-exports `owned_process_group_kwargs` and `terminate_owned_process_tree` for Extensions that must own and reliably terminate a declared local subprocess tree. Those process helpers delegate to the same FolderBridge process-control implementation used by the host; exposing them through the public ABI changes only the supported import seam, not process creation or termination behavior. New plugins should import these helpers only from `extension_api`. The existing FFmpeg, FTP and GPT-SoVITS public plugins retain one narrowly scoped `ImportError` fallback to `folderbridge_mcp.process_control` solely so their updated source remains functional on already-built 0.8.21 hosts that predate the public re-export; no other product-private imports are part of the supported ABI.
 
 ABI v1 plugins should otherwise rely on the Python standard library or their own sibling modules/data. A one-file EXE is not a general pip environment. Integrations that need external software should normally call a fixed local HTTP API or declare `process.execute:<basename>` and invoke that installed program.
+
+## Native first-time GitHub repository publication
+
+Git Publisher 1.6.0 provides distinct `first-publication-preflight`, `init-local-repository`, `create-github-repository`, and `initial-commit` actions that reuse the existing `push`. These accept an explicit selected `repo_path`; remote creation requires the authenticated GitHub personal account, exact repository name and explicit public/private visibility. Credential material is never accepted from clients and continues to be held by Windows Git Credential Manager. The first-commit gate checks staged blob bytes against the local file. An ambiguous remote creation refuses silent adoption; recovery uses a local `.git` journal. These are explicitly authorized actions, not a giant all-in-one executor. Generic workspace Node tasks still require local human registration.
 
 ## Workspace adapters instead of task injection
 
@@ -209,9 +214,9 @@ The Office extension declares `process.execute:powershell.exe`, but the command 
 
 When `render` succeeds, use the PNG paths from the completed Job result with FolderBridge `image_open`; for audit workflows this keeps OOXML/Office originals as structural evidence and native page images as visual evidence instead of treating flattened text as a substitute for layout.
 
-## Bundled Git Publisher extension
+## External Git Publisher extension (hot-installable)
 
-`extensions/git-publisher` adds a narrow GitHub publication workflow without exposing generic Git command execution. Its read-only `status` action can inspect the selected repository before approval; browser authorization and mutations require one-time global approval.
+`Plugins/extensions/git-publisher` is a **pure external, hot-installable** GitHub publishing Extension. It is not embedded in the main Windows executable. All its actions, including read-only `status` and first-publication preflight, require local approval of the exact Extension hash and declared permissions. New versions may be installed and approved through **Extensions & Skills** without rebuilding the core program. It offers bounded GitHub publication without exposing arbitrary Git/gh command execution.
 
 - `connect` invokes Git Credential Manager's GitHub `login --web` flow. GitHub opens in the user's browser and the resulting credential is stored by GCM in Windows Credential Manager. The action schema intentionally has no token/PAT/password parameter.
 - `commit` accepts an explicit path allowlist plus a commit message. Existing entries must resolve to regular workspace files; missing entries are accepted only when they are already Git-tracked and currently deleted. It rejects pre-existing staged content, paths outside the workspace, directories, missing untracked paths, credential/key-like files, generated/dependency/VCS directories, and files with content-transforming Git attributes. Existing files are staged normally, validated tracked deletions are removed from the index explicitly, and staged-set verification uses `--no-renames` so Git rename detection cannot collapse a delete+add migration and create a false allowlist mismatch. Git hooks/signing remain disabled for the bounded commit.

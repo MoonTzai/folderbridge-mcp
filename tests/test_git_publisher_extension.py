@@ -12,7 +12,7 @@ from folderbridge_mcp.extensions import load_extension
 
 
 ROOT = Path(__file__).resolve().parents[1]
-EXT_DIR = ROOT / "extensions" / "git-publisher"
+EXT_DIR = ROOT / "Plugins" / "extensions" / "git-publisher"
 
 
 def load_plugin():
@@ -37,25 +37,34 @@ def git(root: Path, *args: str) -> str:
 
 class GitPublisherManifestTests(unittest.TestCase):
     def test_manifest_is_explicit_and_does_not_accept_tokens(self) -> None:
-        record = load_extension(EXT_DIR, bundled=True)
+        record = load_extension(EXT_DIR, bundled=False)
         self.assertEqual(record.manifest.extension_id, "git-publisher")
-        self.assertEqual(record.manifest.version, "1.5.0")
-        self.assertEqual(set(record.manifest.actions), {"status", "connect", "commit", "push", "release-assets"})
+        self.assertEqual(record.manifest.version, "1.6.0")
+        self.assertEqual(set(record.manifest.actions), {"first-publication-preflight", "init-local-repository", "create-github-repository", "initial-commit", "status", "connect", "commit", "push", "release-assets"})
         self.assertTrue(record.manifest.actions["status"].read_only)
-        self.assertEqual(record.manifest.actions["status"].authorization, "none")
-        for name in ("connect", "commit", "push", "release-assets"):
+        self.assertEqual(record.manifest.actions["status"].authorization, "global")
+        for name in ("init-local-repository", "create-github-repository", "initial-commit", "connect", "commit", "push", "release-assets"):
             self.assertFalse(record.manifest.actions[name].read_only)
             self.assertEqual(record.manifest.actions[name].authorization, "global")
         self.assertIn("git.commit-selected-files", record.manifest.permissions)
         self.assertIn("git.push-current-branch", record.manifest.permissions)
         self.assertIn("github.web-auth", record.manifest.permissions)
+        self.assertIn("github.create-repository", record.manifest.permissions)
+        self.assertTrue(record.manifest.actions["first-publication-preflight"].read_only)
+        self.assertEqual(record.manifest.actions["first-publication-preflight"].authorization, "global")
+        self.assertEqual(set(record.manifest.actions["create-github-repository"].input_schema["required"]), {"repo_path", "owner", "name", "visibility"})
+        self.assertEqual(record.manifest.actions["create-github-repository"].input_schema["properties"]["visibility"]["enum"], ["public", "private"])
         self.assertIn("process.execute:git.exe", record.manifest.permissions)
         self.assertIn("process.execute:gh.exe", record.manifest.permissions)
         for action in record.manifest.actions.values():
             properties = action.input_schema.get("properties", {})
             self.assertTrue({"token", "password", "pat"}.isdisjoint({str(key).lower() for key in properties}))
             self.assertIn("repo_path", properties)
-            self.assertEqual(properties["repo_path"]["default"], ".")
+            if action.name in {"first-publication-preflight", "init-local-repository", "create-github-repository", "initial-commit"}:
+                self.assertIn("repo_path", action.input_schema.get("required", []))
+                self.assertNotIn("default", properties["repo_path"])
+            else:
+                self.assertEqual(properties["repo_path"]["default"], ".")
             self.assertEqual(properties["repo_path"]["maxLength"], 1024)
         status_schema = record.manifest.actions["status"].input_schema
         self.assertEqual(status_schema["properties"]["offset"]["minimum"], 0)
@@ -75,6 +84,8 @@ class GitPublisherManifestTests(unittest.TestCase):
         plugin = load_plugin()
         self.assertEqual(plugin.MAX_COMMIT_FILE_BYTES, 100 * 1024 * 1024)
         plugin_text = (EXT_DIR / "plugin.py").read_text(encoding="utf-8")
+        self.assertIn("from folderbridge_mcp.extension_api import", plugin_text)
+        self.assertNotIn("from folderbridge_mcp.process_control import", plugin_text)
         self.assertIn("owned_process_group_kwargs", plugin_text)
         self.assertIn("terminate_owned_process_tree", plugin_text)
         self.assertNotIn("subprocess.run(", plugin_text)

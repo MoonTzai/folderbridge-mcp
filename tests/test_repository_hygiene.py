@@ -68,6 +68,7 @@ class RepositoryHygieneTests(unittest.TestCase):
             "ffmpeg-toolkit",
             "ftp-toolkit",
             "godot-ai",
+            "git-publisher",
             "gpt-sovits-local",
             "pdf-toolkit",
             "storyboard-chatgpt-web",
@@ -115,6 +116,7 @@ class RepositoryHygieneTests(unittest.TestCase):
             "ffmpeg-toolkit",
             "ftp-toolkit",
             "godot-ai",
+            "git-publisher",
             "gpt-sovits-local",
             "pdf-toolkit",
             "storyboard-chatgpt-web",
@@ -149,6 +151,7 @@ class RepositoryHygieneTests(unittest.TestCase):
             "ffmpeg-toolkit": ("0.1.2", "test_external_ffmpeg_toolkit.py"),
             "ftp-toolkit": ("0.2.1", "test_external_ftp_toolkit.py"),
             "godot-ai": ("0.1.0", "test_external_godot_ai.py"),
+            "git-publisher": ("1.6.0", "test_git_publisher_extension.py"),
             "gpt-sovits-local": ("0.2.2", "test_external_gpt_sovits.py"),
             "pdf-toolkit": ("0.6.0", "test_pdf_toolkit_v06.py"),
             "storyboard-chatgpt-web": ("0.2.0", "test_external_storyboard_chatgpt_web.py"),
@@ -178,6 +181,7 @@ class RepositoryHygieneTests(unittest.TestCase):
             "ffmpeg-toolkit",
             "ftp-toolkit",
             "godot-ai",
+            "git-publisher",
             "gpt-sovits-local",
             "pdf-toolkit",
             "storyboard-chatgpt-web",
@@ -190,7 +194,7 @@ class RepositoryHygieneTests(unittest.TestCase):
         self.assertIn("release\\external-extensions", build)
         self.assertIn("Compress-Archive", build)
         self.assertIn("$externalReleaseFileAllowlists", build)
-        for extension_id in ("chatgpt-web-llm-adapter", "storyboard-chatgpt-web", "windows-capture-toolkit"):
+        for extension_id in ("chatgpt-web-llm-adapter", "git-publisher", "storyboard-chatgpt-web", "windows-capture-toolkit"):
             self.assertIn(f'"{extension_id}" = @(', build)
         self.assertIn("Explicit Release ZIP member mismatch", build)
         self.assertNotIn('"HANDOFF-LLM-Bridge-OneClick-Plugin-UI-then-Cognitive-20260918.md"', build)
@@ -200,19 +204,21 @@ class RepositoryHygieneTests(unittest.TestCase):
         self.assertFalse((legacy_file_ops / "folderbridge-extension.json").exists())
         if legacy_file_ops.exists():
             self.assertEqual([path for path in legacy_file_ops.rglob("*") if path.is_file()], [])
-        self.assertIn("if ($assets.Count -ne 22)", workflow)
-        self.assertIn("if ($zips.Count -ne 11 -or $checksums.Count -ne 11)", workflow)
-        self.assertIn("Expected 22 internal external Extension build artifacts (11 ZIP + 11 SHA256)", workflow)
-        self.assertIn("if ($published.Count -ne 12)", workflow)
+        self.assertIn("if ($assets.Count -ne 24)", workflow)
+        self.assertIn("if ($zips.Count -ne 12 -or $checksums.Count -ne 12)", workflow)
+        self.assertIn("Expected 24 internal external Extension build artifacts (12 ZIP + 12 SHA256)", workflow)
+        self.assertIn("if ($published.Count -ne 13)", workflow)
         self.assertIn("FolderBridge-Windows-x64.exe", workflow)
         self.assertIn("FolderBridge-Plugin-", workflow)
         self.assertIn("Id = 'chatgpt-web-llm-adapter'", workflow)
+        self.assertIn("Id = 'git-publisher'", workflow)
         self.assertIn("Id = 'storyboard-chatgpt-web'", workflow)
         self.assertIn("Id = 'windows-capture-toolkit'", workflow)
-        self.assertIn("if ($assetSpecs.Count -ne 12)", workflow)
-        self.assertIn("if ($remoteNames.Count -ne 12)", workflow)
+        self.assertIn("if ($assetSpecs.Count -ne 13)", workflow)
+        self.assertIn("if ($remoteNames.Count -ne 13)", workflow)
         self.assertIn("SHA sidecars must not enter GitHub Release assets", workflow)
-        self.assertIn("gh release delete-asset", workflow)
+        self.assertNotIn("gh release delete-asset", workflow)
+        self.assertNotIn("Clean retired and checksum assets from existing GitHub Releases", workflow)
         self.assertIn("file-ops-toolkit", workflow)
         self.assertIn("release/external-extensions", workflow)
         self.assertIn("Private Debate Judge adapter must never be published", workflow)
@@ -225,7 +231,7 @@ class RepositoryHygieneTests(unittest.TestCase):
         self.assertIn("不要直接 import `folderbridge_mcp` 的私有实现模块", spec)
 
     def test_git_publisher_docs_match_tracked_deletion_contract(self) -> None:
-        publisher_readme = (ROOT / "extensions" / "git-publisher" / "README.md").read_text(encoding="utf-8")
+        publisher_readme = (ROOT / "Plugins" / "extensions" / "git-publisher" / "README.md").read_text(encoding="utf-8")
         extension_docs = (ROOT / "docs" / "extensions.md").read_text(encoding="utf-8")
         root_readme = (ROOT / "README.md").read_text(encoding="utf-8")
         root_readme_zh = (ROOT / "README.zh-CN.md").read_text(encoding="utf-8")
@@ -233,8 +239,8 @@ class RepositoryHygieneTests(unittest.TestCase):
         for text in (publisher_readme, extension_docs):
             self.assertIn("tracked deletions", text)
             self.assertIn("--no-renames", text)
-        self.assertIn("Git Publisher 1.5.0", root_readme)
-        self.assertIn("Git Publisher 1.5.0", root_readme_zh)
+        self.assertIn("Git Publisher 1.6.0", root_readme)
+        self.assertIn("Git Publisher 1.6.0", root_readme_zh)
         self.assertNotIn("compatibility-locked to FolderBridge", root_readme)
         self.assertNotIn("兼容锁定发布路径", root_readme_zh)
         self.assertIn("repo_path", publisher_readme)

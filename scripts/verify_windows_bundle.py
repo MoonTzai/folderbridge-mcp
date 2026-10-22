@@ -14,7 +14,7 @@ from typing import Any
 
 
 ROOT = Path(__file__).resolve().parents[1]
-EXPECTED_BUNDLED_EXTENSIONS = {"git-publisher", "office", "skill-engine"}
+EXPECTED_BUNDLED_EXTENSIONS = {"office", "skill-engine"}
 EXPECTED_BUNDLED_SKILL_PACKS = {"folderbridge-engineering"}
 EXPECTED_ENGINEERING_SKILLS = {
     "codebase-design",
@@ -24,7 +24,7 @@ EXPECTED_ENGINEERING_SKILLS = {
     "code-review",
     "implement",
 }
-EXPECTED_EXTENSION_VERSIONS = {"git-publisher": "1.5.0", "office": "1.1.4"}
+EXPECTED_EXTENSION_VERSIONS = {"office": "1.1.4"}
 
 
 def _project_version() -> str:
@@ -287,36 +287,13 @@ def verify(executable: Path) -> dict[str, Any]:
                 f"{extension_id} version mismatch: expected {expected_version_value}, got {actual}"
             )
 
+    # This binary intentionally contains only the Office and Skill Engine
+    # bundled extensions. Git Publisher is a separately hot-installable ZIP.
+    # An already-installed external Git Publisher may appear in the catalog,
+    # but it must NEVER be labeled bundled or pulled into the EXE archive.
     publisher = extension_by_id.get("git-publisher")
-    publisher_actions = publisher.get("actions") if isinstance(publisher, dict) else None
-    if not isinstance(publisher_actions, list):
-        raise RuntimeError("git-publisher bundled action metadata is missing")
-    publisher_action_by_name = {
-        str(item.get("name")): item
-        for item in publisher_actions
-        if isinstance(item, dict) and isinstance(item.get("name"), str)
-    }
-    if "release" in publisher_action_by_name:
-        raise RuntimeError("git-publisher must not expose a project-specific legacy release action")
-    for action_name in ("status", "connect", "commit", "push", "release-assets"):
-        action_meta = publisher_action_by_name.get(action_name)
-        schema = action_meta.get("input_schema") if isinstance(action_meta, dict) else None
-        repo_path = schema.get("properties", {}).get("repo_path") if isinstance(schema, dict) else None
-        if not isinstance(repo_path, dict) or repo_path.get("default") != "." or repo_path.get("type") != "string":
-            raise RuntimeError(f"git-publisher {action_name} nested repo_path contract is missing")
-    generic_release = publisher_action_by_name.get("release-assets")
-    if not isinstance(generic_release, dict):
-        raise RuntimeError("git-publisher generic release-assets action is missing")
-    if generic_release.get("run_mode") != "job" or generic_release.get("timeout_seconds") != 7200:
-        raise RuntimeError("git-publisher release-assets must be a two-hour host-owned Job")
-    generic_schema = generic_release.get("input_schema")
-    asset_properties = (
-        generic_schema.get("properties", {}).get("assets", {}).get("items", {}).get("properties", {})
-        if isinstance(generic_schema, dict)
-        else {}
-    )
-    if "label" not in asset_properties:
-        raise RuntimeError("git-publisher release-assets display-label contract is missing")
+    if isinstance(publisher, dict) and publisher.get("bundled") is not False:
+        raise RuntimeError("git-publisher must not be bundled inside FolderBridge.exe")
 
     skill_catalog = _json(executable, "skills", "--json")
     packs = skill_catalog.get("packs")
