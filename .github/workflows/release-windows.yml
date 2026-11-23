@@ -108,7 +108,20 @@ jobs:
 
       - name: Build Windows x64 release
         shell: pwsh
-        run: ./scripts/build_windows.ps1 -Python python
+        run: |
+          # This is a separate step from the full regression suite; temporary
+          # variables set there do not persist into the publisher's targeted tests.
+          # Reuse the proven canonical CI temp fixture to avoid RUNNER~1 alias drift.
+          $testTemp = Join-Path $env:RUNNER_TEMP "folderbridge-ci-build-tests"
+          New-Item -ItemType Directory -Path $testTemp -Force | Out-Null
+          $testTemp = (Resolve-Path -LiteralPath $testTemp).ProviderPath
+          $env:TEMP = $testTemp
+          $env:TMP = $testTemp
+          $env:TMPDIR = $testTemp
+          & python -c "import pathlib,tempfile; p=pathlib.Path(tempfile.mkdtemp()); assert p == p.resolve(strict=True), (p, p.resolve(strict=True)); p.rmdir()"
+          if ($LASTEXITCODE -ne 0) { throw "Build-step temporary root is not canonical." }
+          & ./scripts/build_windows.ps1 -Python python
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Verify packaged executable again
         run: python scripts/verify_windows_bundle.py release/windows-x64/FolderBridge.exe
