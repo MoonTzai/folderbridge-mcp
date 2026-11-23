@@ -1,0 +1,129 @@
+{
+  "schema_version": 2,
+  "runtime_abi": 1,
+  "id": "offline-asr-toolkit",
+  "name": "Offline ASR Toolkit",
+  "version": "0.1.0",
+  "description": "Generic offline ASR over SHA-pinned local model profiles, for any selected workspace. One audio file per managed job, workspace-scoped outputs, no automatic model downloads, no arbitrary command or script execution.",
+  "entrypoint": "plugin.py",
+  "permissions": [
+    "workspace.read",
+    "workspace.write",
+    "process.execute:python.exe"
+  ],
+  "execution": {
+    "mode": "isolated-process",
+    "timeout_seconds": 600
+  },
+  "workspace_adapter": {
+    "mode": "none",
+    "state": "none"
+  },
+  "actions": {
+    "status": {
+      "read_only": true,
+      "requires_workspace": true,
+      "authorization": "global",
+      "mutation_scope": {
+        "mode": "none"
+      },
+      "effect_contract": {
+        "effect_semantics": "read_only",
+        "lifetime": "foreground"
+      },
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "verify_assets": {
+            "type": "boolean",
+            "default": false
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    "list-profiles": {
+      "read_only": true,
+      "requires_workspace": true,
+      "authorization": "global",
+      "mutation_scope": {
+        "mode": "none"
+      },
+      "effect_contract": {
+        "effect_semantics": "read_only",
+        "lifetime": "foreground"
+      },
+      "input_schema": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false
+      }
+    },
+    "transcribe-one": {
+      "read_only": false,
+      "requires_workspace": true,
+      "authorization": "global",
+      "run_mode": "job",
+      "timeout_seconds": 7200,
+      "mutation_scope": {
+        "mode": "paths",
+        "claims": [
+          {
+            "param": "output_dir",
+            "kind": "tree"
+          }
+        ]
+      },
+      "effect_contract": {
+        "effect_semantics": "external_effect",
+        "lifetime": "job_owned"
+      },
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "input_path": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1024
+          },
+          "output_dir": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1024
+          },
+          "profile_id": {
+            "type": "string",
+            "maxLength": 64
+          },
+          "language": {
+            "type": "string",
+            "minLength": 2,
+            "maxLength": 20,
+            "default": "auto"
+          },
+          "device": {
+            "type": "string",
+            "enum": [
+              "auto",
+              "cpu",
+              "cuda"
+            ],
+            "default": "auto"
+          },
+          "max_audio_bytes": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 1073741824,
+            "default": 536870912
+          }
+        },
+        "required": [
+          "input_path",
+          "output_dir",
+          "profile_id"
+        ],
+        "additionalProperties": false
+      }
+    }
+  }
+}

@@ -1,0 +1,56 @@
+{
+  "schema_version": 2,
+  "runtime_abi": 1,
+  "id": "testonline-host",
+  "name": "TestOnline 局域网发布",
+  "version": "0.1.2",
+  "description": "FolderBridge-managed LAN HTTP/HTTPS static HTML hosting for TestOnline/<port>-<http|https> directories. New/replaced files are served live without reposting; only explicit trusted local folders are exposed.",
+  "entrypoint": "plugin.py",
+  "permissions": [
+    "network.loopback:127.0.0.1:18889"
+  ],
+  "execution": {
+    "mode": "isolated-process",
+    "timeout_seconds": 30
+  },
+  "workspace_adapter": {
+    "mode": "none",
+    "state": "none"
+  },
+  "actions": {
+    "status": {
+      "read_only": true,
+      "requires_workspace": false,
+      "authorization": "global",
+      "mutation_scope": {
+        "mode": "none"
+      },
+      "input_schema": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false
+      },
+      "effect_contract": {
+        "effect_semantics": "read_only",
+        "lifetime": "foreground"
+      }
+    },
+    "sites": {
+      "read_only": true,
+      "requires_workspace": false,
+      "authorization": "global",
+      "mutation_scope": {
+        "mode": "none"
+      },
+      "input_schema": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false
+      },
+      "effect_contract": {
+        "effect_semantics": "read_only",
+        "lifetime": "foreground"
+      }
+    }
+  }
+}

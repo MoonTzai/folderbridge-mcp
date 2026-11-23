@@ -20,7 +20,7 @@ from folderbridge_mcp.extension_api import ExtensionError
 MAX_DOWNLOAD_BYTES = 512 * 1024 * 1024
 DOWNLOAD_CHUNK_BYTES = 128 * 1024
 MAX_REDIRECTS = 5
-USER_AGENT = "FolderBridge-Download-Toolkit/0.1.0"
+USER_AGENT = "FolderBridge-Download-Toolkit/0.1.1"
 REDIRECT_STATUSES = {301, 302, 303, 307, 308}
 VCS_BLOCKED_SEGMENTS = {".git", ".hg", ".svn"}
 WORKSPACE_ONLY_BLOCKED_SEGMENTS = {
@@ -188,7 +188,56 @@ def _is_clash_fake_ipv4(value: str) -> bool:
     return _prefix_match(number, 0xC6120000, 15, 32)
 
 
-def _validated_target(url: str, *, allow_clash_fake_ip: bool = False) -> dict[str, Any]:
+def _is_github_release_entry(url: str) -> bool:
+    """Accept only a canonical GitHub Release asset URL as the first hop."""
+    try:
+        parsed = urllib.parse.urlsplit(url)
+        pieces = parsed.path.split("/")
+        return bool(
+            parsed.scheme.lower() == "https"
+            and parsed.hostname == "github.com"
+            and parsed.port in (None, 443)
+            and parsed.username is None
+            and parsed.password is None
+            and not parsed.query
+            and not parsed.fragment
+            and len(pieces) == 7
+            and pieces[0] == ""
+            and bool(OWNER_RE.fullmatch(pieces[1]))
+            and bool(REPO_RE.fullmatch(pieces[2]))
+            and pieces[2] not in {".", ".."}
+            and pieces[3:5] == ["releases", "download"]
+            and bool(re.fullmatch(r"[A-Za-z0-9._+-]{1,128}", pieces[5]))
+            and pieces[5] not in {".", ".."}
+            and bool(re.fullmatch(r"[A-Za-z0-9._+-]{1,255}", pieces[6]))
+            and pieces[6] not in {".", ".."}
+        )
+    except (TypeError, ValueError, AttributeError):
+        return False
+
+
+def _is_github_release_hop(url: str) -> bool:
+    # The original URL must be an exact release download link. Redirect
+    # exceptions are limited to GitHub's dedicated release-asset CDN.
+    if _is_github_release_entry(url):
+        return True
+    try:
+        parsed = urllib.parse.urlsplit(url)
+        return bool(
+            parsed.scheme.lower() == "https"
+            and parsed.hostname == "release-assets.githubusercontent.com"
+            and parsed.port in (None, 443)
+            and parsed.username is None
+            and parsed.password is None
+            and not parsed.fragment
+            and parsed.path.startswith("/github-production-release-asset/")
+            and len(parsed.path) > len("/github-production-release-asset/")
+        )
+    except (TypeError, ValueError, AttributeError):
+        return False
+
+
+def _validated_target(url: str, *, allow_clash_fake_ip: bool = False, allow_verified_github_release_fake_ip: bool = False) -> dict[str, Any]:
     if not isinstance(url, str) or not url:
         raise _fail("DOWNLOAD_URL_INVALID", "url must be a non-empty HTTPS URL")
     try:
@@ -233,6 +282,7 @@ def _validated_target(url: str, *, allow_clash_fake_ip: bool = False) -> dict[st
         for ip in ips
         if not _is_public_ip(ip)
         and not (allow_clash_fake_ip and host_ascii == "codeload.github.com" and _is_clash_fake_ipv4(ip))
+        and not (allow_verified_github_release_fake_ip and _is_github_release_hop(url) and _is_clash_fake_ipv4(ip))
     ]
     if blocked:
         raise _fail(
@@ -392,12 +442,14 @@ def _open_download(
     *,
     max_redirects: int = MAX_REDIRECTS,
     allow_clash_fake_ip_for_codeload: bool = False,
+    allow_verified_github_release_fake_ip: bool = False,
 ):
     current = url
     for redirect_count in range(max_redirects + 1):
         target = _validated_target(
             current,
             allow_clash_fake_ip=allow_clash_fake_ip_for_codeload,
+            allow_verified_github_release_fake_ip=allow_verified_github_release_fake_ip,
         )
         try:
             response = _request_once(target)
@@ -668,7 +720,11 @@ def _download_action(params: dict[str, Any], context: Any) -> dict[str, Any]:
                 actual_target_sha256=actual_target,
             )
     max_bytes = _bounded_max(params.get("max_bytes"), default=256 * 1024 * 1024)
-    final_url, response = _open_download(str(params.get("url") or ""))
+    source_url = str(params.get("url") or "")
+    final_url, response = _open_download(
+        source_url,
+        allow_verified_github_release_fake_ip=bool(expected and _is_github_release_entry(source_url)),
+    )
     try:
         size, digest = _stream_response_to_file(
             response,

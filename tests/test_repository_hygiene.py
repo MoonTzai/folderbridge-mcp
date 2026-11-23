@@ -147,14 +147,18 @@ class RepositoryHygieneTests(unittest.TestCase):
             "blender-toolkit": ("0.1.2", "test_external_blender_toolkit.py"),
             "chatgpt-web-llm-adapter": ("0.3.2", "test_external_chatgpt_web_llm_adapter.py"),
             "comfyui": ("1.6.0", "test_external_comfyui.py"),
-            "download-toolkit": ("0.1.0", "test_external_download_toolkit.py"),
+            "download-toolkit": ("0.1.1", "test_external_download_toolkit.py"),
+            "exe-packager-toolkit": ("0.1.1", "test_external_exe_packager_toolkit.py"),
             "ffmpeg-toolkit": ("0.1.2", "test_external_ffmpeg_toolkit.py"),
             "ftp-toolkit": ("0.2.1", "test_external_ftp_toolkit.py"),
             "godot-ai": ("0.1.0", "test_external_godot_ai.py"),
-            "git-publisher": ("1.6.0", "test_git_publisher_extension.py"),
+            "git-publisher": ("1.6.3", "test_git_publisher_extension.py"),
             "gpt-sovits-local": ("0.2.2", "test_external_gpt_sovits.py"),
+            "offline-asr-toolkit": ("0.1.0", "test_a0_offline_asr_toolkit.py"),
             "pdf-toolkit": ("0.6.0", "test_pdf_toolkit_v06.py"),
+            "remotion-toolkit": ("0.1.2", "test_external_remotion_toolkit.py"),
             "storyboard-chatgpt-web": ("0.2.0", "test_external_storyboard_chatgpt_web.py"),
+            "testonline-host": ("0.1.2", "test_external_testonline_host.py"),
             "windows-capture-toolkit": ("0.1.3", "test_windows_capture_toolkit_extension.py"),
         }
         readme = (ROOT / "Plugins" / "extensions" / "README.md").read_text(encoding="utf-8")
@@ -178,13 +182,17 @@ class RepositoryHygieneTests(unittest.TestCase):
             "chatgpt-web-llm-adapter",
             "comfyui",
             "download-toolkit",
+            "exe-packager-toolkit",
             "ffmpeg-toolkit",
             "ftp-toolkit",
             "godot-ai",
             "git-publisher",
             "gpt-sovits-local",
+            "offline-asr-toolkit",
             "pdf-toolkit",
+            "remotion-toolkit",
             "storyboard-chatgpt-web",
+            "testonline-host",
             "windows-capture-toolkit",
         }
         for extension_id in expected:
@@ -204,18 +212,18 @@ class RepositoryHygieneTests(unittest.TestCase):
         self.assertFalse((legacy_file_ops / "folderbridge-extension.json").exists())
         if legacy_file_ops.exists():
             self.assertEqual([path for path in legacy_file_ops.rglob("*") if path.is_file()], [])
-        self.assertIn("if ($assets.Count -ne 24)", workflow)
-        self.assertIn("if ($zips.Count -ne 12 -or $checksums.Count -ne 12)", workflow)
-        self.assertIn("Expected 24 internal external Extension build artifacts (12 ZIP + 12 SHA256)", workflow)
-        self.assertIn("if ($published.Count -ne 13)", workflow)
+        self.assertIn("if ($assets.Count -ne 32)", workflow)
+        self.assertIn("if ($zips.Count -ne 16 -or $checksums.Count -ne 16)", workflow)
+        self.assertIn("Expected 32 internal external Extension build artifacts (16 ZIP + 16 SHA256)", workflow)
+        self.assertIn("if ($published.Count -ne 17)", workflow)
         self.assertIn("FolderBridge-Windows-x64.exe", workflow)
         self.assertIn("FolderBridge-Plugin-", workflow)
         self.assertIn("Id = 'chatgpt-web-llm-adapter'", workflow)
         self.assertIn("Id = 'git-publisher'", workflow)
         self.assertIn("Id = 'storyboard-chatgpt-web'", workflow)
         self.assertIn("Id = 'windows-capture-toolkit'", workflow)
-        self.assertIn("if ($assetSpecs.Count -ne 13)", workflow)
-        self.assertIn("if ($remoteNames.Count -ne 13)", workflow)
+        self.assertIn("if ($assetSpecs.Count -ne 17)", workflow)
+        self.assertIn("if ($remoteNames.Count -ne 17)", workflow)
         self.assertIn("SHA sidecars must not enter GitHub Release assets", workflow)
         self.assertNotIn("gh release delete-asset", workflow)
         self.assertNotIn("Clean retired and checksum assets from existing GitHub Releases", workflow)
@@ -239,8 +247,8 @@ class RepositoryHygieneTests(unittest.TestCase):
         for text in (publisher_readme, extension_docs):
             self.assertIn("tracked deletions", text)
             self.assertIn("--no-renames", text)
-        self.assertIn("Git Publisher 1.6.0", root_readme)
-        self.assertIn("Git Publisher 1.6.0", root_readme_zh)
+        self.assertIn("Git Publisher 1.6.2", root_readme)
+        self.assertIn("Git Publisher 1.6.2", root_readme_zh)
         self.assertNotIn("compatibility-locked to FolderBridge", root_readme)
         self.assertNotIn("兼容锁定发布路径", root_readme_zh)
         self.assertIn("repo_path", publisher_readme)

@@ -30,11 +30,15 @@ Skill Pack 是另一条扩展轴，主要承载**方法论、领域知识、审�
 | **Blender Toolkit** (`blender-toolkit`) | 0.1.2 | Blender 5.x 的受限场景、对象、节点、动画、渲染、导入导出与 GUI 控制桥。 |
 | **ChatGPT Web LLM Adapter** (`chatgpt-web-llm-adapter`) | 0.3.2 | 面向测试的 fresh-chat 本地 LLM 桥；除有界并发、严格 JSON object 与临时凭据外，新增历史安全的新会话间隔／滚动窗口节流与自动冷却。 |
 | **Local ComfyUI** (`comfyui`) | 1.6.0 | 本地 ComfyUI workflow Jobs、健康／进度观测、模型与节点发现、定向取消、显存释放与生产 preflight。 |
-| **Download Toolkit** (`download-toolkit`) | 0.1.0 | 公共 HTTPS 下载与安全 GitHub source snapshot，带流式 size/hash 校验和 SSRF／redirect 防护。 |
+| **Download Toolkit** (`download-toolkit`) | 0.1.1 | 公共 HTTPS 下载与安全 GitHub source snapshot，带流式 size/hash 校验和 SSRF／redirect 防护。 |
 | **FFmpeg Toolkit** (`ffmpeg-toolkit`) | 0.1.2 | workspace 受限的 FFmpeg/FFprobe 探测、能力发现与长媒体任务。 |
 | **FTP Toolkit** (`ftp-toolkit`) | 0.2.1 | workspace 受限的 FTP/FTPS profile、list/stat、上传下载、递归上传、rename、mkdir 与精确文件删除。 |
 | **Godot AI Local Bridge** (`godot-ai`) | 0.1.0 | 本地 Godot editor、scene、run、log、截图和运行时输入的受限桥接。 |
-| **Git Publisher** (`git-publisher`) | 1.6.0 | 可独立热更新的 GitHub 建库、指定文件提交、推送与 Release 插件，复用 Git Credential Manager 授权。 |
+| **Git Publisher** (`git-publisher`) | 1.6.3 | 可热更新的 GitHub 发布插件，支持已有仓库精准远端更新、Release 资产和 GCM 授权。 |
+| **EXE Packager Toolkit** (`exe-packager-toolkit`) | 0.1.1 | 有界 Windows 单文件 EXE 封装，要求源 SHA 和 PE 校验。 |
+| **Offline ASR Toolkit** (`offline-asr-toolkit`) | 0.1.0 | 使用本地 SHA 锁定模型，处理已授权工作区内的离线语音转写。 |
+| **Remotion Toolkit** (`remotion-toolkit`) | 0.1.2 | 工作区内 Remotion 打包、逐帧／视频渲染与共享依赖核验。 |
+| **TestOnline LAN Host** (`testonline-host`) | 0.1.2 | 对明确选定的本地 HTML 提供受管局域网 HTTP/HTTPS 托管，运行时选择私网地址。 |
 | **Local GPT-SoVITS** (`gpt-sovits-local`) | 0.2.2 | 完整本地 v2Pro 工具链：参考/音频预处理、ASR、数据集准备、训练、批量推理与 WebUI/API 生命周期。 |
 | **PDF Toolkit** (`pdf-toolkit`) | 0.6.0 | 有界 PDF 结构检查、文本搜索、outline 读取与独立页面渲染。 |
 | **Storyboard ChatGPT Web** (`storyboard-chatgpt-web`) | 0.2.0 | 基于 ChatGPT Web 原生生图／编辑的分镜执行器，可选 GENERATE_ONLY 或独立原生 Visual Judge，保留精确图片／provenance 恢复与 PASS-only canonical。 |
@@ -446,7 +450,7 @@ python -m venv .build-venv
 
 ### 发布 GitHub Release
 
-仓库 push 与 GitHub Release 明确分离。Git Publisher 1.6.0 继续保持项目无关，保留 `status`、`connect`、`commit`、`push`、`release-assets`，并新增 `first-publication-preflight`、`init-local-repository`、`create-github-repository`、`initial-commit` 四个首次建库动作，不再要求为每个新项目单独注册 Node 发布任务。选择性 `commit` 只接受显式路径白名单，并支持经过严格确认的 Git tracked deletion；staged 集合核验会关闭 rename detection，因此“旧路径删除 + 新路径新增”的迁移不会再被误判成白名单缺项。`push` 只作用于当前选中仓库的当前命名分支和既有、无凭据的 GitHub HTTPS `origin`，禁止 force push。原有 Git Publisher 动作仍可选传 workspace-relative POSIX `repo_path`（默认 `.`），新增的四个首次发布动作则必须显式指定 `repo_path`，因此同一个 FolderBridge 项目工作区可以包含一个独立发布的 nested Git repository，同时继续严格限制在 workspace 内，并要求选中目录本身精确等于 Git repo root。通用 `release-assets` 只作用于当前选中的工作区仓库，接受受限 tag/title 与显式普通文件白名单；tracked 内容必须干净、当前分支必须已与 origin 对齐，禁止移动既有 tag 与 force push，同时允许显式未跟踪构建产物使用 GitHub 稳定的 ASCII Release 文件名上传，并可附带面向用户显示的独立标签。资产在任何远端修改前都会做 SHA-256 校验并复制为临时快照，长时间上传以宿主托管 Job 运行。Release 认证直接复用已经通过浏览器授权的 Git Credential Manager 账号：隔离 worker 从 GCM 取得凭据，只在本次操作期间通过子进程环境交给 `gh.exe`。任何项目专用的版本读取、构建规则、release commit 约定、固定资产名，以及 token/PAT/password 或任意 Git/`gh` 命令输入，都不属于 Git Publisher。
+仓库 push 与 GitHub Release 明确分离。Git Publisher 1.6.2 继续保持项目无关，保留 `status`、`connect`、`commit`、`push`、`release-assets`，并新增 `first-publication-preflight`、`init-local-repository`、`create-github-repository`、`initial-commit` 四个首次建库动作，不再要求为每个新项目单独注册 Node 发布任务。选择性 `commit` 只接受显式路径白名单，并支持经过严格确认的 Git tracked deletion；staged 集合核验会关闭 rename detection，因此“旧路径删除 + 新路径新增”的迁移不会再被误判成白名单缺项。`push` 只作用于当前选中仓库的当前命名分支和既有、无凭据的 GitHub HTTPS `origin`，禁止 force push。原有 Git Publisher 动作仍可选传 workspace-relative POSIX `repo_path`（默认 `.`），新增的四个首次发布动作则必须显式指定 `repo_path`，因此同一个 FolderBridge 项目工作区可以包含一个独立发布的 nested Git repository，同时继续严格限制在 workspace 内，并要求选中目录本身精确等于 Git repo root。通用 `release-assets` 只作用于当前选中的工作区仓库，接受受限 tag/title 与显式普通文件白名单；tracked 内容必须干净、当前分支必须已与 origin 对齐，禁止移动既有 tag 与 force push，同时允许显式未跟踪构建产物使用 GitHub 稳定的 ASCII Release 文件名上传，并可附带面向用户显示的独立标签。资产在任何远端修改前都会做 SHA-256 校验并复制为临时快照，长时间上传以宿主托管 Job 运行。Release 认证直接复用已经通过浏览器授权的 Git Credential Manager 账号：隔离 worker 从 GCM 取得凭据，只在本次操作期间通过子进程环境交给 `gh.exe`。任何项目专用的版本读取、构建规则、release commit 约定、固定资产名，以及 token/PAT/password 或任意 Git/`gh` 命令输入，都不属于 Git Publisher。
 
 FolderBridge 自己的仓库级 `.github/workflows/release-windows.yml` 是项目专用发布路径：当最终 commit 标题严格为 `Release FolderBridge <version>` 时，它会独立重新读取版本、执行完整 Windows 测试、构建并验证 EXE，然后创建或修复对应 Release。已有 tag 只有在确实指向同一个 release commit 时才会被接受；已有 Release 可以重新上传两个固定资产并重新标记为 Latest。
 

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import queue
 import subprocess
 import sys
@@ -57,6 +58,34 @@ def _json(executable: Path, *args: str) -> dict[str, Any]:
     if not isinstance(payload, dict):
         raise RuntimeError(f"{' '.join(args)} returned a non-object JSON payload")
     return payload
+
+
+def _testonline_external_import_smoke(executable: Path) -> None:
+    """Import the actual external service in the frozen child, without binding ports."""
+    if str(ROOT) not in sys.path:
+        sys.path.insert(0, str(ROOT))
+    from folderbridge_mcp.extensions import load_extension
+    from folderbridge_mcp.user_paths import internal_child_config_root_environment, user_config_root
+
+    plugin = ROOT / "Plugins" / "extensions" / "testonline-host"
+    if not plugin.is_dir():
+        return  # TestOnline is optional in checkouts without the external plugin.
+    record = load_extension(plugin, bundled=False)
+    env = os.environ.copy()
+    env.update(internal_child_config_root_environment(user_config_root()))
+    env["PYINSTALLER_RESET_ENVIRONMENT"] = "1"
+    with tempfile.TemporaryDirectory(prefix="folderbridge-testonline-import-") as temp:
+        result = subprocess.run(
+            [str(executable), "testonline-service", "--extension-path", str(record.path),
+             "--expected-sha256", record.sha256,
+             "--root", temp, "--bind-ip", "127.0.0.1", "--state-dir", temp,
+             "--check-import"],
+            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            env=env, check=False, timeout=45,
+        )
+    if result.returncode != 0:
+        detail = result.stderr.decode("utf-8", errors="replace").strip()[-1500:]
+        raise RuntimeError(f"frozen TestOnline external import failed: {detail}")
 
 
 def _mcp_lifecycle_smoke(executable: Path) -> tuple[list[dict[str, Any]], dict[str, Any]]:
@@ -199,6 +228,7 @@ def verify(executable: Path) -> dict[str, Any]:
     if version != expected_version:
         raise RuntimeError(f"version smoke mismatch: expected {expected_version!r}, got {version!r}")
 
+    _testonline_external_import_smoke(executable)
     mcp_tool_list, mcp_info = _mcp_lifecycle_smoke(executable)
     mcp_tools = {
         str(tool.get("name")): tool
@@ -353,6 +383,7 @@ def verify(executable: Path) -> dict[str, Any]:
         "bundled_skill_packs": sorted(bundled_skill_packs),
         "engineering_skills": sorted(actual_skills),
         "mcp_job_management": True,
+        "testonline_external_import": True,
         "mcp_continuity": continuity,
         "mcp_tool_surface": tool_surface,
     }

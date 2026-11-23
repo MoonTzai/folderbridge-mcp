@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 import os
@@ -11,7 +12,7 @@ import sys
 import tempfile
 from pathlib import Path, PurePosixPath
 from typing import Any
-from urllib.parse import urlsplit
+from urllib.parse import quote, urlsplit
 
 from folderbridge_mcp.extension_api import owned_process_group_kwargs, terminate_owned_process_tree
 
@@ -19,6 +20,7 @@ from folderbridge_mcp.extension_api import owned_process_group_kwargs, terminate
 MAX_OUTPUT = 32_000
 MAX_COMMIT_FILE_BYTES = 100 * 1024 * 1024
 MAX_COMMIT_PATHS = 128
+MAX_REMOTE_FILE_BYTES = 6 * 1024 * 1024
 MAX_RELEASE_ASSET_BYTES = 2 * 1024 * 1024 * 1024 - 1
 MAX_RELEASE_ASSETS = 64
 RELEASE_GH_TIMEOUT_SECONDS = 115 * 60
@@ -51,6 +53,14 @@ BRANCH_RE = re.compile(r"^[A-Za-z0-9._/-]{1,240}$")
 
 def handle(action: str, params: dict[str, Any], context: dict[str, Any]) -> dict[str, Any]:
     workspace_root = _workspace_root(context)
+    if action in {"remote-update-file", "remote-release-assets", "replace-existing-release-assets"}:
+        if bool(context.get("workspace_read_only")):
+            raise RuntimeError("FolderBridge is read-only; remote GitHub publishing is unavailable")
+        if action == "remote-update-file":
+            return {"repo_path": None, **_remote_update_file(workspace_root, params)}
+        if action == "replace-existing-release-assets":
+            return {"repo_path": None, **_replace_existing_release_assets(workspace_root, params)}
+        return {"repo_path": None, **_remote_release_assets(workspace_root, params)}
     if action in {"first-publication-preflight", "init-local-repository", "create-github-repository", "initial-commit"} and "repo_path" not in params:
         raise RuntimeError("first publication requires an explicitly selected repo_path")
     root, repo_path = _repo_root(workspace_root, params.get("repo_path"))
@@ -1011,6 +1021,444 @@ def _release_assets(
             "force_push": False,
         },
     }
+
+
+
+# Existing remote repository publication WITHOUT changing or creating a local Git repository.
+# The source is a regular file in the selected FolderBridge workspace; the remote
+# is explicitly identified by owner/repository, stable GitHub repository ID, branch
+# and expected branch HEAD. Only one existing remote file can be replaced per call.
+REMOTE_SHA40 = re.compile(r"^[0-9a-f]{40}$")
+REMOTE_SHA256 = re.compile(r"^[0-9a-f]{64}$")
+
+
+def _remote_expected_sha(raw: Any, *, name: str, size: int) -> str:
+    if not isinstance(raw, str) or not re.fullmatch(r"[0-9a-f]{" + str(size) + r"}", raw):
+        raise RuntimeError(f"{name} must be an exact lowercase {size}-character hexadecimal digest")
+    return raw
+
+
+def _remote_source(root: Path, raw_path: Any, raw_sha256: Any) -> dict[str, Any]:
+    # Reuse the established workspace confinement, link/reparse denial, secret
+    # filename filtering, file stability and size/hash checks of Release assets.
+    expected = _remote_expected_sha(raw_sha256, name="source SHA256", size=64)
+    item = _clean_release_assets(root, [{"path": raw_path, "name": "Remote-Source.bin"}])[0]
+    if item["size"] > MAX_REMOTE_FILE_BYTES:
+        raise RuntimeError(f"remote Contents API source exceeds {MAX_REMOTE_FILE_BYTES} bytes")
+    if item["sha256"] != expected:
+        raise RuntimeError("remote source SHA256 differs from the explicitly approved source")
+    return item
+
+
+def _git_blob_sha(raw: bytes) -> str:
+    return hashlib.sha1(b"blob " + str(len(raw)).encode("ascii") + b"\x00" + raw).hexdigest()
+
+
+def _remote_target_path(raw: Any) -> str:
+    if (
+        not isinstance(raw, str) or not raw or len(raw) > 1024
+        or "\x00" in raw or "\\" in raw or raw != raw.strip()
+    ):
+        raise RuntimeError("remote path must be a non-empty bounded POSIX path")
+    rel = PurePosixPath(raw)
+    if rel.is_absolute() or ".." in rel.parts or not rel.parts or rel.as_posix() != raw:
+        raise RuntimeError("remote path is not a normalized existing-file path")
+    if any(part.lower() in REPO_DENIED_PARTS for part in rel.parts):
+        raise RuntimeError("remote path cannot target Git/dependency internals")
+    basename = rel.name.lower()
+    if (basename in DENIED_BASENAMES or basename.startswith(".env.")
+            or Path(basename).suffix.lower() in DENIED_SUFFIXES):
+        raise RuntimeError("remote path cannot target a credential-like file")
+    return raw
+
+
+def _remote_identity(root: Path, raw: dict[str, Any], token: str) -> dict[str, Any]:
+    owner = raw.get("owner")
+    repo = raw.get("repo")
+    branch = raw.get("branch")
+    repo_id = raw.get("repo_id")
+    if not isinstance(owner, str) or not re.fullmatch(r"[A-Za-z0-9-]{1,39}", owner):
+        raise RuntimeError("remote owner must be one explicit GitHub personal-account login")
+    if (not isinstance(repo, str) or not re.fullmatch(r"[A-Za-z0-9_.-]{1,100}", repo)
+            or repo in {".", ".."} or repo.endswith(".git")):
+        raise RuntimeError("remote repository name is invalid")
+    if not isinstance(repo_id, int) or isinstance(repo_id, bool) or repo_id < 1:
+        raise RuntimeError("remote repository identity requires a positive GitHub repo_id")
+    if not isinstance(branch, str) or not BRANCH_RE.fullmatch(branch):
+        raise RuntimeError("remote branch name is invalid")
+    if _run_git(root, "check-ref-format", f"refs/heads/{branch}", check=False).returncode != 0:
+        raise RuntimeError("remote branch name is not a valid Git ref")
+    _validate_origin(f"https://github.com/{owner}/{repo}.git")
+    full_name = f"{owner}/{repo}"
+    who = _json_gh_response(_run_gh(root, "api", "user", token=token, timeout=60), "GitHub authenticated user")
+    if str(who.get("login", "")).casefold() != owner.casefold():
+        raise RuntimeError("remote publishing requires the authenticated personal account to match the owner")
+    info = _json_gh_response(
+        _run_gh(root, "api", f"repos/{full_name}", token=token, timeout=60),
+        "GitHub remote repository",
+    )
+    returned_owner = info.get("owner")
+    if (type(info.get("id")) is not int or info["id"] != repo_id
+            or not isinstance(returned_owner, dict)
+            or str(returned_owner.get("login", "")).casefold() != owner.casefold()
+            or str(info.get("full_name", "")).casefold() != full_name.casefold()):
+        raise RuntimeError("GitHub remote repository identity does not match approved owner/name/repo_id")
+    if info.get("archived") or info.get("disabled") or not isinstance(info.get("permissions"), dict) or info["permissions"].get("push") is not True:
+        raise RuntimeError("GitHub remote repository is archived/disabled or the credential has no push permission")
+    head_data = _json_gh_response(
+        _run_gh(root, "api", f"repos/{full_name}/branches/{quote(branch, safe='')}", token=token, timeout=60),
+        "GitHub remote branch",
+    )
+    commit_info = head_data.get("commit")
+    head = commit_info.get("sha") if isinstance(commit_info, dict) else None
+    if not isinstance(head, str) or not REMOTE_SHA40.fullmatch(head):
+        raise RuntimeError("GitHub remote branch did not return a valid commit SHA")
+    return {"owner": owner, "repo": repo, "repo_id": repo_id, "full_name": full_name, "branch": branch, "head": head}
+
+
+def _remote_file_info(root: Path, identity: dict[str, Any], remote_path: str, token: str) -> dict[str, Any]:
+    endpoint = (
+        f"repos/{identity['full_name']}/contents/{quote(remote_path, safe='/')}"
+        f"?ref={quote(identity['branch'], safe='')}"
+    )
+    info = _json_gh_response(_run_gh(root, "api", endpoint, token=token, timeout=90), "GitHub existing file")
+    if info.get("type") != "file" or not isinstance(info.get("sha"), str) or not REMOTE_SHA40.fullmatch(info["sha"]):
+        raise RuntimeError("remote target must already be a regular GitHub file with a blob SHA")
+    return {"sha": info["sha"], "endpoint": f"repos/{identity['full_name']}/contents/{quote(remote_path, safe='/')}"}
+
+
+def _remote_update_file(root: Path, params: dict[str, Any]) -> dict[str, Any]:
+    source = _remote_source(root, params.get("source_path"), params.get("source_sha256"))
+    target = _remote_target_path(params.get("remote_path"))
+    expected_blob = _remote_expected_sha(params.get("expected_blob_sha"), name="expected blob SHA", size=40)
+    expected_head = _remote_expected_sha(params.get("expected_branch_sha"), name="expected branch SHA", size=40)
+    message = params.get("message")
+    if not isinstance(message, str) or not message.strip() or len(message) > 1000 or any(x in message for x in "\r\n\x00"):
+        raise RuntimeError("remote commit message must be one non-empty line of at most 1000 characters")
+    source_path = root.joinpath(*PurePosixPath(source["path"]).parts)
+    snapshot = source_path.read_bytes()
+    if len(snapshot) != source["size"] or hashlib.sha256(snapshot).hexdigest() != source["sha256"]:
+        raise RuntimeError("remote source bytes changed after preflight; refusing publication")
+    intended_blob = _git_blob_sha(snapshot)
+    token = _github_token_from_gcm(root)
+    identity = _remote_identity(root, params, token)
+    remote = _remote_file_info(root, identity, target, token)
+
+    # An exact-content no-op is safe on retry after an ambiguous HTTP response.
+    # It is not claimed as proof that this plugin authored the existing commit.
+    if remote["sha"] == intended_blob:
+        return {**identity, "updated": False, "already_current": True, "remote_path": target,
+                "source_sha256": source["sha256"], "blob_sha": intended_blob}
+    if remote["sha"] != expected_blob:
+        raise RuntimeError("remote file blob SHA changed: another publisher updated the target; refusing overwrite")
+    if identity["head"] != expected_head:
+        raise RuntimeError("remote branch SHA changed since approval; inspect new HEAD before publication")
+
+    payload = {
+        "message": message.strip(), "content": base64.b64encode(snapshot).decode("ascii"),
+        "sha": expected_blob, "branch": identity["branch"],
+    }
+    with tempfile.TemporaryDirectory(prefix="git-publisher-remote-write-") as temporary:
+        request_file = Path(temporary) / "request.json"
+        request_file.write_text(json.dumps(payload, ensure_ascii=True, separators=(",", ":")), encoding="utf-8")
+        update = _json_gh_response(
+            _run_gh(root, "api", "-X", "PUT", remote["endpoint"], "--input", str(request_file),
+                    token=token, timeout=120),
+            "GitHub remote file commit",
+        )
+    content = update.get("content")
+    commit = update.get("commit")
+    commit_sha = commit.get("sha") if isinstance(commit, dict) else None
+    if (not isinstance(content, dict) or content.get("sha") != intended_blob
+            or not isinstance(commit_sha, str) or not REMOTE_SHA40.fullmatch(commit_sha)):
+        raise RuntimeError("GitHub remote file update returned no matching blob/commit; inspect before retry")
+    verified = _remote_file_info(root, identity, target, token)
+    if verified["sha"] != intended_blob:
+        raise RuntimeError("GitHub remote file readback does not match the published Git blob")
+    return {**identity, "updated": True, "already_current": False, "remote_path": target,
+            "source_sha256": source["sha256"], "blob_sha": intended_blob, "commit": commit_sha,
+            "safety": {"existing_file_only": True, "expected_old_blob": True,
+                       "expected_branch_head": True, "expected_repo_id": True,
+                       "credential_manager_only": True, "no_local_git_repository": True}}
+
+
+def _gh_not_found(result: subprocess.CompletedProcess[bytes]) -> bool:
+    if result.returncode == 0:
+        return False
+    message = (result.stderr + result.stdout).decode("utf-8", errors="replace")
+    return bool(re.search(r"(?:\b404\b|\bnot found\b)", message, re.IGNORECASE))
+
+
+def _remote_tag_sha(root: Path, identity: dict[str, Any], tag: str, token: str) -> str | None:
+    endpoint = f"repos/{identity['full_name']}/git/ref/tags/{quote(tag, safe='')}"
+    response = _run_gh(root, "api", endpoint, token=token, check=False, timeout=60)
+    if _gh_not_found(response):
+        return None
+    if response.returncode != 0:
+        raise RuntimeError("GitHub remote tag inspection failed: " + _redact(response.stderr.decode("utf-8", errors="replace")))
+    record = _json_gh_response(response, "GitHub remote tag")
+    obj = record.get("object")
+    if not isinstance(obj, dict) or obj.get("type") not in {"commit", "tag"}:
+        raise RuntimeError("remote tag has an unsupported target")
+    if obj.get("type") == "commit":
+        sha = obj.get("sha")
+    else:
+        tag_sha = obj.get("sha")
+        if not isinstance(tag_sha, str) or not REMOTE_SHA40.fullmatch(tag_sha):
+            raise RuntimeError("remote annotated tag object SHA is invalid")
+        tag_record = _json_gh_response(
+            _run_gh(root, "api", f"repos/{identity['full_name']}/git/tags/{tag_sha}",
+                    token=token, timeout=60),
+            "GitHub annotated tag",
+        )
+        tag_obj = tag_record.get("object")
+        if not isinstance(tag_obj, dict) or tag_obj.get("type") != "commit":
+            raise RuntimeError("nested annotated tags require independent review")
+        sha = tag_obj.get("sha")
+    if not isinstance(sha, str) or not REMOTE_SHA40.fullmatch(sha):
+        raise RuntimeError("remote tag commit SHA is invalid")
+    return sha
+
+
+def _replace_existing_release_assets(root: Path, params: dict[str, Any]) -> dict[str, Any]:
+    """Replace only pinned existing Release assets without moving/deleting the tag or Release.
+
+    This is intentionally separate from first-time remote-release-assets. Every old
+    asset has an exact ID and digest lease; a prior partial retry may be accepted
+    only when its new digest and expected label already match.
+    """
+    raw_assets = params.get("assets")
+    if not isinstance(raw_assets, list) or not 1 <= len(raw_assets) <= MAX_RELEASE_ASSETS:
+        raise RuntimeError("existing Release replacement requires 1-64 explicit assets")
+    cleaned_inputs = []
+    for raw in raw_assets:
+        if not isinstance(raw, dict):
+            raise RuntimeError("existing Release assets must be exact objects")
+        if "name" not in raw:
+            raise RuntimeError("existing Release replacement requires each existing asset name")
+        _remote_expected_sha(raw.get("sha256"), name="new Release asset SHA256", size=64)
+        _remote_expected_sha(raw.get("expected_asset_sha256"), name="old Release asset SHA256", size=64)
+        if type(raw.get("expected_asset_id")) is not int or raw["expected_asset_id"] < 1:
+            raise RuntimeError("existing Release replacement requires a positive old asset ID")
+        cleaned_inputs.append({k: raw[k] for k in ("path", "name", "label") if k in raw})
+
+    assets = _clean_release_assets(root, cleaned_inputs)
+    for raw, asset in zip(raw_assets, assets):
+        if raw["sha256"] != asset["sha256"]:
+            raise RuntimeError("new Release source SHA256 changed: " + asset["path"])
+
+    expected_head = _remote_expected_sha(
+        params.get("expected_branch_sha"), name="expected branch SHA", size=40,
+    )
+    expected_tag = _remote_expected_sha(
+        params.get("expected_tag_commit_sha"), name="expected existing tag commit SHA", size=40,
+    )
+    release_id = params.get("expected_release_id")
+    if type(release_id) is not int or release_id < 1:
+        raise RuntimeError("existing Release replacement requires the exact positive Release ID")
+    tag = _clean_release_tag(root, params.get("tag"))
+    token = _github_token_from_gcm(root)
+    identity = _remote_identity(root, params, token)
+    if identity["head"] != expected_head:
+        raise RuntimeError("remote branch HEAD changed; refusing existing Release replacement")
+    if _remote_tag_sha(root, identity, tag, token) != expected_tag:
+        raise RuntimeError("existing Release tag commit SHA changed; no tag rewrite is permitted")
+
+    def fetch_release() -> dict[str, Any]:
+        record = _json_gh_response(
+            _run_gh(
+                root, "api",
+                f"repos/{identity['full_name']}/releases/tags/{quote(tag, safe='')}",
+                token=token, timeout=60,
+            ),
+            "GitHub existing Release",
+        )
+        if (
+            type(record.get("id")) is not int or record["id"] != release_id
+            or record.get("tag_name") != tag
+            or record.get("draft") is not False
+        ):
+            raise RuntimeError("existing Release identity/tag or published state changed")
+        if not isinstance(record.get("assets"), list):
+            raise RuntimeError("GitHub existing Release has no verifiable asset inventory")
+        inventory = record["assets"]
+        names = [item.get("name") for item in inventory if isinstance(item, dict)]
+        if len(names) != len(inventory) or len(set(names)) != len(names):
+            raise RuntimeError("existing Release asset inventory contains invalid/duplicate names")
+        return record
+
+    original_release = fetch_release()
+    original_assets = {item["name"]: item for item in original_release["assets"]}
+    original_header = {
+        key: original_release.get(key)
+        for key in ("name", "draft", "prerelease", "target_commitish")
+    }
+    explicit_names = {asset["name"] for asset in assets}
+    untouched_assets = {
+        name: (item.get("id"), item.get("size"), item.get("digest"), item.get("label"))
+        for name, item in original_assets.items() if name not in explicit_names
+    }
+
+    def examine(record: dict[str, Any]) -> tuple[list[dict[str, Any]], list[str]]:
+        inventory = {item["name"]: item for item in record["assets"]}
+        pending = []
+        already = []
+        for raw, asset in zip(raw_assets, assets):
+            remote = inventory.get(asset["name"])
+            if not isinstance(remote, dict):
+                raise RuntimeError("expected existing Release asset is missing: " + asset["name"])
+            digest = remote.get("digest")
+            if not isinstance(digest, str) or not digest.startswith("sha256:"):
+                raise RuntimeError("old Release asset lacks a verified SHA256 digest: " + asset["name"])
+            old = "sha256:" + raw["expected_asset_sha256"]
+            target = "sha256:" + asset["sha256"]
+            label_ok = asset.get("label") is None or remote.get("label") == asset["label"]
+            if digest == target and remote.get("size") == asset["size"] and label_ok:
+                already.append(asset["name"])
+            elif (digest == old and type(remote.get("id")) is int
+                  and remote["id"] == raw["expected_asset_id"]):
+                pending.append(asset)
+            else:
+                raise RuntimeError("old Release asset ID/SHA changed; refusing replacement: " + asset["name"])
+        return pending, already
+
+    pending, already = examine(original_release)
+    if pending:
+        with tempfile.TemporaryDirectory(prefix="git-publisher-existing-release-") as directory:
+            uploads = _prepare_release_upload_paths(root, pending, Path(directory))
+            # Recheck leases after snapshot and immediately before any destructive --clobber.
+            if _remote_tag_sha(root, identity, tag, token) != expected_tag:
+                raise RuntimeError("Release tag changed before upload")
+            if _remote_identity(root, params, token)["head"] != expected_head:
+                raise RuntimeError("branch head changed before Release upload")
+            latest = fetch_release()
+            if latest["id"] != release_id:
+                raise RuntimeError("existing Release identity changed before upload")
+            rerun_pending, _ = examine(latest)
+            if [x["name"] for x in rerun_pending] != [x["name"] for x in pending]:
+                raise RuntimeError("Release assets changed between snapshot and upload; retry after inspection")
+            _run_gh(
+                root, "release", "upload", tag, *uploads, "--clobber",
+                "--repo", identity["full_name"],
+                token=token, timeout=RELEASE_GH_TIMEOUT_SECONDS,
+            )
+
+    final_release = fetch_release()
+    if any(final_release.get(key) != val for key, val in original_header.items()):
+        raise RuntimeError("existing Release metadata unexpectedly changed")
+    final_assets = {item["name"]: item for item in final_release["assets"]}
+    for name, reference in untouched_assets.items():
+        item = final_assets.get(name)
+        if item is None or (item.get("id"), item.get("size"), item.get("digest"), item.get("label")) != reference:
+            raise RuntimeError("an unspecified existing Release asset changed: " + name)
+    for asset in assets:
+        remote = final_assets.get(asset["name"])
+        if remote is None or remote.get("size") != asset["size"]:
+            raise RuntimeError("Release asset size/readback mismatch: " + asset["name"])
+        if remote.get("digest") != "sha256:" + asset["sha256"]:
+            raise RuntimeError("Release asset SHA256/readback mismatch: " + asset["name"])
+        if asset.get("label") is not None and remote.get("label") != asset["label"]:
+            raise RuntimeError("Release asset label/readback mismatch: " + asset["name"])
+    if _remote_tag_sha(root, identity, tag, token) != expected_tag:
+        raise RuntimeError("existing Release tag moved during asset replacement")
+    if _remote_identity(root, params, token)["head"] != expected_head:
+        raise RuntimeError("remote branch moved during existing Release replacement")
+    return {
+        **identity, "tag": tag, "release_id": release_id, "expected_tag_commit_sha": expected_tag,
+        "replaced": [asset["name"] for asset in pending],
+        "already_current": already,
+        "assets": assets, "url": final_release.get("html_url"),
+        "safety": {
+            "existing_release_id_pinned": True, "old_asset_id_and_sha_pinned": True,
+            "new_asset_sha_pinned": True, "tag_rewrite": False, "release_deletion": False,
+            "no_local_git_repository": True, "credential_manager_only": True,
+            "unlisted_assets_preserved": True,
+        },
+    }
+
+
+def _remote_release_assets(root: Path, params: dict[str, Any]) -> dict[str, Any]:
+    raw_assets = params.get("assets")
+    if not isinstance(raw_assets, list) or not raw_assets or len(raw_assets) > MAX_RELEASE_ASSETS:
+        raise RuntimeError("remote Release requires an explicit bounded asset list")
+    for raw in raw_assets:
+        if not isinstance(raw, dict) or "sha256" not in raw:
+            raise RuntimeError("every remote Release asset requires a source SHA256")
+        _remote_expected_sha(raw["sha256"], name="Release asset SHA256", size=64)
+    stripped = [{k: v for k, v in value.items() if k != "sha256"} for value in raw_assets]
+    assets = _clean_release_assets(root, stripped)
+    for raw, asset in zip(raw_assets, assets):
+        if raw["sha256"] != asset["sha256"]:
+            raise RuntimeError(f"remote Release asset SHA256 changed: {asset['path']}")
+    expected_head = _remote_expected_sha(params.get("expected_branch_sha"), name="expected branch SHA", size=40)
+    latest = params.get("latest", True)
+    if not isinstance(latest, bool):
+        raise RuntimeError("remote Release latest flag must be a boolean")
+    tag = _clean_release_tag(root, params.get("tag"))
+    title = _clean_release_title(params.get("title"))
+    token = _github_token_from_gcm(root)
+    identity = _remote_identity(root, params, token)
+    if identity["head"] != expected_head:
+        raise RuntimeError("remote branch SHA changed since Release approval; refusing to create a tag")
+    existing_tag = _remote_tag_sha(root, identity, tag, token)
+    if existing_tag is not None and existing_tag != expected_head:
+        raise RuntimeError("remote Release tag already targets a different commit")
+    current_release = _run_gh(root, "release", "view", tag, "--repo", identity["full_name"],
+                              token=token, check=False, timeout=60)
+    if current_release.returncode == 0:
+        raise RuntimeError("remote Release already exists: refusing to overwrite or re-upload assets")
+    if not _gh_not_found(current_release):
+        raise RuntimeError("remote Release preflight could not distinguish absent Release from an error")
+
+    with tempfile.TemporaryDirectory(prefix="git-publisher-remote-release-") as directory:
+        temp_root = Path(directory)
+        uploads = _prepare_release_upload_paths(root, assets, temp_root)
+        # Source checksum, branch and tag are all inspected before any remote mutation.
+        if existing_tag is None:
+            request_file = temp_root / "tag-request.json"
+            request_file.write_text(
+                json.dumps({"ref": f"refs/tags/{tag}", "sha": expected_head}, separators=(",", ":")),
+                encoding="utf-8",
+            )
+            _run_gh(root, "api", "-X", "POST", f"repos/{identity['full_name']}/git/refs",
+                    "--input", str(request_file), token=token, timeout=90)
+        if _remote_tag_sha(root, identity, tag, token) != expected_head:
+            raise RuntimeError("remote Release tag verification failed; Release assets were not uploaded")
+        _run_gh(
+            root, "release", "create", tag, *uploads, "--verify-tag", "--title", title,
+            "--notes", "", "--latest" if latest else "--latest=false",
+            "--repo", identity["full_name"], token=token, timeout=RELEASE_GH_TIMEOUT_SECONDS,
+        )
+
+    verified = _json_gh_response(
+        _run_gh(root, "release", "view", tag, "--repo", identity["full_name"],
+                "--json", "tagName,url,assets", token=token, timeout=120),
+        "GitHub remote Release readback",
+    )
+    if verified.get("tagName") != tag or not isinstance(verified.get("url"), str) or not verified.get("url"):
+        raise RuntimeError("remote Release tag or URL readback mismatch")
+    remote_assets = verified.get("assets")
+    if not isinstance(remote_assets, list):
+        raise RuntimeError("remote Release readback did not include assets")
+    by_name = {str(item.get("name")): item for item in remote_assets if isinstance(item, dict)}
+    for asset in assets:
+        item = by_name.get(asset["name"])
+        if item is None or item.get("size") != asset["size"]:
+            raise RuntimeError("remote Release asset missing or size mismatch: " + asset["name"])
+        if asset.get("label") is not None and item.get("label") != asset["label"]:
+            raise RuntimeError("remote Release asset display label mismatch: " + asset["name"])
+        digest = item.get("digest")
+        if digest is not None and digest != "sha256:" + asset["sha256"]:
+            raise RuntimeError("remote Release asset digest mismatch: " + asset["name"])
+    _verify_release_latest(root, identity["full_name"], tag, latest, token)
+    if _remote_tag_sha(root, identity, tag, token) != expected_head:
+        raise RuntimeError("remote Release tag changed during publication")
+    return {**identity, "released": True, "tag": tag, "head": expected_head,
+            "latest_requested": latest, "url": verified["url"], "assets": assets,
+            "safety": {"explicit_remote_repo_id": True, "pinned_branch_commit": True,
+                       "no_tag_rewrite": True, "explicit_asset_sha256": True,
+                       "no_release_overwrite": True, "credential_manager_only": True,
+                       "no_local_git_repository": True}}
 
 
 # Private, repository-local recovery record; always under the selected .git directory.

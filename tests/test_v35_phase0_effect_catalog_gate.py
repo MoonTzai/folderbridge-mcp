@@ -20,6 +20,9 @@ FIRST_PARTY_MANIFESTS = (
 )
 EXPECTED_EFFECTS = {
     "git-publisher": {
+        "remote-update-file": ["external_effect", "foreground"],
+        "remote-release-assets": ["external_effect", "job_owned"],
+        "replace-existing-release-assets": ["external_effect", "job_owned"],
         "first-publication-preflight": [
             "read_only",
             "foreground"

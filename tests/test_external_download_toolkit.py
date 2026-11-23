@@ -46,7 +46,7 @@ class DownloadToolkitTests(unittest.TestCase):
     def test_manifest_is_isolated_download_surface(self) -> None:
         manifest = json.loads((PLUGIN_ROOT / "folderbridge-extension.json").read_text(encoding="utf-8"))
         self.assertEqual(manifest["id"], "download-toolkit")
-        self.assertEqual(manifest["version"], "0.1.0")
+        self.assertEqual(manifest["version"], "0.1.1")
         self.assertEqual(set(manifest["actions"]), {"download", "github-snapshot"})
         self.assertEqual(set(manifest["permissions"]), {"workspace.write", "network.outbound:https"})
         for action in manifest["actions"].values():
@@ -101,6 +101,76 @@ class DownloadToolkitTests(unittest.TestCase):
             )
         self.assertEqual(target["host"], "codeload.github.com")
         self.assertEqual(target["ip"], "198.18.0.94")
+
+    def test_verified_github_release_fake_ip_is_narrow_and_requires_sha(self) -> None:
+        import hashlib
+        release = "https://github.com/MoonTzai/debate-timer/releases/download/v9.3.9/Debate-Timer-v9.3.9.html"
+        fake = [(2, 1, 6, "", ("198.18.0.228", 443))]
+        expected = hashlib.sha256(b"verified HTML").hexdigest()
+        self.assertTrue(plugin._is_github_release_entry(release))
+        self.assertFalse(plugin._is_github_release_entry("https://github.com/MoonTzai/debate-timer/README.md"))
+        self.assertFalse(plugin._is_github_release_entry("https://github.com/MoonTzai/debate-timer/releases/download/v1/a.html?q=1"))
+        self.assertFalse(plugin._is_github_release_entry("https://evil.example.com/MoonTzai/debate-timer/releases/download/v1/a.html"))
+        with patch.object(plugin.socket, "getaddrinfo", return_value=fake):
+            for url in (release, "https://example.com/file", "https://github.com/MoonTzai/debate-timer/README.md"):
+                with self.subTest(url=url), self.assertRaises(plugin.ExtensionError):
+                    plugin._validated_target(url)
+            self.assertEqual(
+                plugin._validated_target(release, allow_verified_github_release_fake_ip=True)["ip"],
+                "198.18.0.228",
+            )
+            self.assertEqual(
+                plugin._validated_target(
+                    "https://release-assets.githubusercontent.com/github-production-release-asset/12345/fixture?token=x",
+                    allow_verified_github_release_fake_ip=True,
+                )["ip"],
+                "198.18.0.228",
+            )
+            for url in ("https://example.com/file", "https://github.com/login", "https://127.0.0.1/"):
+                with self.subTest(url=url), self.assertRaises(plugin.ExtensionError):
+                    plugin._validated_target(url, allow_verified_github_release_fake_ip=True)
+        with tempfile.TemporaryDirectory() as temp:
+            response = _FakeResponse(200, b"verified HTML")
+            with (
+                patch.object(plugin, "_open_download", return_value=(release, response)) as opened,
+            ):
+                plugin.handle(
+                    "download",
+                    {"url": release, "local_path": "release/asset.html", "expected_sha256": expected},
+                    _Context(Path(temp)),
+                )
+                self.assertTrue(opened.call_args.kwargs["allow_verified_github_release_fake_ip"])
+            with patch.object(plugin, "_open_download", return_value=(release, _FakeResponse(200, b"verified HTML"))) as opened:
+                plugin.handle(
+                    "download",
+                    {"url": "https://example.com/file", "local_path": "ordinary.html", "expected_sha256": expected},
+                    _Context(Path(temp)),
+                )
+                self.assertFalse(opened.call_args.kwargs["allow_verified_github_release_fake_ip"])
+
+    def test_verified_release_redirect_remains_host_scoped(self) -> None:
+        release = "https://github.com/MoonTzai/debate-timer/releases/download/v9.3.9/Debate-Timer-v9.3.9.html"
+        cdn = "https://release-assets.githubusercontent.com/github-production-release-asset/12345/file?token=redacted"
+        fake = [(2, 1, 6, "", ("198.18.0.228", 443))]
+        called=[]
+        def responder(target):
+            called.append(target["host"])
+            if target["host"] == "github.com":
+                return _FakeResponse(302, headers={"Location": cdn})
+            if target["host"] == "release-assets.githubusercontent.com":
+                return _FakeResponse(200, b"ok")
+            raise AssertionError("Unexpected host")
+        with patch.object(plugin.socket, "getaddrinfo", return_value=fake), patch.object(plugin, "_request_once", side_effect=responder):
+            final, response=plugin._open_download(release, allow_verified_github_release_fake_ip=True)
+            self.assertEqual(response.read(), b"ok")
+            self.assertEqual(called, ["github.com", "release-assets.githubusercontent.com"])
+            self.assertTrue(final.startswith("https://release-assets.githubusercontent.com/"))
+        with patch.object(plugin.socket, "getaddrinfo", return_value=fake), patch.object(
+            plugin, "_request_once", return_value=_FakeResponse(302, headers={"Location": "https://private.example.com/file"})
+        ) as sent:
+            with self.assertRaises(plugin.ExtensionError):
+                plugin._open_download(release, allow_verified_github_release_fake_ip=True)
+            sent.assert_called_once()
 
     def test_loopback_system_proxy_parser_supports_clash_formats_only(self) -> None:
         self.assertEqual(plugin._parse_loopback_proxy("127.0.0.1:7897"), ("127.0.0.1", 7897))
@@ -163,7 +233,7 @@ class DownloadToolkitTests(unittest.TestCase):
 
     def test_redirect_is_revalidated_before_second_request(self) -> None:
         calls = []
-        def fake_validated(url, *, allow_clash_fake_ip=False):
+        def fake_validated(url, *, allow_clash_fake_ip=False, allow_verified_github_release_fake_ip=False):
             calls.append(url)
             if "private.invalid" in url:
                 raise plugin.ExtensionError("DOWNLOAD_URL_BLOCKED", "blocked")

@@ -1,4 +1,4 @@
-# Download Toolkit 0.1.0
+# Download Toolkit 0.1.1
 
 A public external FolderBridge Extension for **workspace-confined public HTTPS downloads**.
 
@@ -13,7 +13,7 @@ The plugin accepts HTTPS only, port 443 only. It rejects URL userinfo, fragments
 
 Clash Verge is a first-class compatibility target:
 
-- **TUN / Fake-IP** — direct connections remain supported. The RFC 2544 `198.18.0.0/15` Fake-IP range is still rejected for generic downloads; only the fixed `github-snapshot` target `codeload.github.com` may use that range, so TUN compatibility does not turn into a generic SSRF bypass.
+- **TUN / Fake-IP** — direct connections remain supported. The RFC 2544 `198.18.0.0/15` range remains blocked for generic URLs. Two narrowly scoped exceptions exist: the fixed `github-snapshot` target `codeload.github.com`, and an exact `https://github.com/<owner>/<repo>/releases/download/<tag>/<asset>` URL supplied to `download` **together with a full expected SHA-256**. The latter exception can follow only validated GitHub Release URLs and the dedicated `release-assets.githubusercontent.com/github-production-release-asset/` CDN path through HTTPS redirects. Every other hostname or redirect stays blocked on Fake-IP, with TLS SNI/certificate verification and streaming SHA-256 still mandatory for success. This does not grant general access to local/private IPs or permit unpinned GitHub Release downloads through Fake-IP.
 - **Windows System Proxy** — when WinINET System Proxy is enabled and its HTTP/HTTPS proxy endpoint is loopback-only (`127.0.0.0/8`, `::1`, or `localhost`), downloads automatically use an HTTP CONNECT tunnel through that local proxy. Clash/Mihomo mixed-port configurations such as `127.0.0.1:7897` are supported.
 - Remote proxies, proxy credentials, SOCKS-only proxy settings, and non-loopback proxy endpoints are not auto-trusted. If no approved local System Proxy is active, the downloader uses the validated direct/TUN path.
 

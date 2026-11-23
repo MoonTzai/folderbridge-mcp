@@ -3,7 +3,7 @@
   "runtime_abi": 1,
   "id": "download-toolkit",
   "name": "Download Toolkit",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Workspace-confined public HTTPS downloader with streamed size/hash verification, redirect and SSRF defenses, atomic file publish, and safe GitHub source snapshots without executing repository code.",
   "entrypoint": "plugin.py",
   "permissions": [

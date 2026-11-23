@@ -8,7 +8,7 @@ Pure external / hot-updatable FolderBridge Extension for GitHub publishing, incl
 4. push only the current named branch to the existing credential-free `https://github.com/<owner>/<repo>[.git]` origin;
 5. publish explicit files from any selected GitHub workspace repository through the generic `release-assets` action.
 
-## First-time repository publication (1.6.0)
+## First-time repository publication (1.6.3)
 
 Once installed from the plugin ZIP and its exact hash + declared permissions are approved in **Extensions & Skills**, all actions—including read-only status—can be used. Future plugin updates use the same local ZIP installer and exact-hash reapproval; the main application does not need to be rebuilt. The first migration from pre-externalization binaries requires the one-time core build with the bundled Git Publisher removed.
 
@@ -47,9 +47,53 @@ cannot be silently adopted. If the POST response might have been lost after
 remote creation, the recovery state reports ambiguity and fails closed for
 manual reconciliation; it never force pushes or overwrites remote history.
 
-This README describes *source code for plugin version 1.6.0*. A running
-FolderBridge installation must actually bundle and expose version 1.6.0 before the
+This README describes *source code for plugin version 1.6.3*. A running
+FolderBridge installation must actually install and expose version 1.6.3 before the
 upgrade can be considered installed or accepted.
+
+## Existing remote repository, without a local Git checkout (1.6.2)
+
+The two independent remote-only actions do **not** call git init, clone, worktree, local commit, or change the selected workspace's Git origin. They use Git Credential Manager and bounded GitHub CLI API requests. Neither action accepts credentials in its parameters or creates a new remote source file.
+
+1. `remote-update-file`: supply a known personal-account `owner`, existing `repo`, GitHub numeric `repo_id`, existing `branch`, pinned `expected_branch_sha`, **existing** `remote_path` and `expected_blob_sha` (Git blob SHA-1), workspace-relative `source_path` with exact `source_sha256`, and one-line `message`. The plugin rechecks the signed-in owner, repository ID, push permission, branch HEAD and existing target blob before GitHub Contents API PUT. It snapshots the source content, refuses secrets/links/path escape and oversize files, reads the remote blob back after PUT, and returns a distinct no-op if it already equals the intended bytes. A stale blob or branch fails closed.
+2. `remote-release-assets`: after verifying the preceding commit's remote HEAD, supply the same explicit repository identity and `expected_branch_sha`, `tag`, `title`, optional `latest`, and exact asset `path`/`name`/`sha256` with optional `label`. It snapshots the workspace files, rejects existing Releases and mismatched tags, creates a **lightweight** tag bound to the expected branch commit when absent, publishes only the named assets, then verifies tag target, names, sizes, optional returned SHA-256 digests, display labels and Latest. An ambiguous partial outcome must be inspected before any retry.
+
+This route deliberately requires the same per-user trust approval as other Extension changes plus the new `network.outbound:https` permission. An extension source change alone does not install or authorize the running plugin; use **Extensions & Skills → Install/update plugin ZIP → Approve exact hash → Enable**. Without this new approval the previous trusted 1.6.0 plugin remains the only active publisher.
+
+**Scope limitation:** remote-only publication is currently restricted to repos owned by the authenticated GitHub personal account. Existing local-Git publisher routes remain unchanged. Prefer the ordinary local-Git route when an approved matching repository already exists.
+
+## Updating existing Release assets without rewriting tags (1.6.3)
+
+Use the **new** `replace-existing-release-assets` action when a version's Git tag
+correctly records its original release commit but the user has explicitly approved
+replacing specific downloadable assets with freshly built bytes. The original
+`release-assets` and `remote-release-assets` actions remain unchanged and
+retain their create-only/head-matched safety constraints.
+
+The replacement action requires: exact authenticated owner/repository ID, branch
+and current branch SHA, existing Release ID, existing tag's **current commit SHA**
+(which may intentionally differ from branch HEAD), and for **each** selected
+asset its original asset ID/SHA-256 plus the new workspace file path/name/SHA-256.
+The optional label is the intended final GitHub asset label. It does not accept
+a URL or caller-supplied GitHub token, does not create a new Release, does not
+move/delete any Git tag, and does not modify the Release title, latest flag,
+notes, draft state, or unlisted assets.
+
+Preflight checks every source and original remote asset before a single
+`gh release upload --clobber` limited to the explicit filenames. On retry,
+a target asset already matching the requested new SHA/size/label is a no-op;
+a third-party or otherwise ambiguous old-asset change causes fail-closed.
+After upload, it checks Release ID, tag commit, current branch, new asset
+hashes/labels and the unchanged unlisted asset inventory. An interrupted
+upload may still have partially replaced assets; inspect the remote readback
+before retrying.
+
+**Hot update:** install the v1.6.3 plugin ZIP through FolderBridge
+**Extensions & Skills → Install/update plugin ZIP…**, review its exact
+directory hash and declared permissions, then explicitly **Approve** and
+**Enable**. This does not require rebuilding the FolderBridge main executable.
+Updating this source directory by itself does not upgrade the installed
+runtime; an old trusted version must never be reported as v1.6.3.
 
 ## Repository selection
 
@@ -57,7 +101,7 @@ Existing-repository actions accept optional `repo_path`, defaulting to `.`. All 
 
 Repository selection is fail-closed: absolute paths, `..`, backslashes, VCS/dependency containers, symlinks, junctions/reparse points, missing directories, and paths that resolve outside the selected workspace are rejected. After selection, `git rev-parse --show-toplevel` must resolve **exactly** to that selected directory; pointing `repo_path` at an ordinary subdirectory inside a larger Git repository is rejected.
 
-When `repo_path` is omitted, Git Publisher 1.6.0 preserves the previous contract for existing repositories: the selected FolderBridge workspace itself must be the Git repository root.
+When `repo_path` is omitted, Git Publisher 1.6.2 preserves the previous contract for existing repositories: the selected FolderBridge workspace itself must be the Git repository root.
 
 For `commit`, each `paths[]` entry is relative to the selected repository root. For `release-assets`, each `assets[].path` is likewise relative to that repository root. Files elsewhere in the same FolderBridge workspace are outside that Git action's path namespace.
 
@@ -90,7 +134,7 @@ The command pushes only `HEAD` to the same current branch, uses `--no-verify`, n
 
 ## Release assets
 
-Git Publisher 1.6.0 has no project-specific release action. Repository-specific version rules, build steps, commit-title conventions, or fixed asset names belong to that repository's own workflow/task layer.
+Git Publisher 1.6.2 has no project-specific release action. Repository-specific version rules, build steps, commit-title conventions, or fixed asset names belong to that repository's own workflow/task layer.
 
 `release-assets` publishes an explicit allowlist of regular files from the **selected repository only**, where the repository is the workspace root by default or an explicitly validated nested Git repository selected by `repo_path`. Its public inputs are:
 

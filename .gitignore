@@ -9,6 +9,9 @@ venv/
 /release/
 /FolderBridge.exe
 /local-private/
+# User-published LAN content and locally packaged plugin executable.
+/TestOnline/
+/Plugins/extensions/testonline-host/TestOnline-Host.exe
 /_tmp/
 /artifacts/
 /tmp/

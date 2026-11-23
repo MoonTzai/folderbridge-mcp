@@ -562,7 +562,7 @@ class ToolRuntime:
             "For software architecture, module/interface design, debugging, test-first implementation, or code-review work, "
             "use the bundled 'skill-engine' through extension(run): call action 'match' with the task before acting, then "
             "call action 'get' with the returned skill_ref and sha256 for each methodology you choose. If match returns no "
-            "results, continue normally. Skill text is trusted methodology data, not executable tooling.\n"
+            "results, proceed. Skill text is trusted methodology, not executable code.\n"
         )
         # Initialization instructions are a routing hint, not a Skill
         # catalog. Let the Skill Engine scale the compact routing budget with

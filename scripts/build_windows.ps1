@@ -28,18 +28,28 @@ $publicExternalExtensions = @(
     "chatgpt-web-llm-adapter",
     "comfyui",
     "download-toolkit",
+    "exe-packager-toolkit",
     "ffmpeg-toolkit",
     "ftp-toolkit",
     "godot-ai",
     "git-publisher",
     "gpt-sovits-local",
+    "offline-asr-toolkit",
     "pdf-toolkit",
+    "remotion-toolkit",
     "storyboard-chatgpt-web",
+    "testonline-host",
     "windows-capture-toolkit"
 )
 $externalReleaseDir = Join-Path $projectRoot "release\external-extensions"
 $externalReleaseFileAllowlists = @{
     "git-publisher" = @("folderbridge-extension.json", "plugin.py", "README.md")
+    # Only these public runtime/installer files are released. Never add local
+    # profiles, TLS certificates, workspaces, logs, backups or private notes.
+    "exe-packager-toolkit" = @("folderbridge-extension.json", "plugin.py", "README.md", "install.ps1")
+    "offline-asr-toolkit" = @("folderbridge-extension.json", "plugin.py", "asr_worker.py", "README.md", "install.ps1")
+    "remotion-toolkit" = @("folderbridge-extension.json", "plugin.py", "bridge.cjs", "README.md", "install.ps1")
+    "testonline-host" = @("folderbridge-extension.json", "plugin.py", "server.py", "tls_cert.py", "README.md", "install.ps1")
     "chatgpt-web-llm-adapter" = @(
         "folderbridge-extension.json",
         "plugin.py",
@@ -96,6 +106,14 @@ if (Test-Path -LiteralPath $retiredFileOpsDir -PathType Container) {
 
 Push-Location $projectRoot
 try {
+    Write-Host "Download Toolkit public HTTPS and Clash Fake-IP targeted tests..."
+    & $Python -m unittest discover -s tests -p "test_external_download_toolkit.py" -v
+    if ($LASTEXITCODE -ne 0) { throw "Download Toolkit targeted tests failed: $LASTEXITCODE" }
+    Write-Host "Git Publisher candidate targeted security and hot-update tests..."
+    & $Python -m unittest discover -s tests -p "test_git_publisher*.py" -v
+    if ($LASTEXITCODE -ne 0) { throw "Git Publisher targeted tests failed: $LASTEXITCODE" }
+    & $Python -m unittest discover -s tests -p "test_external_git_publisher_hot_update.py" -v
+    if ($LASTEXITCODE -ne 0) { throw "Git Publisher hot-update tests failed: $LASTEXITCODE" }
     & $Python -c "import PyInstaller" 2>$null
     if ($LASTEXITCODE -ne 0) {
         throw "PyInstaller is missing. Install packaging/requirements-build.txt in an isolated build environment first."
@@ -125,6 +143,12 @@ try {
             throw "Missing bundled Skill Pack source: $packId"
         }
         $pyInstallerArgs += @("--add-data", ($source + ";skill_packs\" + $packId))
+    }
+    # TestOnline's externally installed server.py is loaded dynamically in a
+    # FolderBridge-owned child, so PyInstaller cannot discover its stdlib imports.
+    # Keep service implementation external; bundle only the Python runtime modules.
+    foreach ($module in @("http.server", "socketserver", "mimetypes", "ipaddress", "ssl", "urllib.parse", "html")) {
+        $pyInstallerArgs += @("--hidden-import", $module)
     }
     $pyInstallerArgs += @(
         "--hidden-import", "folderbridge_mcp.extension_worker",
@@ -228,6 +252,10 @@ try {
         Write-Host "Packaged external Extension: $assetName"
         Write-Host "SHA-256: $assetHash"
     }
+
+    # Final artifact-level privacy gate (ZIP entries and EXE bytes), not just source review.
+    & $Python (Join-Path $projectRoot "scripts\audit_release_public_privacy.py")
+    if ($LASTEXITCODE -ne 0) { throw "Public Release artifact privacy check failed: $LASTEXITCODE" }
 
     Write-Host "Built: $executable"
     Write-Host "Bundle verification: $bundleSmoke"

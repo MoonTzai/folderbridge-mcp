@@ -39,11 +39,11 @@ class GitPublisherManifestTests(unittest.TestCase):
     def test_manifest_is_explicit_and_does_not_accept_tokens(self) -> None:
         record = load_extension(EXT_DIR, bundled=False)
         self.assertEqual(record.manifest.extension_id, "git-publisher")
-        self.assertEqual(record.manifest.version, "1.6.0")
-        self.assertEqual(set(record.manifest.actions), {"first-publication-preflight", "init-local-repository", "create-github-repository", "initial-commit", "status", "connect", "commit", "push", "release-assets"})
+        self.assertEqual(record.manifest.version, "1.6.3")
+        self.assertEqual(set(record.manifest.actions), {"first-publication-preflight", "init-local-repository", "create-github-repository", "initial-commit", "status", "connect", "commit", "push", "release-assets", "remote-update-file", "remote-release-assets", "replace-existing-release-assets"})
         self.assertTrue(record.manifest.actions["status"].read_only)
         self.assertEqual(record.manifest.actions["status"].authorization, "global")
-        for name in ("init-local-repository", "create-github-repository", "initial-commit", "connect", "commit", "push", "release-assets"):
+        for name in ("init-local-repository", "create-github-repository", "initial-commit", "connect", "commit", "push", "release-assets", "remote-update-file", "remote-release-assets", "replace-existing-release-assets"):
             self.assertFalse(record.manifest.actions[name].read_only)
             self.assertEqual(record.manifest.actions[name].authorization, "global")
         self.assertIn("git.commit-selected-files", record.manifest.permissions)
@@ -59,6 +59,11 @@ class GitPublisherManifestTests(unittest.TestCase):
         for action in record.manifest.actions.values():
             properties = action.input_schema.get("properties", {})
             self.assertTrue({"token", "password", "pat"}.isdisjoint({str(key).lower() for key in properties}))
+            if action.name in {"remote-update-file", "remote-release-assets", "replace-existing-release-assets"}:
+                self.assertNotIn("repo_path", properties)
+                self.assertIn("repo_id", properties)
+                self.assertIn("expected_branch_sha", properties)
+                continue
             self.assertIn("repo_path", properties)
             if action.name in {"first-publication-preflight", "init-local-repository", "create-github-repository", "initial-commit"}:
                 self.assertIn("repo_path", action.input_schema.get("required", []))

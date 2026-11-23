@@ -117,8 +117,8 @@ jobs:
         shell: pwsh
         run: |
           $assets = @(Get-ChildItem "release/external-extensions" -File | Sort-Object Name)
-          if ($assets.Count -ne 24) {
-            throw "Expected 24 internal external Extension build artifacts (12 ZIP + 12 SHA256); found $($assets.Count)."
+          if ($assets.Count -ne 32) {
+            throw "Expected 32 internal external Extension build artifacts (16 ZIP + 16 SHA256); found $($assets.Count)."
           }
           if ($assets.Name -match 'debate-judge-adapter') {
             throw "Private Debate Judge adapter must never be published as a Release asset."
@@ -128,7 +128,7 @@ jobs:
           }
           $zips = @($assets | Where-Object { $_.Name -like '*.zip' })
           $checksums = @($assets | Where-Object { $_.Name -like '*.zip.sha256' })
-          if ($zips.Count -ne 12 -or $checksums.Count -ne 12) {
+          if ($zips.Count -ne 16 -or $checksums.Count -ne 16) {
             throw "External Extension build artifact shape is incomplete."
           }
           foreach ($zip in $zips) {
@@ -157,8 +157,8 @@ jobs:
             Copy-Item -LiteralPath $_.FullName -Destination (Join-Path $publishDir $_.Name) -Force
           }
           $published = @(Get-ChildItem $publishDir -File | Sort-Object Name)
-          if ($published.Count -ne 13) {
-            throw "Expected 13 curated GitHub Release assets (1 main program + 12 plugins); found $($published.Count)."
+          if ($published.Count -ne 17) {
+            throw "Expected 17 curated GitHub Release assets (1 main program + 16 plugins); found $($published.Count)."
           }
           if ($published.Name -match '\.sha256$') {
             throw "SHA sidecars must not enter GitHub Release assets."
@@ -195,13 +195,17 @@ jobs:
             @{ Id = 'chatgpt-web-llm-adapter'; Name = 'ChatGPT Web LLM Adapter'; Description = 'Test-only fresh-chat local LLM bridge with Launcher-owned one-click service control.' },
             @{ Id = 'comfyui'; Name = 'Local ComfyUI'; Description = 'Local ComfyUI workflow, health, progress, and job bridge.' },
             @{ Id = 'download-toolkit'; Name = 'Download Toolkit'; Description = 'Bounded public HTTPS and GitHub snapshot downloader.' },
+            @{ Id = 'exe-packager-toolkit'; Name = 'EXE Packager Toolkit'; Description = 'Workspace-scoped one-file Windows EXE packaging.' },
             @{ Id = 'ffmpeg-toolkit'; Name = 'FFmpeg Toolkit'; Description = 'Workspace-confined FFmpeg and FFprobe media operations.' },
             @{ Id = 'ftp-toolkit'; Name = 'FTP Toolkit'; Description = 'Workspace-confined FTP and FTPS transfer bridge.' },
             @{ Id = 'godot-ai'; Name = 'Godot AI Local Bridge'; Description = 'Local Godot editor and runtime bridge.' },
             @{ Id = 'git-publisher'; Name = 'Git Publisher'; Description = 'Hot-installable GitHub repository creation, exact-file commit, push and Release publishing.' },
             @{ Id = 'gpt-sovits-local'; Name = 'Local GPT-SoVITS'; Description = 'Local GPT-SoVITS training and inference bridge.' },
+            @{ Id = 'offline-asr-toolkit'; Name = 'Offline ASR Toolkit'; Description = 'Offline transcription with SHA-pinned local models.' },
             @{ Id = 'pdf-toolkit'; Name = 'PDF Toolkit'; Description = 'Bounded PDF inspection, search, and page rendering.' },
+            @{ Id = 'remotion-toolkit'; Name = 'Remotion Toolkit'; Description = 'Remotion rendering and shared dependency integrity bridge.' },
             @{ Id = 'storyboard-chatgpt-web'; Name = 'Storyboard ChatGPT Web'; Description = 'ChatGPT Web native storyboard image generation/editing with optional independent native Visual Judge review.' },
+            @{ Id = 'testonline-host'; Name = 'TestOnline LAN Host'; Description = 'Controlled local HTML hosting over LAN HTTP/HTTPS.' },
             @{ Id = 'windows-capture-toolkit'; Name = 'Windows Capture Toolkit'; Description = 'Bounded one-shot Windows screenshots and exact-window left-click automation.' }
           )
           $assetSpecs = @()
@@ -223,8 +227,8 @@ jobs:
             $assetSpecs += "$($asset.FullName)#Plugin · $($plugin.Name) — $($plugin.Description)"
             $notes.Add("- ``$($asset.Name)`` — $($plugin.Description)")
           }
-          if ($assetSpecs.Count -ne 13) {
-            throw "Expected 13 labeled GitHub Release assets; found $($assetSpecs.Count)."
+          if ($assetSpecs.Count -ne 17) {
+            throw "Expected 17 labeled GitHub Release assets; found $($assetSpecs.Count)."
           }
           $notes.Add('')
           $notes.Add('SHA-256 sidecars are verified during build/CI but are intentionally not published as Release assets.')
@@ -253,8 +257,8 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "Could not verify final GitHub Release assets." }
           $verify = $verifyJson | ConvertFrom-Json
           $remoteNames = @($verify.assets | ForEach-Object { [string]$_.name })
-          if ($remoteNames.Count -ne 13) {
-            throw "Final GitHub Release must contain exactly 13 explicit assets; found $($remoteNames.Count)."
+          if ($remoteNames.Count -ne 17) {
+            throw "Final GitHub Release must contain exactly 17 explicit assets; found $($remoteNames.Count)."
           }
           if ($remoteNames -match '\.sha256$|file-ops-toolkit') {
             throw "Final GitHub Release still contains checksum or retired File Ops assets."

@@ -46,7 +46,7 @@ class GitPublisherExternalHotUpdateTests(unittest.TestCase):
         self.assertFalse((LEGACY_BUNDLED_DIR / "folderbridge-extension.json").exists())
         record = load_extension(EXTERNAL_SOURCE, bundled=False)
         self.assertEqual(record.manifest.extension_id, "git-publisher")
-        self.assertEqual(record.manifest.version, "1.6.0")
+        self.assertEqual(record.manifest.version, "1.6.3")
         self.assertTrue(all(action.authorization == "global" for action in record.manifest.actions.values()))
         self.assertEqual(self.registry.scan()[0].keys(), {"office", "skill-engine"})
 

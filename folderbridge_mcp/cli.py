@@ -97,6 +97,13 @@ def build_parser() -> argparse.ArgumentParser:
     worker = subparsers.add_parser("extension-worker", help=argparse.SUPPRESS)
     worker.add_argument("--extension-path", required=True, help=argparse.SUPPRESS)
     worker.add_argument("--bundled", action="store_true", help=argparse.SUPPRESS)
+    testonline = subparsers.add_parser("testonline-service", help=argparse.SUPPRESS)
+    testonline.add_argument("--extension-path", required=True, help=argparse.SUPPRESS)
+    testonline.add_argument("--expected-sha256", required=True, help=argparse.SUPPRESS)
+    testonline.add_argument("--root", required=True, help=argparse.SUPPRESS)
+    testonline.add_argument("--bind-ip", required=True, help=argparse.SUPPRESS)
+    testonline.add_argument("--state-dir", required=True, help=argparse.SUPPRESS)
+    testonline.add_argument("--check-import", action="store_true", help=argparse.SUPPRESS)
     return parser
 
 
@@ -115,7 +122,7 @@ def _workspace_arguments(parser: argparse.ArgumentParser) -> None:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    if args.command == "extension-worker":
+    if args.command in {"extension-worker", "testonline-service"}:
         try:
             require_internal_child_config_root()
         except ValueError as exc:
@@ -134,6 +141,12 @@ def main(argv: list[str] | None = None) -> int:
         from .extension_worker import worker_main
 
         return worker_main(args.extension_path, bundled=args.bundled)
+    if args.command == "testonline-service":
+        from .testonline_service import run_testonline_service
+
+        return run_testonline_service(args.extension_path, args.expected_sha256,
+                                      args.root, args.bind_ip, args.state_dir,
+                                      check_import=args.check_import)
     if args.command == "skills":
         from .skills import SkillEngine
 

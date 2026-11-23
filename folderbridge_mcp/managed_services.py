@@ -928,7 +928,9 @@ class ManagedServiceManager:
 
     def shutdown(self, loaded_extension_ids: Iterable[str]) -> list[dict[str, Any]]:
         results: list[dict[str, Any]] = []
-        for extension_id in loaded_extension_ids:
+        # Always stop this Launcher-owned LAN service even if its external
+        # plugin was disabled/updated after the host process was started.
+        for extension_id in dict.fromkeys((*loaded_extension_ids, "testonline-host")):
             controller = self.controller(extension_id)
             if controller is None:
                 continue
@@ -950,5 +952,8 @@ def default_managed_service_manager(registry: ExtensionRegistry | None = None) -
     controllers: list[Any] = [ComfyUIServiceController()]
     if registry is not None:
         controllers.append(ChatGPTWebLLMServiceController(registry))
+        # External TestOnline host: startup/shutdown belongs to Launcher, not plugin status.
+        from .testonline_service import TestOnlineServiceController
+        controllers.append(TestOnlineServiceController(registry))
     return ManagedServiceManager(controllers)
 
